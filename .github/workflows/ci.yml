@@ -168,6 +168,10 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
+  android:
+    name: Android
+    uses: ./.github/workflows/android.yml
+
   docker:
     name: Docker image
     runs-on: ubuntu-latest
