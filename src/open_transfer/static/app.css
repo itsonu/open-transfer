@@ -2321,6 +2321,8 @@ body.has-send-bar .toasts {
   }
 }
 
-[tabindex="-1"]:focus {
+[tabindex="-1"]:focus,
+[tabindex="-1"]:focus-visible {
   outline: none;
+  box-shadow: none;
 }
