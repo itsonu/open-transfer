@@ -69,7 +69,7 @@ between **paired** apps carry a signature (§4).
 | ------- | ------- |
 | `GET /info` | `{id, name, form, platform, port, version, accepts, visitors: [{id, name, form, platform}]}` (visitors hidden when a PIN is set and the caller isn't paired) |
 | `POST /hello` body = caller's info | Registers the caller (address = TCP peer address); returns `/info` |
-| `POST /offers` | Offer files (below) → `201 {id, secret, state}` |
+| `POST /offers` | Offer files (below) → `201 {id, secret, state, reason}` (`reason` says why, when it is declined straight away) |
 | `GET /offers/<id>` + `X-OT-Secret` | `{state, reason, files: [{state, received}]}` |
 | `PUT /offers/<id>/files/<n>` + `X-OT-Secret`, `Content-Length` | Raw file bytes → `201 {file}` |
 | `DELETE /offers/<id>` + `X-OT-Secret` | Sender cancels |

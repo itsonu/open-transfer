@@ -346,6 +346,8 @@ def test_not_enough_space_is_declined_up_front(make_node: NodeFactory) -> None:
     alice = owner(a)
     job = send(alice, [device_id(alice, "Bravo")], [("a.bin", b"x" * 11)])
     wait_for(lambda: target_states(alice, job) == {"Bravo": "declined"})
+    (target,) = next(j for j in alice.state()["outgoing"] if j["id"] == job)["targets"]
+    assert target["reason"] == "A file is larger than this device accepts."
 
 
 # ---------------------------------------------------------------------- pairing

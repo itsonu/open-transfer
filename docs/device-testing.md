@@ -11,12 +11,59 @@ a second Android device), all on the **same Wi‑Fi** (not a guest network). An
 iPhone/iPad is a bonus for the browser-only path.
 
 **Install** from the [latest release](https://github.com/itsonu/open-transfer/releases/latest)
-(or a CI run's *Artifacts*): `open-transfer-windows-x64.exe`,
+— or, before a release exists, from a green CI run's **Artifacts** (bottom of the
+run page, signed in to GitHub; each download is a .zip): `open-transfer-windows-x64.exe`,
 `open-transfer-macos-<arch>.dmg`, `open-transfer-android.apk` on both Android
 devices. First launch: allow **Private networks** (Windows firewall), **Local
 Network** (macOS), notifications (Android).
 
-Copy the table into an issue and fill in ✅ / ❌ (+ a note or screenshot for ❌).
+## 0. Let the script do the repetitive part (≈ 15–25 min)
+
+`scripts/device_check.py` drives the **real apps** over your Wi‑Fi and fills in most
+of sections 1–4 and 6 by itself: discovery, names/types, rename, an Android app
+leaving and coming back, pairing by code in both directions (and exactly what a
+QR scan sends), a photo and a 1 GB file in **every direction** between every two
+devices (checked byte for byte, and on Android in Download/Open Transfer),
+one / two / every device, decline, 2‑minute expiry, cancel, too big, a receiver
+leaving mid‑transfer and *Send now*.
+
+You need Python 3.10+ and `adb` ([platform-tools](https://developer.android.com/tools/releases/platform-tools))
+on the computer. Then:
+
+1. Open the Open Transfer app on the computer.
+2. Connect each Android device to adb — USB, or **wireless debugging**:
+   *Settings → Developer options → Wireless debugging → Pair device with pairing code*, then
+   ```sh
+   adb pair 192.168.1.23:37000      # the IP:port and code the phone shows
+   adb connect 192.168.1.23:41000   # the IP:port on the Wireless debugging screen
+   adb devices                      # each device listed as "device"
+   ```
+3. Run (from a checkout, or download just that file):
+   ```sh
+   python scripts/device_check.py --apk open-transfer-android.zip
+   ```
+   `--apk` takes the .apk or the CI artifact .zip and installs it on every connected
+   device first. `--quick` uses a 100 MB file and skips the 2‑minute wait;
+   `--serial <id>` limits it to some devices. With one Android device the
+   one-to-many checks are skipped — connect the tablet too and run it again.
+
+It writes **`device-check-<time>.md`** (✅ / ❌ per check + the checks that need a
+person) and, if anything failed, Android logs next to it — send those files back.
+Run it once on the Windows PC and once on the Mac. Notes:
+
+* The script unpairs the devices it drives before it starts (the first transfers
+  must ask), and leaves the computer paired with each Android device at the end.
+* It deletes the test files it received unless you pass `--keep`.
+* Phone → computer goes through `adb` for the button press, so with wireless
+  debugging that direction is slower than real use.
+
+Then do the rest by hand: everything marked 👤 in the results file, which are the
+on-screen parts below (prompts, the 🔗 badge, the QR camera, drag and drop,
+confirmation dialog, notifications, Wi‑Fi off/on, browsers, Windows ↔ Mac).
+
+## By hand
+
+Copy the tables into an issue and fill in ✅ / ❌ (+ a note or screenshot for ❌).
 
 ## 1. Discovery and identity
 

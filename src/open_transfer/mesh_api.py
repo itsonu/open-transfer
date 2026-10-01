@@ -142,7 +142,14 @@ def register(
             job=str(data.get("job") or ""),
             sender_node=sender_id,
         )
-        return jsonify({"id": session.id, "secret": session.secret, "state": session.state}), 201
+        return jsonify(
+            {
+                "id": session.id,
+                "secret": session.secret,
+                "state": session.state,
+                "reason": session.reason,
+            }
+        ), 201
 
     @app.get(f"{P2P}/offers/<session_id>")
     def p2p_offer_status(session_id: str) -> Response:
