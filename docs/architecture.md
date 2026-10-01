@@ -16,7 +16,8 @@ Open Transfer is intentionally small: one Python process per device, three runti
 src/open_transfer/
 ├── cli.py          entry point: flags/env → Config, banner + QR, runs a Node
 ├── node.py         a running device: cheroot HTTP server + mesh (used by CLI, desktop, Android)
-├── desktop.py      desktop app: native window (pywebview), single instance, smoke test
+├── desktop.py      desktop app: native window (pywebview), smoke test
+├── instance.py     one running app per state folder (lock file, bring-to-front)
 ├── android.py      entry points the Android app calls through Chaquopy
 ├── devices.py      device identity, paired devices, request signing, pairing proofs
 ├── discovery.py    UDP multicast announce / reply / find / bye

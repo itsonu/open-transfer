@@ -283,7 +283,7 @@ def _run(argv: Sequence[str] | None) -> int:
         print(f"open-transfer: error: {exc}", file=sys.stderr)
         return 2
 
-    from open_transfer.desktop import InstanceLock
+    from open_transfer.instance import InstanceLock
     from open_transfer.node import Node
 
     # Two copies on one state folder would announce the same device id.

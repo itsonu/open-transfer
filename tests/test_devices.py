@@ -35,7 +35,8 @@ def test_trust_store_persists_privately(tmp_path: Path) -> None:
     assert again.get("d-" + "a" * 24).name == "Laptop"  # type: ignore[union-attr]
     if os.name != "nt":  # POSIX permissions; Windows ACLs keep it in the user's profile
         assert (tmp_path / "trusted.json").stat().st_mode & 0o077 == 0
-    assert again.remove("d-" + "a" * 24)
+    removed = again.remove("d-" + "a" * 24)
+    assert removed
     assert devices.TrustStore(tmp_path).get("d-" + "a" * 24) is None
 
 

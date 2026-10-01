@@ -21,7 +21,7 @@ from typing import Any
 
 import pytest
 
-from open_transfer import desktop
+from open_transfer import desktop, instance
 
 SRC = Path(__file__).resolve().parents[1] / "src"
 
@@ -226,7 +226,7 @@ def test_only_one_instance_per_state_folder(tmp_path: Path) -> None:
     assert not second.acquire()
     first.write_info(4321)
     info = second.read_info()
-    assert info == desktop.RunningInstance(pid=os.getpid(), port=4321)
+    assert info == instance.RunningInstance(pid=os.getpid(), port=4321)
     assert info.url == "http://127.0.0.1:4321"
     first.release()
     assert not first.info_path.exists()
@@ -243,7 +243,7 @@ def test_lock_held_by_another_process(tmp_path: Path) -> None:
                 f"""
                 import sys, time
                 sys.path.insert(0, {str(SRC)!r})
-                from open_transfer.desktop import InstanceLock
+                from open_transfer.instance import InstanceLock
                 lock = InstanceLock(sys.argv[1])
                 assert lock.acquire()
                 lock.write_info(1234)
@@ -277,12 +277,12 @@ def test_lock_held_by_another_process(tmp_path: Path) -> None:
 def test_lock_falls_back_to_instance_file_without_os_locks(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(desktop, "_try_lock", lambda fh: None)
-    (tmp_path / desktop.INFO_FILE).write_text(json.dumps({"pid": 999999, "port": 4000}))
-    monkeypatch.setattr(desktop, "is_alive", lambda instance: True)
+    monkeypatch.setattr(instance, "_try_lock", lambda fh: None)
+    (tmp_path / instance.INFO_FILE).write_text(json.dumps({"pid": 999999, "port": 4000}))
+    monkeypatch.setattr(instance, "is_alive", lambda running: True)
     assert not desktop.InstanceLock(tmp_path).acquire()  # someone answers on that port
 
-    monkeypatch.setattr(desktop, "is_alive", lambda instance: False)
+    monkeypatch.setattr(instance, "is_alive", lambda running: False)
     lock = desktop.InstanceLock(tmp_path)
     assert lock.acquire()  # stale file from a crashed run
     assert lock.advisory
@@ -291,7 +291,7 @@ def test_lock_falls_back_to_instance_file_without_os_locks(
 
 @pytest.mark.parametrize("content", ["", "{", '{"pid": 1}', '{"pid": 1, "port": 0}', "[1, 2]"])
 def test_bad_instance_file_is_ignored(tmp_path: Path, content: str) -> None:
-    (tmp_path / desktop.INFO_FILE).write_text(content)
+    (tmp_path / instance.INFO_FILE).write_text(content)
     assert desktop.InstanceLock(tmp_path).read_info() is None
 
 
@@ -314,7 +314,7 @@ def test_failed_focus_request_is_not_confirmed(tmp_path: Path) -> None:
     def broken() -> None:
         raise RuntimeError("no window")
 
-    path = tmp_path / desktop.FOCUS_FILE
+    path = tmp_path / instance.FOCUS_FILE
     path.write_text("x")
     assert not desktop.FocusRequests(path, broken).poll()
     assert path.exists()  # the second copy times out and opens the browser
@@ -496,7 +496,7 @@ def test_closing_the_window_stops_sharing(
     assert "show" in fake.window.calls
     assert opened == []
     assert fake.start_options["private_mode"] is False
-    assert not (state / desktop.INFO_FILE).exists()
+    assert not (state / instance.INFO_FILE).exists()
     assert (state / desktop.LOG_FILE).read_text(encoding="utf-8").strip()
     lock = desktop.InstanceLock(state)
     assert lock.acquire()  # released

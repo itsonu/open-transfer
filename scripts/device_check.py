@@ -928,9 +928,11 @@ class Checker:
                 )
             except (CheckError, OSError) as exc:
                 self.report.add("4.6", "A receiver leaves mid-transfer", False, str(exc))
-            finally:
+            try:  # bring the stopped app back for the checks that follow
                 launch_android(self.adb, b)
-                wait_for(f"{pc.label} to see {b.label} again", lambda: pc.sees(b), 60)
+                wait_for(f"{pc.label} to see {b.label} again", functools.partial(pc.sees, b), 60)
+            except CheckError as exc:
+                self.report.add("4.6", f"{b.label} reopened after leaving", False, str(exc))
 
     def states(self) -> None:
         step("6. Declined, expired, canceled, too big")

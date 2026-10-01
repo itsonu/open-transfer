@@ -57,7 +57,8 @@ _KINDS = {
 class Readable(Protocol):
     """Anything with ``read(size) -> bytes``: a request body, a file, a pipe."""
 
-    def read(self, size: int = -1, /) -> bytes: ...
+    def read(self, size: int = -1, /) -> bytes:
+        """Up to ``size`` bytes (all that's left when negative); ``b""`` at the end."""
 
 
 class StorageError(Exception):
