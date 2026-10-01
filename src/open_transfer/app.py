@@ -287,6 +287,9 @@ def create_app(config: Config | None = None) -> Flask:
         apply_security_headers(response)
         if request.path.startswith("/api/"):
             response.headers.setdefault("Cache-Control", "no-store")
+        elif request.path.endswith((".js", ".css")):
+            # ES module imports carry no version query; always revalidate (cheap 304s).
+            response.headers["Cache-Control"] = "no-cache"
         if log.isEnabledFor(logging.DEBUG):
             elapsed = (time.perf_counter() - g.get("started", time.perf_counter())) * 1000
             log.debug(
