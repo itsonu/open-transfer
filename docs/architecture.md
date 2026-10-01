@@ -1,19 +1,27 @@
 # Architecture
 
-Open Transfer is intentionally small: one Python process, three runtime dependencies (Flask, cheroot, segno), and a front end with no build step. This document explains how the pieces fit and why.
+Open Transfer is intentionally small: one Python process per device, three runtime dependencies (Flask, cheroot, segno), and a front end with no build step. Every device — desktop app, Android app, CLI, Docker — runs the same code. This document explains how the pieces fit and why; the device-to-device wire format is in [protocol.md](protocol.md).
 
 ## Goals that shaped the design
 
-1. **Zero setup for the receiving side.** Any browser is a client. No app, account or pairing.
-2. **Big files must just work.** Multi-GB videos over Wi‑Fi, without running out of RAM or `/tmp`.
-3. **Safe by default on a shared network**, with easy opt-in locking (PIN).
-4. **Easy to read, run and contribute to.** A new contributor should understand the whole codebase in an afternoon.
+1. **AirDrop-like, across platforms.** Devices on the same Wi-Fi find each other, any device can send to one, several or all others, and files go device to device — no server in the middle, no cloud.
+2. **Zero setup for devices without the app.** Any browser can join by opening a device's link (QR code) and send or receive through it.
+3. **Big files must just work.** Multi-GB videos over Wi‑Fi, without running out of RAM or `/tmp`.
+4. **Safe by default on a shared network**, with easy opt-in locking (PIN).
+5. **Easy to read, run and contribute to.** A new contributor should understand the whole codebase in an afternoon.
 
 ## Layout
 
 ```
 src/open_transfer/
-├── cli.py          entry point: flags/env → Config, free port, banner + QR, cheroot server
+├── cli.py          entry point: flags/env → Config, banner + QR, runs a Node
+├── node.py         a running device: cheroot HTTP server + mesh (used by CLI, desktop, Android)
+├── desktop.py      desktop app: native window (pywebview), single instance, smoke test
+├── android.py      entry points the Android app calls through Chaquopy
+├── devices.py      device identity, paired devices, request signing, pairing proofs
+├── discovery.py    UDP multicast announce / reply / find / bye
+├── mesh.py         nearby apps, visitors, incoming offers, outgoing fan-out jobs, pairing
+├── mesh_api.py     HTTP routes: app↔app (/api/p2p/v1) and the UI (/api/state, /api/send…)
 ├── config.py       Config dataclass, size parsing, env helpers
 ├── app.py          Flask app factory: guards, pages, JSON API, downloads
 ├── storage.py      all filesystem access: sanitising, streaming writes, trash
@@ -21,12 +29,51 @@ src/open_transfer/
 ├── archive.py      streaming ZIP writer for "Download all"
 ├── network.py      LAN IP detection, host name, free-port search
 ├── templates/      index.html (app shell), error.html
-└── static/         app.js, app.css, manifest, icons
+└── static/         lib.js (helpers) · nearby.js (devices, sending, pairing) · app.js (shell), app.css
 tests/              pytest: storage, API, security, CLI; tests/e2e: Playwright
-scripts/            build_app.py (standalone app), build_site.py (website), screenshots.py
+android/            Android app: Kotlin shell (WebView, file picker, QR scanner) around this package
+scripts/            build_app.py (standalone + desktop apps, .dmg), build_site.py (website), screenshots.py
 site/               project website, published to GitHub Pages
 packaging/          PyInstaller spec for standalone binaries
 ```
+
+## Nearby devices
+
+```mermaid
+sequenceDiagram
+    participant UA as Sender UI (owner window)
+    participant A as Sender app
+    participant B as Receiver app
+    participant UB as Receiver UI
+
+    Note over A,B: discovery: multicast announce + HTTP hello every 6 s
+    UA->>A: POST /api/send {to: [B, C], files}
+    A->>B: POST /api/p2p/v1/offers
+    B-->>UB: shows "Gaming PC wants to send you 3 files"
+    UB->>B: POST /api/incoming/<id>/accept
+    A->>B: GET /api/p2p/v1/offers/<id>  (polls) → accepted
+    UA->>A: PUT /api/send/<job>/files/0  (the file, once)
+    A->>B: PUT /api/p2p/v1/offers/<id>/files/0  (streamed, in parallel to C)
+```
+
+* **Owner vs visitor.** Requests from `127.0.0.1` are the device's owner: they
+  see the device's received files, the pairing code, and the Accept prompts for
+  the device. Anyone else is a *visitor* identified by a signed session cookie;
+  visitors see the device list and their own inbox (`<state>/inbox/<id>/`), not
+  the device's files. `--share-folder` restores the classic "everyone sees the
+  folder" mode (the Docker image's default).
+* **No central server.** Each app talks to the receiving app directly. Only
+  visitors relay through the app they opened, because a browser can't listen
+  for connections.
+* **Fan-out without staging.** One upload from the browser is copied into a
+  bounded queue per receiver; each receiver is fed by its own thread, so a slow
+  or vanished receiver is dropped (60 s stall) without blocking the rest.
+* **Presence.** Apps are "nearby" for 15 s after the last announce or hello;
+  visitors for 25 s after their last poll. Leaving sends `bye`, so others update
+  at once. A device dropping out never affects the others' transfers.
+* **Trust.** Pairing (6-digit code, HMAC proofs, never sent in clear) stores a
+  shared key; signed requests from a paired app are accepted without asking.
+  Everyone else is asked; `--paired-only` refuses strangers outright.
 
 ## Request flow
 
@@ -108,6 +155,7 @@ There is intentionally no service worker: browsers only allow them on HTTPS or `
 | You want to… | Touch |
 | ------------ | ----- |
 | Add a CLI flag / env var | `config.py` (field + validation), `cli.py` (flag + `config_from_args`), README table, `tests/test_cli.py` |
+| Change discovery, pairing or transfers | `discovery.py`, `devices.py`, `mesh.py`, `mesh_api.py`, `docs/protocol.md`, `tests/test_mesh.py` |
 | Add an API endpoint | `app.py` (inside `create_app`), `docs/api.md`, `tests/test_api.py` |
 | Change what's stored or how | `storage.py`, `tests/test_storage.py` |
-| Change the UI | `templates/index.html`, `static/app.css`, `static/app.js`, `tests/e2e/test_ui.py`, then `python scripts/screenshots.py` |
+| Change the UI | `templates/index.html`, `static/app.css`, `static/nearby.js` / `app.js`, `tests/e2e/`, then `python scripts/screenshots.py` |

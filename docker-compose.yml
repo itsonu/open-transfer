@@ -5,8 +5,13 @@ services:
     build: .
     container_name: open-transfer
     restart: unless-stopped
-    ports:
-      - "5000:5000"
+    # Discovery uses LAN multicast, which doesn't cross Docker's NAT. Use the
+    # host network so apps on your Wi-Fi find this server automatically
+    # (Linux only). Without it, add the server in the apps by its address.
+    network_mode: host
+    # ports:                # use these instead of network_mode on Docker Desktop
+    #   - "5000:5000"
+    #   - "47823:47823/udp"
     volumes:
       - ./uploads:/data
     environment:
