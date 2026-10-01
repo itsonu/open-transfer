@@ -47,6 +47,24 @@ PUBLIC_P2P_ENDPOINTS = {
     "p2p_signal",
 }
 MAX_PENDING_PER_CLIENT = 10
+DRAIN_LIMIT = 8 * 1024 * 1024
+
+
+def _drain_body(limit: int = DRAIN_LIMIT) -> None:
+    """Read what's left of a small request body before answering with an error.
+
+    Replying without reading the body makes some systems (Windows) reset the
+    connection, so the client sees "connection reset" instead of our message.
+    Big bodies are left alone; the connection is simply closed.
+    """
+    length = request.content_length
+    if length is None or length > limit:
+        return
+    try:
+        while request.stream.read(256 * 1024):
+            pass
+    except (ClientDisconnected, ConnectionError, OSError):
+        return
 
 
 def register(
@@ -142,6 +160,9 @@ def register(
             )
         except (ClientDisconnected, ConnectionError) as exc:
             raise IncompleteUpload("The transfer was interrupted before it finished.") from exc
+        except MeshError:
+            _drain_body()
+            raise
         return jsonify({"file": saved.to_dict()}), 201
 
     @app.delete(f"{P2P}/offers/<session_id>")
@@ -214,6 +235,9 @@ def register(
             result = mesh.job_upload(job_id, current, index, request.stream, request.content_length)
         except (ClientDisconnected, ConnectionError) as exc:
             raise IncompleteUpload("The upload was interrupted before it finished.") from exc
+        except MeshError:
+            _drain_body()
+            raise
         return jsonify(result)
 
     @app.delete("/api/send/<job_id>")

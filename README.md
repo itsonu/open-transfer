@@ -285,7 +285,7 @@ flowchart LR
 | `static/`, `templates/` | The web UI: vanilla ES modules + CSS, no build step |
 | `android/` | Kotlin shell: WebView, file picker, QR scanner, foreground service |
 
-Details: **[docs/architecture.md](docs/architecture.md)** · wire format: **[docs/protocol.md](docs/protocol.md)**.
+Details: **[docs/architecture.md](docs/architecture.md)** · wire format: **[docs/protocol.md](docs/protocol.md)** · real-device checklist: **[docs/device-testing.md](docs/device-testing.md)**.
 
 ## Development
 
