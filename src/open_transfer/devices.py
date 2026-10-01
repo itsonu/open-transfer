@@ -50,9 +50,9 @@ def detect_platform() -> str:
 
 def clean_name(value: object, fallback: str = "Unnamed device") -> str:
     """A display name that is safe to show and log: no control characters, max 40 chars."""
-    text = unicodedata.normalize("NFC", str(value or ""))
+    text = re.sub(r"\s+", " ", unicodedata.normalize("NFC", str(value or "")))
     text = "".join(ch for ch in text if unicodedata.category(ch)[0] != "C")
-    text = re.sub(r"\s+", " ", text).strip()
+    text = re.sub(r" +", " ", text).strip()
     return text[:MAX_NAME_CHARS].strip() or fallback
 
 
