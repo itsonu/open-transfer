@@ -103,10 +103,13 @@ jobs:
           if-no-files-found: error
 
   # ---------------------------------------------------------------- Android
-  # TODO(android): the Android APK job goes here (added separately; not built yet).
-  # Upload the APK with actions/upload-artifact@v7 (e.g. name: binary-android,
-  # file: open-transfer-android.apk) and add the job to `publish.needs` below:
-  # publish downloads every artifact of the run and attaches all of them.
+  # Builds, smoke-tests and uploads open-transfer-android.apk (artifact
+  # "open-transfer-android"); publish attaches it with everything else.
+  # Signed with the ANDROID_KEYSTORE_* secrets when they are set.
+  android:
+    name: Android
+    uses: ./.github/workflows/android.yml
+    secrets: inherit
 
   docker:
     name: Docker image → GHCR
@@ -141,8 +144,7 @@ jobs:
 
   publish:
     name: GitHub release
-    # TODO(android): add the Android APK job to this list.
-    needs: [python, binaries]
+    needs: [python, binaries, android]
     runs-on: ubuntu-latest
     permissions:
       contents: write

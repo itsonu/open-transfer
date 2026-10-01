@@ -171,6 +171,7 @@ jobs:
   android:
     name: Android
     uses: ./.github/workflows/android.yml
+    secrets: inherit
 
   docker:
     name: Docker image
