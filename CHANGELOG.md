@@ -27,6 +27,7 @@ Open Transfer becomes AirDrop-like across platforms: every device runs the app, 
 - The macOS command-line build is now `open-transfer-macos-arm64-cli.tar.gz`; Windows also ships `open-transfer-windows-x64-cli.exe`.
 
 ### Fixed
+- Windows: deleting a file right after it was downloaded or previewed failed with a server error while the file was still open; it now waits a moment, or says the file is in use.
 - Package `Changelog` URL pointed at a `main` branch that doesn't exist; it now uses `master`.
 - README and website footers credit the maintainer with a link to their portfolio.
 

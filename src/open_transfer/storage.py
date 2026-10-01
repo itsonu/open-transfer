@@ -30,6 +30,7 @@ from typing import Any, Protocol
 
 CHUNK_SIZE = 1024 * 1024
 STATE_DIR = ".open-transfer"
+DELETE_ATTEMPTS = 20  # x 0.1 s: how long a delete waits for a file that is still open
 MAX_NAME_BYTES = 240  # leave headroom below the common 255-byte limit for " (12)"
 
 _WINDOWS_RESERVED = {
@@ -89,6 +90,11 @@ class InsufficientStorage(StorageError):
 
 class IncompleteUpload(StorageError):
     code = "incomplete_upload"
+
+
+class FileBusy(StorageError):
+    status = 409
+    code = "file_busy"
 
 
 def safe_filename(name: str) -> str:
@@ -298,8 +304,16 @@ class Storage:
         token = secrets.token_urlsafe(12)
         holder = self._trash / token
         holder.mkdir()
-        os.replace(path, holder / path.name)
-        return token
+        # Windows won't move a file that is still open: a download or preview that
+        # just finished can hold it for a moment longer, so try again briefly.
+        for _ in range(DELETE_ATTEMPTS):
+            try:
+                os.replace(path, holder / path.name)
+                return token
+            except PermissionError:
+                time.sleep(0.1)
+        holder.rmdir()
+        raise FileBusy("This file can’t be deleted right now — it may be open. Try again shortly.")
 
     def restore(self, token: str) -> FileInfo:
         if not re.fullmatch(r"[A-Za-z0-9_-]{8,64}", token or ""):
