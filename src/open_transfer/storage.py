@@ -26,7 +26,7 @@ import unicodedata
 from collections.abc import Iterator
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import IO, Any
+from typing import Any, Protocol
 
 CHUNK_SIZE = 1024 * 1024
 STATE_DIR = ".open-transfer"
@@ -52,6 +52,12 @@ _KINDS = {
     "code": {"py", "js", "ts", "json", "html", "css", "sh", "c", "cpp", "go", "rs", "java"},
     "app": {"apk", "exe", "msi", "pkg", "deb", "rpm", "appimage"},
 }
+
+
+class Readable(Protocol):
+    """Anything with ``read(size) -> bytes``: a request body, a file, a pipe."""
+
+    def read(self, size: int = -1, /) -> bytes: ...
 
 
 class StorageError(Exception):
@@ -219,7 +225,7 @@ class Storage:
     def save_stream(
         self,
         name: str,
-        stream: IO[bytes],
+        stream: Readable,
         *,
         length: int | None = None,
         max_size: int = 0,
@@ -324,7 +330,7 @@ class Storage:
             part.unlink(missing_ok=True)
 
 
-def _iter_chunks(stream: IO[bytes]) -> Iterator[bytes]:
+def _iter_chunks(stream: Readable) -> Iterator[bytes]:
     while True:
         chunk = stream.read(CHUNK_SIZE)
         if not chunk:

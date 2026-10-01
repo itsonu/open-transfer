@@ -45,7 +45,8 @@ class _Style:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="open-transfer",
-        description="Share files with any device on your network — just open the link.",
+        description="AirDrop for every device: send files to phones, tablets and computers on "
+        "your network.",
         epilog="Every option can also be set with an OPEN_TRANSFER_<NAME> environment variable.",
     )
     parser.add_argument(
@@ -104,6 +105,46 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="trust X-Forwarded-* headers from a reverse proxy (nginx, Caddy, Traefik)",
     )
+    nearby = parser.add_argument_group("nearby devices")
+    nearby.add_argument("--name", default=None, help="name other devices see (default: host name)")
+    nearby.add_argument(
+        "--form",
+        choices=["computer", "phone", "tablet"],
+        default=None,
+        help="device type shown to others (default: computer)",
+    )
+    nearby.add_argument(
+        "--peer",
+        action="append",
+        default=None,
+        metavar="HOST:PORT",
+        help="connect to another Open Transfer app directly (repeatable; for networks "
+        "that block discovery)",
+    )
+    nearby.add_argument(
+        "--no-discovery",
+        action="store_true",
+        default=None,
+        help="don't announce this device or look for others",
+    )
+    nearby.add_argument(
+        "--auto-accept",
+        action="store_true",
+        default=None,
+        help="accept incoming files without asking (headless servers)",
+    )
+    nearby.add_argument(
+        "--paired-only",
+        action="store_true",
+        default=None,
+        help="only accept files from paired devices",
+    )
+    nearby.add_argument(
+        "--share-folder",
+        action="store_true",
+        default=None,
+        help="classic mode: anyone who opens the link can browse and download the folder",
+    )
     parser.add_argument(
         "--no-browser", action="store_true", default=None, help="don't open a browser"
     )
@@ -156,14 +197,34 @@ def config_from_args(args: argparse.Namespace) -> Config:
         public_url=_pick(args.public_url, "PUBLIC_URL"),  # type: ignore[arg-type]
         allowed_hosts=tuple(allowed),
         trust_proxy=bool(args.behind_proxy) or env_bool("BEHIND_PROXY"),
+        device_name=_pick(args.name, "NAME"),  # type: ignore[arg-type]
+        device_form=str(_pick(args.form, "FORM", "computer")),
+        state_dir=Path(str(env("STATE_DIR"))) if env("STATE_DIR") else None,
+        discovery=not (bool(args.no_discovery) or env_bool("NO_DISCOVERY")),
+        discovery_port=int(str(env("DISCOVERY_PORT") or 47823)),
+        peers=tuple(args.peer or [p for p in (env("PEERS") or "").split(",") if p]),
+        auto_accept=bool(args.auto_accept) or env_bool("AUTO_ACCEPT"),
+        paired_only=bool(args.paired_only) or env_bool("PAIRED_ONLY"),
+        share_folder=bool(args.share_folder) or env_bool("SHARE_FOLDER"),
+        owner_loopback=env_bool("OWNER_LOOPBACK", True),
     )
 
 
-def _print_banner(config: Config, port: int, style: _Style, show_qr: bool) -> str:
+def _print_banner(
+    config: Config,
+    port: int,
+    style: _Style,
+    show_qr: bool,
+    name: str = "",
+    discovery: bool = True,
+) -> str:
+    name = name or network.hostname()
     ips = network.lan_ips()
     share = config.public_url or (f"http://{ips[0]}:{port}" if ips else f"http://localhost:{port}")
     out = sys.stdout
     out.write("\n  " + style.blue("Open Transfer") + style.dim(f"  v{__version__}") + "\n\n")
+    out.write(f"  {style.dim('This device')}        {style.bold(name)}")
+    out.write(style.dim("  · visible to nearby devices\n" if discovery else "  · discovery off\n"))
     out.write(f"  {style.dim('On this computer')}   http://localhost:{port}\n")
     if config.public_url:
         out.write(f"  {style.dim('Public address')}     {style.bold(config.public_url)}\n")
@@ -222,48 +283,34 @@ def _run(argv: Sequence[str] | None) -> int:
         print(f"open-transfer: error: {exc}", file=sys.stderr)
         return 2
 
-    try:
-        port = network.find_free_port(config.host, config.port)
-    except OSError as exc:
-        print(f"open-transfer: error: {exc}", file=sys.stderr)
-        return 1
-    if port != config.port and config.port:
-        print(style.yellow(f"\n  Port {config.port} is busy, using {port} instead."))
-
-    from cheroot import wsgi
-
-    from open_transfer.app import create_app
+    from open_transfer.node import Node
 
     try:
-        app = create_app(config)
+        node = Node(config)
     except OSError as exc:
         print(f"open-transfer: error: cannot use {config.storage_dir}: {exc}", file=sys.stderr)
         return 1
-    app.config["OT_PORT"] = port
-
-    server = wsgi.Server(
-        (config.host, port),
-        app,
-        numthreads=config.threads,
-        server_name=f"open-transfer/{__version__}",
-        timeout=60,
-    )
-    server.max_request_body_size = 0  # limits are enforced by the app while streaming
-
     try:
-        server.prepare()
+        port = node.bind()
     except OSError as exc:
-        print(f"open-transfer: error: could not listen on port {port}: {exc}", file=sys.stderr)
+        print(f"open-transfer: error: could not listen: {exc}", file=sys.stderr)
         return 1
+    if port != config.port and config.port:
+        print(style.yellow(f"\n  Port {config.port} is busy, using {port} instead."))
+    node.start_mesh()
 
-    _print_banner(config, port, style, show_qr=not (args.no_qr or env_bool("NO_QR")))
+    _print_banner(
+        config,
+        port,
+        style,
+        show_qr=not (args.no_qr or env_bool("NO_QR")),
+        name=node.mesh.identity.name,
+        discovery=bool(node.mesh.discovery and node.mesh.discovery.working),
+    )
     if not (args.no_browser or env_bool("NO_BROWSER")):
         threading.Timer(0.4, webbrowser.open, args=(f"http://localhost:{port}",)).start()
 
     with contextlib.suppress(KeyboardInterrupt):  # Ctrl+C is the normal way to stop
-        try:
-            server.serve()
-        finally:
-            server.stop()
+        node.serve_forever()
     print("\n  " + style.dim("Stopped sharing. Your files are still in ") + str(config.storage_dir))
     return 0

@@ -86,6 +86,7 @@ select = ["E", "W", "F", "I", "B", "UP", "S", "SIM", "C4", "RUF", "PT", "RET"]
 ignore = [
   "E501", # line length is handled by the formatter
   "S104", # binding to 0.0.0.0 is the whole point of a LAN server
+  "RUF001", # typographic apostrophes in user-facing messages are deliberate
 ]
 
 [tool.ruff.lint.per-file-ignores]
