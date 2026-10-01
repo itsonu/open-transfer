@@ -27,6 +27,7 @@ Sending
 from __future__ import annotations
 
 import contextlib
+import dataclasses
 import http.client
 import json
 import logging
@@ -613,7 +614,11 @@ class Mesh:
         code = "".join(ch for ch in str(code) if ch.isdigit())
         if len(code) != 6:
             raise MeshError(400, "bad_code", "Enter the 6-digit code shown on the other device.")
-        peer = self.connect(address) if address else self._find_by_code(code)
+        found = self.connect(address) if address else self._find_by_code(code)
+        # Use one address for both steps: the shared entry's host can change under
+        # us (we hear a device on each of its interfaces), and the other side
+        # checks that both steps come from the same address.
+        peer = dataclasses.replace(found, visitors=[])
         nonce_b = secrets.token_hex(16)
         try:
             status, data = self._http(

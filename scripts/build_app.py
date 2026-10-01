@@ -103,7 +103,9 @@ def smoke_test() -> None:
     with socket.socket() as sock:
         sock.bind(("127.0.0.1", 0))
         port = sock.getsockname()[1]
-    with tempfile.TemporaryDirectory() as share:
+    # The one-file app runs as two processes (bootloader + Python); stop both
+    # before removing the folder, or Windows keeps its files locked.
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as share:
         proc = subprocess.Popen(  # noqa: S603
             [str(EXE), share, "--host", "127.0.0.1", "--port", str(port),
              "--no-browser", "--no-qr"],
@@ -123,11 +125,23 @@ def smoke_test() -> None:
                         sys.exit(f"The built app did not start:\n{output}")
                     time.sleep(0.5)
         finally:
-            proc.terminate()
-            try:
-                proc.wait(timeout=10)
-            except subprocess.TimeoutExpired:
-                proc.kill()
+            stop_tree(proc)
+
+
+def stop_tree(proc: subprocess.Popen[bytes]) -> None:
+    """Stop a process and its children (PyInstaller's one-file bootloader spawns one)."""
+    if os.name == "nt":
+        subprocess.run(  # noqa: S603
+            ["taskkill", "/PID", str(proc.pid), "/T", "/F"],  # noqa: S607
+            capture_output=True,
+            check=False,
+        )
+    else:
+        proc.terminate()
+    try:
+        proc.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        proc.kill()
 
 
 def build_cli() -> Path:
@@ -144,7 +158,7 @@ def run_desktop_smoke(program: Path, *extra: str) -> tuple[bool, str]:
 
     The windowed app has no console, so the result is read from --smoke-report.
     """
-    with tempfile.TemporaryDirectory() as tmp:
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
         report = Path(tmp) / "smoke.txt"
         cmd = [str(program), "--smoke-test", *extra, "--smoke-report", str(report)]
         try:
