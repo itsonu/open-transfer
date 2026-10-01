@@ -56,6 +56,8 @@ dev = [
   "pip-audit>=2.7",
 ]
 e2e = ["playwright>=1.45"]
+# The desktop app's native window (WebView2 on Windows, WKWebView on macOS).
+desktop = ["pywebview>=5.3"]
 
 [project.scripts]
 open-transfer = "open_transfer.cli:main"

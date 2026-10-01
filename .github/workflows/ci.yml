@@ -111,31 +111,61 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        # cli: base name of the command-line build's artifact ("" = don't build it).
+        # desktop: build the windowed desktop app (Windows .exe, macOS .dmg).
+        # desktop-flags: macOS runners always have a window server, so a native
+        # window that fails to open there is a real bug, not a runner limitation.
         include:
-          - { os: ubuntu-latest, name: linux-x64 }
-          - { os: macos-latest, name: macos-arm64 }
-          - { os: windows-latest, name: windows-x64 }
+          - { os: ubuntu-latest, name: linux-x64, cli: open-transfer-linux-x64, desktop: false }
+          - { os: windows-latest, name: windows-x64, cli: open-transfer-windows-x64-cli, desktop: true }
+          - { os: macos-latest, name: macos-arm64, cli: open-transfer-macos-arm64-cli, desktop: true, desktop-flags: --require-window }
+          # GitHub's last Intel macOS image (x64).
+          - { os: macos-15-intel, name: macos-x64, cli: "", desktop: true, desktop-flags: --require-window }
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7
         with:
           python-version: "3.13"
       # Builds dist/open-transfer[.exe] and smoke-tests it (starts it, calls /api/health).
-      - run: python scripts/build_app.py
-      - name: Package
+      - name: Build the command-line app
+        if: matrix.cli != ''
+        run: python scripts/build_app.py
+      - name: Package the command-line app
+        if: matrix.cli != ''
         shell: bash
         # .tar.gz keeps the executable bit on macOS/Linux; Windows gets the .exe as-is.
         run: |
           cd dist
           if [ "$RUNNER_OS" = "Windows" ]; then
-            mv open-transfer.exe "open-transfer-${{ matrix.name }}.exe"
+            mv open-transfer.exe "${{ matrix.cli }}.exe"
           else
-            tar -czf "open-transfer-${{ matrix.name }}.tar.gz" open-transfer && rm open-transfer
+            tar -czf "${{ matrix.cli }}.tar.gz" open-transfer && rm open-transfer
           fi
+      # The desktop app's window is WebView2. Windows 11 ships it; make sure the
+      # Server image has it too, so the smoke test can check the real window.
+      - name: Install the WebView2 runtime
+        if: matrix.desktop && runner.os == 'Windows'
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          $installer = "$env:RUNNER_TEMP\MicrosoftEdgeWebview2Setup.exe"
+          Invoke-WebRequest "https://go.microsoft.com/fwlink/p/?LinkId=2124703" -OutFile $installer
+          Start-Process $installer -ArgumentList "/silent", "/install" -Wait
+      # Builds the desktop app, then runs it with --smoke-test: starts it, checks the
+      # API and that the UI rendered in the native window (macOS: straight from the .dmg).
+      - name: Build the desktop app
+        if: matrix.desktop
+        run: python scripts/build_app.py --desktop ${{ matrix.desktop-flags }}
+      - name: Package the desktop app
+        if: matrix.desktop && runner.os == 'Windows'
+        shell: bash
+        # build_app.py names the macOS disk image itself (open-transfer-macos-<arch>.dmg).
+        run: mv "dist/Open Transfer.exe" "dist/open-transfer-${{ matrix.name }}.exe"
       - uses: actions/upload-artifact@v7
         with:
           name: open-transfer-${{ matrix.name }}
           path: dist/open-transfer-*
+          if-no-files-found: error
           retention-days: 14
 
   docker:
