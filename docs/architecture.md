@@ -29,7 +29,7 @@ src/open_transfer/
 ├── archive.py      streaming ZIP writer for "Download all"
 ├── network.py      LAN IP detection, host name, free-port search
 ├── templates/      index.html (app shell), error.html
-└── static/         lib.js (helpers) · nearby.js (devices, sending, pairing) · app.js (shell), app.css
+└── static/         lib.js (helpers) · nearby.js (devices, sending, pairing) · direct.js (WebRTC) · app.js (shell), app.css
 tests/              pytest: storage, API, security, CLI; tests/e2e: Playwright
 android/            Android app: Kotlin shell (WebView, file picker, QR scanner) around this package
 scripts/            build_app.py (standalone + desktop apps, .dmg), build_site.py (website), screenshots.py
@@ -62,9 +62,11 @@ sequenceDiagram
   visitors see the device list and their own inbox (`<state>/inbox/<id>/`), not
   the device's files. `--share-folder` restores the classic "everyone sees the
   folder" mode (the Docker image's default).
-* **No central server.** Each app talks to the receiving app directly. Only
-  visitors relay through the app they opened, because a browser can't listen
-  for connections.
+* **No central server.** Each app talks to the receiving app directly. Between
+  two browsers, files go straight over WebRTC once the apps have passed on the
+  offer and answer. Only browser → app (and app → a browser on another app)
+  relays through the app the browser opened, because a browser can't listen
+  for connections. See [protocol.md](protocol.md#browser-to-browser-webrtc).
 * **Fan-out without staging.** One upload from the browser is copied into a
   bounded queue per receiver; each receiver is fed by its own thread, so a slow
   or vanished receiver is dropped (60 s stall) without blocking the rest.

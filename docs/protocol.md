@@ -109,6 +109,36 @@ accepting receiver at the same time — each receiver has its own thread and a
 bounded queue; a receiver that takes no data for 60 s is dropped without
 stalling the others. Nothing is staged on the sender's disk.
 
+### Browser to browser (WebRTC)
+
+When the receiver is a **browser** (a visitor) and the sender is a page too
+(any visitor, or an app's own window), the file goes **straight between the two
+browsers** over a WebRTC data channel; the apps only carry the two connection
+messages:
+
+```
+sender page → its app        POST /api/signal {job, target, kind: "offer", sdp}
+  its app → receiver's app   POST /api/p2p/v1/signal {dir: "to_receiver", session, secret, …}
+receiver page ← its app      GET  /api/signals            (announced by "signals": n in /api/state)
+receiver page → its app      POST /api/signal {session, kind: "answer", sdp}
+  … → sender's app           POST /api/p2p/v1/signal {dir: "to_sender", job, target, secret, …}
+```
+
+* Messages are only accepted for a transfer the receiver **already accepted**,
+  and only from its two ends: app-to-app messages carry the offer's secret.
+* No STUN/TURN servers: on a LAN the devices reach each other directly
+  (browsers' mDNS `.local` candidates included).
+* The data channel carries `{"t":"file", i, name, size, mime}`, raw 64 KiB
+  chunks with back-pressure, `{"t":"end", i}`; the receiver answers
+  `{"t":"done", i}` and reports progress to its app
+  (`POST /api/incoming/<id>/direct`). The sender reports its side with
+  `POST /api/send/<job>/targets/<id>/direct` (`trying` / `progress` / `done` /
+  `failed`); while a target is `trying` the app doesn't stream to it.
+* **Fallback:** if no connection opens within ~12 s or it breaks, the sender
+  reports `failed` and the file goes through the apps as usual.
+* The received file stays in the receiving browser (a `Blob`) until saved, so
+  direct transfers are capped at 1 GB; larger ones go through the apps.
+
 ## 3. Pairing
 
 Pairing proves both apps know the same short-lived 6-digit code **without
@@ -154,7 +184,7 @@ auto-accepted; anything else is treated as a stranger (asked first).
   encrypted in transit — anyone who can capture traffic on your Wi-Fi could
   read them. Use networks you trust, a PIN for the web UI, and paired-only mode
   on shared networks. TLS with pinned per-device certificates is on the roadmap.
-* Visitors (browsers) relay through the app they opened; true browser-to-browser
-  transfer (WebRTC) is not implemented.
+* Browser → browser goes direct (WebRTC, see above). Browser → app and
+  app → browser-on-another-app still pass through the app the browser opened.
 * No resume: an interrupted file restarts from zero (retry re-offers it).
 * Folders aren't sent as folders — zip them first.

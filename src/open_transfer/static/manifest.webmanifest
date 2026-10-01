@@ -1,7 +1,7 @@
 {
   "name": "Open Transfer",
   "short_name": "Transfer",
-  "description": "Share files with any device on your network. No app, no account, no cloud.",
+  "description": "Send files to the devices on your Wi-Fi, directly. No account, no cloud.",
   "id": "/",
   "start_url": "/",
   "scope": "/",

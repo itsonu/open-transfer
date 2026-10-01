@@ -14,7 +14,7 @@ Open Transfer becomes AirDrop-like across platforms: every device runs the app, 
 - **Accept / Decline** prompts on the receiver with sender and file list; offers expire after 2 minutes; disk space and size limits checked up front.
 - **One-to-many streaming**: one upload is streamed to every accepting receiver at once, with per-receiver progress, cancel, retry and "send now"; a slow or vanished receiver is dropped without stopping the others.
 - **Pairing** with a QR code or 6-digit code (HMAC challenge–response, rate-limited, rotating codes); paired devices auto-accept; requests between them are signed; `--paired-only`; unpair.
-- **Browsers without the app** join a device's group by link/QR code, get their own "Sent to you" inbox, and can send to any device (relayed by the device they joined).
+- **Browsers without the app** join a device's group by link/QR code, get their own "Sent to you" inbox, and can send to any device. **Browser → browser transfers go direct over WebRTC** (the apps only pass on the connection messages), falling back to the apps when a direct connection isn't possible; files up to 1 GB.
 - **Desktop apps** with a native window (pywebview): `open-transfer-windows-x64.exe`, and `.app` bundles in `open-transfer-macos-arm64.dmg` / `open-transfer-macos-x64.dmg`; single instance per folder; smoke-tested in CI.
 - **Android app** (phones and tablets, Android 10+, 64-bit) built with Chaquopy around the same Python code: WebView UI, native file picker, QR scanner, notifications for incoming files, saves to `Download/Open Transfer`; built and smoke-tested with a real transfer in an emulator in CI.
 - CLI flags `--name`, `--form`, `--peer`, `--no-discovery`, `--auto-accept`, `--paired-only`, `--share-folder`; docs: [protocol](docs/protocol.md), updated [architecture](docs/architecture.md) and [API](docs/api.md).
@@ -31,7 +31,7 @@ Open Transfer becomes AirDrop-like across platforms: every device runs the app, 
 
 ### Known limitations
 - Transfers between devices are plain HTTP on the LAN (not encrypted).
-- Browser visitors relay through the device they joined (no WebRTC); no folder transfers; no resume.
+- Browser → app transfers still pass through the app the browser joined; no folder transfers; no resume.
 - Apps are not code-signed/notarised; the Android APK is signed with a debug key unless release secrets are configured.
 
 ## [2.0.0] — 2026-09-24

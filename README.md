@@ -154,7 +154,7 @@ Any device can send to any other — there's no host or server role. A phone wit
 - **Accept / Decline** prompt on the receiver with the sender, file names and sizes; offers expire after 2 minutes
 - **Pairing** with a QR code or 6-digit code (proved with HMAC, never sent in clear); paired devices auto-accept
 - **Paired-only** mode (like AirDrop's "Contacts only"), and add-by-address where multicast is blocked
-- Browsers without the app join a device's group by QR code and can send and receive too
+- Browsers without the app join a device's group by QR code and can send and receive too — **browser to browser goes direct** over WebRTC (falls back to the app if the network blocks it). Add the page to the home screen to use it like an app.
 
 **Transfers**
 - **Device to device**: one upload is streamed to every receiver at the same time — nothing is staged on disk
@@ -346,7 +346,6 @@ nginx limits request bodies to 1 MB by default. Set `client_max_body_size 0;` an
 ## Roadmap
 
 - [ ] Encrypted transfers (TLS with per-device certificates, pinned at pairing)
-- [ ] Browser-to-browser transfers over WebRTC (today browsers relay through the app they joined)
 - [ ] Folder transfers that keep their structure; resumable transfers
 - [ ] "Share to Open Transfer" from other Android apps; iOS app
 - [ ] Signed/notarised desktop builds, Play Store / F-Droid

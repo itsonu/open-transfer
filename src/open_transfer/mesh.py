@@ -83,6 +83,10 @@ STALL_TIMEOUT = 60.0  # a receiver that takes no data for this long is dropped
 CHUNK = 256 * 1024
 MAX_FILES = 1000
 P2P = "/api/p2p/v1"
+SIGNAL_KINDS = {"offer", "answer", "bye"}
+SIGNAL_MAX_BYTES = 64 * 1024
+SIGNAL_MAX_QUEUED = 32
+SIGNAL_TTL = 60.0
 
 # Incoming session states
 PENDING, ACCEPTED, RECEIVING, DONE = "pending", "accepted", "receiving", "done"
@@ -170,6 +174,7 @@ class IncomingFile:
     state: str = PENDING
     saved_name: str | None = None
     error: str = ""
+    direct: bool = False  # received browser-to-browser; it lives in the receiving browser
 
 
 @dataclass
@@ -186,6 +191,8 @@ class IncomingSession:
     finished: float = 0.0
     local: bool = False  # offered by our own owner/visitor (no HTTP involved)
     source: str = ""  # address the offer came from (rate limiting)
+    job: str = ""  # the sender's job id (to route direct-transfer signals back)
+    sender_node: str = ""  # app that made the offer ("" when local)
 
     @property
     def total(self) -> int:
@@ -210,6 +217,7 @@ class Delivery:
     sent: int = 0
     files_done: set[int] = field(default_factory=set)
     canceled: bool = False
+    direct: bool = False  # the sender's browser is sending straight to the receiver's (WebRTC)
 
     def view_state(self) -> str:
         if self.canceled:
@@ -261,6 +269,7 @@ class Mesh:
         self._pair_pending: dict[str, tuple[str, str, dict[str, Any], str, float]] = {}
         self._pair_failures = 0
         self._find_waiters: dict[str, list[tuple[threading.Event, list[Peer]]]] = {}
+        self._mail: dict[str, list[tuple[float, dict[str, Any]]]] = {}
         self._rotate_code()
         self._rev = 0
         self.port = 0
@@ -688,6 +697,8 @@ class Mesh:
         paired: bool,
         local: bool = False,
         source: str = "",
+        job: str = "",
+        sender_node: str = "",
     ) -> IncomingSession:
         """Someone wants to send ``files`` to ``target`` (our owner or a visitor)."""
         clean = _clean_files(files)
@@ -710,6 +721,8 @@ class Mesh:
             paired=paired,
             local=local,
             source=source,
+            job=str(job)[:64],
+            sender_node=sender_node,
         )
         problem = self._space_problem(session)
         if problem:
@@ -951,6 +964,7 @@ class Mesh:
                 files=job.files,
                 paired=viewer.trusted and target_id == self.id,
                 local=True,
+                job=job.id,
             )
         except MeshError as exc:
             delivery.state, delivery.reason = FAILED, str(exc)
@@ -963,6 +977,7 @@ class Mesh:
             "origin": job.origin,
             "to": target_id,
             "files": job.files,
+            "job": job.id,
         }
         try:
             status, data = self._http(peer, "POST", f"{P2P}/offers", body=body, timeout=8)
@@ -1054,7 +1069,9 @@ class Mesh:
         sinks = [
             _Sink(self, job, target_id, delivery, index, size)
             for target_id, delivery in job.deliveries.items()
-            if delivery.view_state() in {ACCEPTED, "sending"} and index not in delivery.files_done
+            if delivery.view_state() in {ACCEPTED, "sending"}
+            and index not in delivery.files_done
+            and not delivery.direct
         ]
         if not sinks:
             if any(d.view_state() in {"offering", "waiting"} for d in job.deliveries.values()):
@@ -1149,6 +1166,146 @@ class Mesh:
                     )
 
             self._executor.submit(tell)
+
+    # ------------------------------------------------- direct (browser↔browser)
+    #
+    # Browsers can't listen for connections, but two browsers can talk directly
+    # over WebRTC once they have swapped an offer and an answer. The apps carry
+    # those few messages (to the right app, then to the page), then step aside.
+    # Only the people already part of an accepted transfer can exchange them.
+
+    def _post_mail(self, to: str, message: dict[str, Any]) -> None:
+        now = time.monotonic()
+        with self._lock:
+            box = [m for m in self._mail.get(to, []) if now - m[0] < SIGNAL_TTL]
+            box.append((now, message))
+            self._mail[to] = box[-SIGNAL_MAX_QUEUED:]
+
+    def take_signals(self, viewer: Viewer) -> list[dict[str, Any]]:
+        now = time.monotonic()
+        with self._lock:
+            box = self._mail.pop(viewer.id, [])
+        return [m for at, m in box if now - at < SIGNAL_TTL]
+
+    def signal(self, viewer: Viewer, body: dict[str, Any]) -> None:
+        """A page sends a WebRTC message to the other end of one of its transfers."""
+        kind = body.get("kind")
+        sdp = body.get("sdp", "")
+        if kind not in SIGNAL_KINDS or not isinstance(sdp, str) or len(sdp) > SIGNAL_MAX_BYTES:
+            raise MeshError(400, "bad_signal", "Invalid connection message.")
+        message: dict[str, Any] = {"kind": kind, "sdp": sdp}
+        if body.get("job"):
+            # Sender → receiver.
+            job = self.job_for(str(body["job"]), viewer)
+            target = str(body.get("target", ""))
+            delivery = job.deliveries.get(target)
+            if delivery is None or delivery.view_state() not in {ACCEPTED, "sending"}:
+                raise MeshError(409, "not_accepted", "That device hasn’t accepted this transfer.")
+            if delivery.session is not None:
+                self._post_mail(target, {**message, "session": delivery.session.id})
+            elif delivery.peer is not None:
+                self._send_signal(
+                    delivery.peer,
+                    {**message, "dir": "to_receiver", "session": delivery.remote_id,
+                     "secret": delivery.remote_secret},
+                )  # fmt: skip
+            return
+        # Receiver → sender.
+        session = self._session_for(str(body.get("session", "")), viewer)
+        if session.state not in {ACCEPTED, RECEIVING}:
+            raise MeshError(409, "not_accepted", "This transfer isn’t active.")
+        reply = {**message, "job": session.job, "target": session.target}
+        if session.local:
+            self._post_mail(str(session.origin.get("id", "")), reply)
+            return
+        with self._lock:
+            peer = self._peers.get(session.sender_node)
+        if peer is None:
+            raise MeshError(404, "unreachable", "The sending device isn’t nearby anymore.")
+        self._send_signal(peer, {**reply, "dir": "to_sender", "secret": session.secret})
+
+    def _send_signal(self, peer: Peer, body: dict[str, Any]) -> None:
+        try:
+            status, data = self._http(peer, "POST", f"{P2P}/signal", body=body, timeout=5)
+        except OSError as exc:
+            raise MeshError(502, "unreachable", f"Couldn’t reach {peer.name}.") from exc
+        if status != 200:
+            raise MeshError(
+                status, "signal_failed", _remote_message(data, "Connection message refused.")
+            )
+
+    def handle_signal(self, body: dict[str, Any]) -> None:
+        """A WebRTC message from another app, for one of our pages."""
+        kind = body.get("kind")
+        sdp = body.get("sdp", "")
+        if kind not in SIGNAL_KINDS or not isinstance(sdp, str) or len(sdp) > SIGNAL_MAX_BYTES:
+            raise MeshError(400, "bad_signal", "Invalid connection message.")
+        message = {"kind": kind, "sdp": sdp}
+        secret = str(body.get("secret", ""))
+        if body.get("dir") == "to_receiver":
+            session = self._session_by_secret(str(body.get("session", "")), secret)
+            self._post_mail(session.target, {**message, "session": session.id})
+        elif body.get("dir") == "to_sender":
+            with self._lock:
+                job = self._jobs.get(str(body.get("job", "")))
+            target = str(body.get("target", ""))
+            delivery = job.deliveries.get(target) if job else None
+            if (
+                job is None
+                or delivery is None
+                or not delivery.remote_secret
+                or not secrets.compare_digest(delivery.remote_secret, secret)
+            ):
+                raise MeshError(404, "not_found", "Unknown transfer.")
+            self._post_mail(job.owner, {**message, "job": job.id, "target": target})
+        else:
+            raise MeshError(400, "bad_signal", "Invalid connection message.")
+
+    def set_direct(
+        self, job_id: str, viewer: Viewer, target_id: str, state: str, sent: int = 0
+    ) -> None:
+        """The sender's page reports how sending straight to ``target_id`` is going."""
+        job = self.job_for(job_id, viewer)
+        delivery = job.deliveries.get(target_id)
+        if delivery is None:
+            raise MeshError(404, "not_found", "That device isn’t part of this transfer.")
+        if state == "trying":
+            if delivery.view_state() not in {ACCEPTED, "sending"}:
+                raise MeshError(409, "not_accepted", "That device hasn’t accepted this transfer.")
+            delivery.direct = True
+        elif state == "failed":
+            delivery.direct = False  # the files go the usual way instead
+        elif state == "progress":
+            delivery.sent = max(delivery.sent, int(sent))
+        elif state == "done":
+            delivery.sent = sum(int(f["size"]) for f in job.files)
+            delivery.files_done = set(range(len(job.files)))
+            if delivery.session is None:
+                delivery.state = DONE
+        else:
+            raise MeshError(400, "bad_request", "Unknown state.")
+        if all(d.view_state() in FINAL for d in job.deliveries.values()):
+            job.finished = time.monotonic()
+
+    def direct_received(
+        self, session_id: str, viewer: Viewer, index: int, received: int, done: bool
+    ) -> None:
+        """The receiving page reports a file arriving straight from the sender's browser."""
+        session = self._session_for(session_id, viewer)
+        with self._lock:
+            if session.state not in {ACCEPTED, RECEIVING}:
+                raise MeshError(410, session.state, session.reason or "This transfer was stopped.")
+            if not 0 <= index < len(session.files):
+                raise MeshError(404, "not_found", "No such file in this transfer.")
+            item = session.files[index]
+            if item.state == DONE:
+                return
+            item.received = max(0, min(item.size, int(received)))
+            session.state = RECEIVING
+            if done:
+                item.state, item.received, item.direct = DONE, item.size, True
+                item.saved_name = item.name
+                self._maybe_finish(session)
 
     # -------------------------------------------------------- housekeeping
 
@@ -1281,6 +1438,7 @@ class Mesh:
                     "state": f.state,
                     "received": f.received,
                     "saved_name": f.saved_name,
+                    "direct": f.direct,
                 }
                 for f in s.files
             ],
@@ -1303,6 +1461,7 @@ class Mesh:
                     "state": d.view_state(),
                     "reason": d.reason or (d.session.reason if d.session else ""),
                     "sent": min(sent, total),
+                    "direct": d.direct,
                 }
             )
         return {
@@ -1346,6 +1505,7 @@ class Mesh:
             "incoming": incoming,
             "outgoing": outgoing,
             "discovery": bool(self.discovery and self.discovery.working),
+            "signals": len(self._mail.get(viewer.id, [])),
         }
         if viewer.is_owner:
             state["pairing"] = {"code": self.pair_code, "expires_in": self.pair_code_expires_in()}

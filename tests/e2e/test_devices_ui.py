@@ -233,3 +233,66 @@ def test_phone_browser_sends_through_the_app(devices: list[Server], browser, sec
         assert not (alpha.root / "IMG_0001.jpg").exists()
     finally:
         phone_ctx.close()
+
+
+def _browser_page(browser, name: str, ua: str):  # type: ignore[no-untyped-def]
+    ctx = browser.new_context(
+        viewport={"width": 390, "height": 844}, user_agent=ua, accept_downloads=True
+    )
+    pg = ctx.new_page()
+    errors: list[str] = []
+    pg.on("pageerror", lambda exc: errors.append(str(exc)))
+    pg._errors = errors  # type: ignore[attr-defined]
+    return ctx, pg
+
+
+PIXEL = "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Mobile Safari/537.36"
+IPAD = "Mozilla/5.0 (iPad; CPU OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1"
+
+
+@pytest.mark.parametrize("webrtc", [True, False])
+def test_browsers_send_to_each_other_directly(
+    devices: list[Server], browser, tmp_path: Path, webrtc: bool
+) -> None:  # type: ignore[no-untyped-def]
+    ip = network.primary_ip()
+    if not ip:
+        pytest.skip("needs a LAN address")
+    alpha = devices[0]
+    url = f"http://{ip}:{alpha.url.rsplit(':', 1)[1]}"
+    ctx_a, phone = _browser_page(browser, "phone", PIXEL)
+    ctx_b, ipad = _browser_page(browser, "ipad", IPAD)
+    try:
+        if not webrtc:  # the receiver can't do WebRTC: the sender must fall back to the app
+            ipad.add_init_script("delete window.RTCPeerConnection;")
+        phone.goto(url)
+        ipad.goto(url)
+        expect(tile(phone, "iPad")).to_be_visible(timeout=10_000)
+        payload = bytes(range(256)) * 4000  # ~1 MB, several data-channel chunks
+        tile(phone, "iPad").locator("button").click()
+        phone.set_input_files(
+            "#file-input",
+            files=[{"name": "photo.heic", "mimeType": "image/heic", "buffer": payload}],
+        )
+        phone.click("#send-go")
+        ipad.locator("#incoming-accept").click(timeout=10_000)
+        expected = "Delivered directly" if webrtc else "Delivered"
+        target = phone.locator(".job-target", has_text="iPad")
+        expect(target).to_contain_text(expected, timeout=30_000)
+        if webrtc:
+            expect(target).to_contain_text("Delivered directly")
+        else:
+            expect(target).not_to_contain_text("directly")
+        row = ipad.locator(".file-row", has_text="photo.heic")
+        expect(row).to_be_visible(timeout=10_000)
+        if webrtc:
+            expect(row).to_contain_text("in this browser")
+        with ipad.expect_download() as info:
+            row.locator(".row-actions a").click(force=True)
+        assert Path(info.value.path()).read_bytes() == payload
+        # Nothing was stored on Alpha's disk either way.
+        assert not (alpha.root / "photo.heic").exists()
+        assert phone._errors == []  # type: ignore[attr-defined]
+        assert ipad._errors == []  # type: ignore[attr-defined]
+    finally:
+        ctx_a.close()
+        ctx_b.close()

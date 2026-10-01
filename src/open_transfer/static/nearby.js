@@ -2,7 +2,8 @@
 // sending, incoming "Accept?" prompts, pairing (show / enter / scan a code)
 // and renaming this device.
 
-import { $, ApiError, api, copyText, formatBytes, formatDuration, h, icon, plural, state, toast } from "./lib.js";
+import { DIRECT_MAX_BYTES, directSupported, handleSignals, sendDirect } from "./direct.js";
+import { $, ApiError, api, copyText, formatBytes, formatDuration, guessKind, h, icon, plural, state, toast } from "./lib.js";
 
 const PLATFORM = { windows: "Windows", macos: "Mac", linux: "Linux", android: "Android", ios: "iOS", chromeos: "ChromeOS", unknown: "" };
 const ACTIVE = new Set(["offering", "waiting", "accepted", "sending"]);
@@ -19,6 +20,7 @@ export const mesh = {
   promptId: null,
   seen: new Map(), // incoming id -> last state
   paired: null, // ids of paired devices (to notice new pairings)
+  directFiles: [], // files received straight from another browser (kept in memory)
   tiles: new Map(), // device id -> { el, sig }
   incomingRows: new Map(),
 };
@@ -91,8 +93,11 @@ export async function fetchState() {
   return mesh.data;
 }
 
+const jobActive = (job) => job.state === "waiting" || job.state === "running";
+
 export function busy() {
-  return [...mesh.jobs.values()].some((j) => j.state === "waiting" || j.state === "uploading") || mesh.promptQueue.length > 0;
+  const receiving = (mesh.data?.incoming || []).some((s) => s.state === "accepted" || s.state === "receiving");
+  return [...mesh.jobs.values()].some(jobActive) || mesh.promptQueue.length > 0 || receiving;
 }
 
 function apply() {
@@ -116,7 +121,54 @@ function apply() {
   pumpJobs();
   renderJobs();
   renderSendBar();
-  if (!state.info.owner) ctx.libraryChanged(data.inbox || []);
+  if (!state.info.owner) ctx.libraryChanged(inboxFiles());
+  if (data.signals) fetchSignals();
+}
+
+async function fetchSignals() {
+  try {
+    const { data } = await api("/api/signals");
+    handleSignals(data.signals, directReceiver);
+  } catch {
+    /* next poll */
+  }
+}
+
+// Files received over a direct connection live in this page until saved.
+const directReceiver = {
+  session: (id) => mesh.data?.incoming.find((s) => s.id === id),
+  file(file) {
+    const taken = new Set([...mesh.directFiles.map((f) => f.name), ...(mesh.data?.inbox || []).map((f) => f.name)]);
+    let name = file.name;
+    for (let n = 1; taken.has(name); n += 1) {
+      const dot = file.name.lastIndexOf(".");
+      name = dot > 0 ? `${file.name.slice(0, dot)} (${n})${file.name.slice(dot)}` : `${file.name} (${n})`;
+    }
+    mesh.directFiles.unshift({
+      name,
+      size: file.size,
+      mime: file.mime,
+      kind: guessKind(name),
+      modified: Date.now() / 1000,
+      url: URL.createObjectURL(file.blob),
+      direct: true,
+      saved: false,
+    });
+    if (!state.info.owner) ctx.libraryChanged(inboxFiles());
+  },
+};
+
+function inboxFiles() {
+  return [...mesh.directFiles, ...(mesh.data?.inbox || [])];
+}
+
+export function forgetDirectFile(name) {
+  const index = mesh.directFiles.findIndex((f) => f.name === name);
+  if (index < 0) return false;
+  URL.revokeObjectURL(mesh.directFiles[index].url);
+  mesh.directFiles.splice(index, 1);
+  ctx.libraryChanged(inboxFiles());
+  return true;
 }
 
 // -------------------------------------------------------------- this device
@@ -168,14 +220,15 @@ function tileStatus(d) {
   if (!d.online) return { text: "Not nearby", tone: "muted" };
   const activity = activityFor(d.id);
   if (activity) {
-    const { target, view, job } = activity;
+    const { view, job } = activity;
+    const target = effectiveTarget(job, activity.target);
     const pct = view.total ? Math.min(100, Math.round((target.sent / view.total) * 100)) : 0;
     switch (target.state) {
       case "offering":
       case "waiting":
         return { text: "Waiting…", tone: "accent", ring: "spin" };
       case "accepted":
-        return job.state === "uploading" ? { text: "Sending…", tone: "accent", ring: 0 } : { text: "Accepted", tone: "accent", ring: 0 };
+        return job.state === "running" ? { text: "Sending…", tone: "accent", ring: 0 } : { text: "Accepted", tone: "accent", ring: 0 };
       case "sending":
         return { text: `Sending ${pct}%`, tone: "accent", ring: pct };
       case "done":
@@ -398,6 +451,10 @@ function serverJob(id) {
 
 function pumpJobs() {
   for (const job of mesh.jobs.values()) {
+    if (job.state === "running") {
+      checkFinished(job);
+      continue;
+    }
     if (job.state !== "waiting") continue;
     const view = serverJob(job.id);
     if (!view) {
@@ -406,9 +463,117 @@ function pumpJobs() {
     }
     const states = view.targets.map((t) => t.state);
     if (states.some((s) => s === "offering" || s === "waiting")) continue;
-    if (states.some((s) => s === "accepted")) uploadNext(job);
+    if (states.some((s) => s === "accepted")) startTransfer(job, view);
     else finishJob(job, "nobody");
   }
+}
+
+// A transfer goes straight to browsers that accepted it (WebRTC) and through
+// the apps to everyone else; a direct attempt that fails falls back to the app.
+function directEligible(job, target) {
+  const total = job.files.reduce((n, f) => n + f.size, 0);
+  return target.kind === "browser" && directSupported() && total <= DIRECT_MAX_BYTES && !window.OT_NO_DIRECT;
+}
+
+/** What to show for a target: our direct attempt overrides the app's view. */
+function effectiveTarget(job, target) {
+  const d = job.direct?.get(target.id);
+  if (!d || d.state === "relay") return target;
+  const state = d.state === "done" ? "done" : d.state === "sending" ? "sending" : "accepted";
+  return { ...target, state, sent: d.sent, direct: d.state };
+}
+
+function setDirect(job, target, value, sent = 0) {
+  return api(`/api/send/${encodeURIComponent(job.id)}/targets/${encodeURIComponent(target)}/direct`, {
+    method: "POST",
+    json: { state: value, sent },
+  });
+}
+
+async function startTransfer(job, view) {
+  job.state = "running";
+  job.direct = new Map();
+  job.abort = new AbortController();
+  const accepted = view.targets.filter((t) => t.state === "accepted");
+  await Promise.all(
+    accepted
+      .filter((t) => directEligible(job, t))
+      .map(async (t) => {
+        try {
+          await setDirect(job, t.id, "trying");
+          job.direct.set(t.id, { state: "trying", sent: 0 });
+        } catch {
+          /* it goes through the app instead */
+        }
+      }),
+  );
+  if (accepted.length > job.direct.size) queueRelay(job);
+  for (const id of job.direct.keys()) runDirect(job, id);
+  renderJobs();
+}
+
+async function runDirect(job, target) {
+  const d = job.direct.get(target);
+  const total = job.files.reduce((n, f) => n + f.size, 0);
+  let reported = 0;
+  const ok = await sendDirect({
+    job: job.id,
+    target,
+    files: job.files,
+    signal: job.abort.signal,
+    onProgress: (sent) => {
+      d.state = "sending";
+      d.sent = sent;
+      scheduleJobRender();
+      if (Date.now() - reported > 1500) {
+        reported = Date.now();
+        setDirect(job, target, "progress", sent).catch(() => {});
+      }
+    },
+  });
+  if (job.state === "finished") return; // canceled meanwhile
+  if (ok) {
+    d.state = "done";
+    d.sent = total;
+    await setDirect(job, target, "done").catch(() => {});
+  } else {
+    d.state = "relay";
+    d.sent = 0;
+    await setDirect(job, target, "failed").catch(() => {});
+    queueRelay(job);
+  }
+  mesh.etag = null;
+  ctx.requestPoll();
+  checkFinished(job);
+}
+
+function queueRelay(job) {
+  if (job.relayRunning) {
+    job.relayQueued = true;
+    return;
+  }
+  Object.assign(job, { relayRunning: true, index: 0, uploaded: 0, fileLoaded: 0 });
+  uploadNext(job);
+}
+
+function relayDone(job) {
+  job.relayRunning = false;
+  job.xhr = null;
+  if (job.relayQueued) {
+    job.relayQueued = false;
+    queueRelay(job);
+    return;
+  }
+  checkFinished(job);
+}
+
+function checkFinished(job) {
+  if (job.state !== "running" || job.relayRunning) return;
+  if ([...job.direct.values()].some((d) => d.state === "trying" || d.state === "sending")) return;
+  const view = serverJob(job.id);
+  const pending = (view?.targets || []).map((t) => effectiveTarget(job, t)).some((t) => ACTIVE.has(t.state));
+  if (!pending) finishJob(job, "done");
+  else ctx.requestPoll();
 }
 
 function finishJob(job, outcome) {
@@ -438,17 +603,12 @@ function finishJob(job, outcome) {
 }
 
 function uploadNext(job) {
+  if (job.state === "finished") return;
   if (job.index >= job.files.length) {
-    job.state = "uploaded";
-    setTimeout(() => {
-      const view = serverJob(job.id);
-      const states = view?.targets.map((t) => t.state) || [];
-      if (!states.some((s) => ACTIVE.has(s))) finishJob(job, "done");
-    }, 400);
+    relayDone(job);
     ctx.requestPoll();
     return;
   }
-  job.state = "uploading";
   const file = job.files[job.index];
   const xhr = new XMLHttpRequest();
   job.xhr = xhr;
@@ -479,18 +639,19 @@ function uploadNext(job) {
       job.fileLoaded = 0;
       job.index += 1;
       uploadNext(job);
+    } else if (xhr.response?.error?.code === "no_receivers") {
+      relayDone(job); // everyone left is being sent to directly
     } else {
       const message = xhr.response?.error?.message || `Sending failed (${xhr.status || "no response"}).`;
       job.error = message;
-      finishJob(job, "failed");
+      relayDone(job);
       if (xhr.status !== 410) toast(message, { tone: "error", icon: "alert" });
     }
     ctx.requestPoll();
   });
   xhr.addEventListener("error", () => {
-    job.xhr = null;
     job.error = "Connection lost. Check your Wi-Fi and try again.";
-    finishJob(job, "failed");
+    relayDone(job);
     toast(job.error, { tone: "error", icon: "alert" });
   });
   xhr.addEventListener("abort", () => {
@@ -503,6 +664,7 @@ async function cancelJob(job) {
   job.state = "finished";
   job.finishedAt = Date.now();
   job.xhr?.abort();
+  job.abort?.abort();
   try {
     await api(`/api/send/${encodeURIComponent(job.id)}`, { method: "DELETE" });
   } catch {
@@ -577,14 +739,15 @@ function renderJobs() {
     const own = Math.min(total, job.uploaded + (job.fileLoaded || 0));
     let headline;
     if (job.state === "waiting") headline = `${formatBytes(view.total)} · waiting for ${plural(view.targets.filter((t) => t.state === "waiting" || t.state === "offering").length, "answer")}`;
-    else if (job.state === "uploading") {
+    else if (job.state === "running" && job.relayRunning) {
       const eta = job.speed > 0 ? formatDuration((total - own) / job.speed) : "";
       headline = [`${formatBytes(own)} of ${formatBytes(view.total)}`, job.speed > 0 && `${formatBytes(job.speed)}/s`, eta].filter(Boolean).join(" · ");
-    } else headline = formatBytes(view.total);
+    } else if (job.state === "running") headline = `${formatBytes(view.total)} · sending directly`;
+    else headline = formatBytes(view.total);
     const anyWaiting = view.targets.some((t) => t.state === "waiting" || t.state === "offering");
     const anyAccepted = view.targets.some((t) => t.state === "accepted");
     const retryable = view.targets.some((t) => ["failed", "expired"].includes(t.state));
-    const active = job.state === "waiting" || job.state === "uploading" || job.state === "uploaded";
+    const active = jobActive(job);
     row.replaceChildren(
       h(
         "div",
@@ -612,9 +775,13 @@ function renderJobs() {
       h(
         "ul",
         { class: "job-targets" },
-        view.targets.map((t) => {
+        view.targets.map((original) => {
+          const t = effectiveTarget(job, original);
           const pct = t.state === "done" ? 100 : Math.min(100, (t.sent / total) * 100);
-          const text = t.state === "sending" ? `${Math.floor(pct)}%` : t.reason && FINAL.has(t.state) && t.state !== "done" ? t.reason : TARGET_TEXT[t.state] || t.state;
+          let text = t.state === "sending" ? `${Math.floor(pct)}%` : t.reason && FINAL.has(t.state) && t.state !== "done" ? t.reason : TARGET_TEXT[t.state] || t.state;
+          if (t.direct === "trying") text = "Connecting directly…";
+          else if (t.direct === "sending") text = `Directly · ${Math.floor(pct)}%`;
+          else if (t.direct === "done") text = "Delivered directly";
           return h(
             "li",
             { class: "job-target", dataset: { state: t.state } },
@@ -631,13 +798,14 @@ function renderJobs() {
   renderIncomingRows();
   const any = list.children.length + $("#incoming-list").children.length;
   $("#activity").hidden = any === 0;
-  const sending = [...mesh.jobs.values()].filter((j) => j.state === "uploading" || j.state === "waiting");
+  const sending = [...mesh.jobs.values()].filter(jobActive);
   if (sending.length && !document.title.startsWith("●")) document.title = "Sending · Open Transfer";
   else if (!sending.length && document.title === "Sending · Open Transfer") document.title = "Open Transfer";
 }
 
 window.addEventListener("beforeunload", (event) => {
-  if ([...mesh.jobs.values()].some((j) => j.state === "uploading" || j.state === "waiting")) {
+  const unsaved = mesh.directFiles.some((f) => !f.saved);
+  if ([...mesh.jobs.values()].some(jobActive) || unsaved) {
     event.preventDefault();
     event.returnValue = "";
   }

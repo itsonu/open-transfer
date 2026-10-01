@@ -571,3 +571,135 @@ def test_state_supports_etags(make_node: NodeFactory) -> None:
     with pytest.raises(urllib.error.HTTPError) as info:
         urllib.request.urlopen(request)
     assert info.value.code == 304
+
+
+# ------------------------------------------------ direct browser ↔ browser (WebRTC)
+
+
+def _signals(client: Client) -> list[Json]:
+    status, data = client("GET", "/api/signals")
+    assert status == 200
+    return data["signals"]  # type: ignore[no-any-return]
+
+
+@pytest.mark.parametrize("same_app", [True, False])
+def test_browsers_swap_connection_messages_through_their_apps(
+    make_node: NodeFactory, same_app: bool
+) -> None:
+    a = make_node("Alpha")
+    b = a if same_app else make_node("Bravo")
+    if not same_app:
+        connect(a, b)
+    phone, tablet = visitor(a, "Phone"), visitor(b, "Tablet", form="tablet")
+    job = send(phone, [device_id(phone, "Tablet")], [("clip.mp4", b"v" * 100)])
+    offer = incoming(tablet)
+    tablet("POST", f"/api/incoming/{offer['id']}/accept")
+    tablet_id = tablet.state()["me"]["id"]
+    wait_for(lambda: target_states(phone, job) == {"Tablet": "accepted"})
+
+    assert (
+        phone("POST", f"/api/send/{job}/targets/{tablet_id}/direct", {"state": "trying"})[0] == 200
+    )
+    assert (
+        phone(
+            "POST",
+            "/api/signal",
+            {"job": job, "target": tablet_id, "kind": "offer", "sdp": "v=0 offer"},
+        )[0]
+        == 200
+    )
+    got = wait_for(lambda: _signals(tablet))
+    assert got == [{"kind": "offer", "sdp": "v=0 offer", "session": offer["id"]}]
+    assert (
+        tablet(
+            "POST", "/api/signal", {"session": offer["id"], "kind": "answer", "sdp": "v=0 answer"}
+        )[0]
+        == 200
+    )
+    back = wait_for(lambda: _signals(phone))
+    assert back == [{"kind": "answer", "sdp": "v=0 answer", "job": job, "target": tablet_id}]
+
+    # While a direct attempt runs the app doesn't stream the file itself…
+    assert upload(phone, job, 0, b"v" * 100)[1]["error"]["code"] == "no_receivers"
+    # …the receiving page reports what arrived, the sender reports it's done.
+    tablet(
+        "POST", f"/api/incoming/{offer['id']}/direct", {"index": 0, "received": 100, "done": True}
+    )
+    phone("POST", f"/api/send/{job}/targets/{tablet_id}/direct", {"state": "done"})
+    finished = incoming(tablet, "done")
+    assert finished["files"][0]["direct"] is True
+    wait_for(lambda: target_states(phone, job) == {"Tablet": "done"})
+    assert tablet.state()["inbox"] == []  # it lives in the browser, not on the app
+
+
+def test_failed_direct_attempt_falls_back_to_the_app(make_node: NodeFactory) -> None:
+    a = make_node("Alpha")
+    phone, tablet = visitor(a, "Phone"), visitor(a, "Tablet")
+    job = send(phone, [device_id(phone, "Tablet")], [("doc.pdf", b"pdf")])
+    offer = incoming(tablet)
+    tablet("POST", f"/api/incoming/{offer['id']}/accept")
+    tablet_id = tablet.state()["me"]["id"]
+    wait_for(lambda: target_states(phone, job) == {"Tablet": "accepted"})
+    phone("POST", f"/api/send/{job}/targets/{tablet_id}/direct", {"state": "trying"})
+    phone("POST", f"/api/send/{job}/targets/{tablet_id}/direct", {"state": "failed"})
+    assert upload(phone, job, 0, b"pdf")[0] == 200
+    assert tablet("GET", "/api/inbox/files/doc.pdf", raw=True) == (200, b"pdf")
+
+
+def test_only_the_two_ends_can_exchange_connection_messages(make_node: NodeFactory) -> None:
+    a = make_node("Alpha")
+    phone, tablet, stranger = visitor(a, "Phone"), visitor(a, "Tablet"), visitor(a, "Stranger")
+    job = send(phone, [device_id(phone, "Tablet")], [("a.txt", b"x")])
+    offer = incoming(tablet)
+    tablet_id = tablet.state()["me"]["id"]
+    # Not accepted yet: nothing can be sent.
+    assert (
+        phone("POST", "/api/signal", {"job": job, "target": tablet_id, "kind": "offer", "sdp": ""})[
+            0
+        ]
+        == 409
+    )
+    tablet("POST", f"/api/incoming/{offer['id']}/accept")
+    # Someone else can't use the job or the session.
+    assert (
+        stranger(
+            "POST", "/api/signal", {"job": job, "target": tablet_id, "kind": "offer", "sdp": ""}
+        )[0]
+        == 404
+    )
+    assert (
+        stranger("POST", "/api/signal", {"session": offer["id"], "kind": "answer", "sdp": ""})[0]
+        == 404
+    )
+    assert (
+        stranger("POST", f"/api/incoming/{offer['id']}/direct", {"index": 0, "received": 1})[0]
+        == 404
+    )
+    # Unknown kinds and huge messages are refused; forged app-to-app messages too.
+    assert (
+        phone("POST", "/api/signal", {"job": job, "target": tablet_id, "kind": "evil", "sdp": ""})[
+            0
+        ]
+        == 400
+    )
+    assert (
+        phone(
+            "POST",
+            "/api/signal",
+            {"job": job, "target": tablet_id, "kind": "offer", "sdp": "x" * 70_000},
+        )[0]
+        == 400
+    )
+    forged = Client(a.local_url)(
+        "POST",
+        "/api/p2p/v1/signal",
+        {
+            "dir": "to_receiver",
+            "session": offer["id"],
+            "secret": "guess",
+            "kind": "offer",
+            "sdp": "",
+        },
+    )
+    assert forged[0] == 404
+    assert _signals(tablet) == []

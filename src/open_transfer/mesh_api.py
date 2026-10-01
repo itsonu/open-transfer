@@ -44,6 +44,7 @@ PUBLIC_P2P_ENDPOINTS = {
     "p2p_offer_cancel",
     "p2p_pair",
     "p2p_pair_confirm",
+    "p2p_signal",
 }
 MAX_PENDING_PER_CLIENT = 10
 
@@ -120,6 +121,8 @@ def register(
             files=data.get("files"),  # type: ignore[arg-type]
             paired=verified and origin.get("id") == sender_id,
             source=client(),
+            job=str(data.get("job") or ""),
+            sender_node=sender_id,
         )
         return jsonify({"id": session.id, "secret": session.secret, "state": session.state}), 201
 
@@ -144,6 +147,11 @@ def register(
     @app.delete(f"{P2P}/offers/<session_id>")
     def p2p_offer_cancel(session_id: str) -> Response:
         mesh.cancel_incoming(session_id, None, secret=request.headers.get("X-OT-Secret", ""))
+        return jsonify({"ok": True})
+
+    @app.post(f"{P2P}/signal")
+    def p2p_signal() -> Response:
+        mesh.handle_signal(body_json())
         return jsonify({"ok": True})
 
     @app.post(f"{P2P}/pair")
@@ -216,6 +224,33 @@ def register(
     @app.delete("/api/send/<job_id>/targets/<target_id>")
     def ui_send_cancel_target(job_id: str, target_id: str) -> Response:
         mesh.cancel_target(job_id, viewer(), target_id)
+        return jsonify({"ok": True})
+
+    @app.post("/api/signal")
+    def ui_signal() -> Response:
+        mesh.signal(viewer(), body_json())
+        return jsonify({"ok": True})
+
+    @app.get("/api/signals")
+    def ui_signals() -> Response:
+        return jsonify({"signals": mesh.take_signals(viewer())})
+
+    @app.post("/api/send/<job_id>/targets/<target_id>/direct")
+    def ui_send_direct(job_id: str, target_id: str) -> Response:
+        data = body_json()
+        mesh.set_direct(
+            job_id, viewer(), target_id, str(data.get("state", "")), int(data.get("sent") or 0)
+        )
+        return jsonify({"ok": True})
+
+    @app.post("/api/incoming/<session_id>/direct")
+    def ui_incoming_direct(session_id: str) -> Response:
+        data = body_json()
+        try:
+            index, received = int(data.get("index", -1)), int(data.get("received", 0))
+        except (TypeError, ValueError) as exc:
+            raise MeshError(400, "bad_request", "Invalid progress.") from exc
+        mesh.direct_received(session_id, viewer(), index, received, bool(data.get("done")))
         return jsonify({"ok": True})
 
     @app.post("/api/incoming/<session_id>/<any(accept, decline):decision>")

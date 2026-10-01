@@ -77,6 +77,22 @@ export function plural(n, word) {
   return `${n} ${word}${n === 1 ? "" : "s"}`;
 }
 
+export function guessKind(name) {
+  const ext = (name.split(".").pop() || "").toLowerCase();
+  const map = {
+    image: "png jpg jpeg gif webp heic heif bmp tiff svg avif",
+    video: "mp4 mov m4v webm mkv avi",
+    audio: "mp3 m4a aac wav flac ogg opus",
+    archive: "zip rar 7z tar gz tgz bz2 xz dmg iso",
+    document: "pdf doc docx odt rtf txt md pages epub",
+    spreadsheet: "xls xlsx csv ods numbers",
+    presentation: "ppt pptx odp key",
+    code: "py js ts json html css sh c cpp go rs java",
+    app: "apk exe msi pkg deb rpm appimage",
+  };
+  return Object.keys(map).find((k) => map[k].split(" ").includes(ext)) || "other";
+}
+
 // -------------------------------------------------------------------- API
 
 export class ApiError extends Error {

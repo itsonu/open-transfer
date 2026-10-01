@@ -3,8 +3,8 @@
 // file list · shared-folder uploads · drag/drop/paste · PIN · boot.
 // lib.js has the helpers, nearby.js the devices, sending and pairing.
 
-import { $, api, can, formatBytes, formatDuration, h, icon, plural, relativeTime, setLockHandler, state, toast } from "./lib.js";
-import { announceSelf, busy, fetchState, initNearby, isDeviceMode, mesh, openAddDevice, stageFiles } from "./nearby.js";
+import { $, api, can, formatBytes, formatDuration, guessKind, h, icon, plural, relativeTime, setLockHandler, state, toast } from "./lib.js";
+import { announceSelf, busy, fetchState, forgetDirectFile, initNearby, isDeviceMode, mesh, openAddDevice, stageFiles } from "./nearby.js";
 
 const POLL_MS = 1500;
 const POLL_BUSY_MS = 700;
@@ -192,23 +192,25 @@ async function refresh() {
 const rows = new Map(); // name -> { el, sig }
 
 function buildFileRow(file) {
-  const href = fileUrl(file.name);
+  // Files received straight from another browser live in this page (a blob: URL).
+  const href = file.url || fileUrl(file.name);
   const previewable = PREVIEW_MIME.has(file.mime);
   const thumb = h(
     previewable ? "a" : "span",
     previewable
-      ? { class: "thumb thumb-link", href: fileUrl(file.name, true), target: "_blank", rel: "noopener", tabindex: "-1", "aria-hidden": "true" }
+      ? { class: "thumb thumb-link", href: file.url || fileUrl(file.name, true), target: "_blank", rel: "noopener", tabindex: "-1", "aria-hidden": "true" }
       : { class: "thumb", "aria-hidden": "true" },
     icon(KIND_ICON[file.kind] || "file"),
   );
   thumb.style.setProperty("--kind", `var(--k-${file.kind})`);
   if (THUMB_MIME.has(file.mime) && file.size <= THUMB_MAX_BYTES) {
-    const img = h("img", { src: fileUrl(file.name, true), alt: "", loading: "lazy", decoding: "async" });
+    const img = h("img", { src: file.url || fileUrl(file.name, true), alt: "", loading: "lazy", decoding: "async" });
     img.addEventListener("load", () => img.classList.add("is-loaded"), { once: true });
     img.addEventListener("error", () => img.remove(), { once: true });
     thumb.append(img);
   }
   const sub = h("span", { class: "row-sub" });
+  if (file.direct) sub.dataset.direct = "1";
   const openNative = nativeApp()?.openFile && libraryMode() === "owner";
   const actions = h(
     "div",
@@ -236,6 +238,14 @@ function buildFileRow(file) {
       nativeApp().openFile(file.name);
     });
   }
+  if (file.direct) {
+    for (const link of row.querySelectorAll("a[download]")) {
+      link.addEventListener("click", () => {
+        file.saved = true;
+        updateRowTime(row);
+      });
+    }
+  }
   row._file = file;
   updateRowTime(row);
   return row;
@@ -243,7 +253,8 @@ function buildFileRow(file) {
 
 function updateRowTime(row) {
   const f = row._file;
-  row.querySelector(".row-sub").textContent = `${formatBytes(f.size)} · ${relativeTime(f.modified)}`;
+  const where = f.direct ? (f.saved ? " · saved" : " · in this browser — save it") : "";
+  row.querySelector(".row-sub").textContent = `${formatBytes(f.size)} · ${relativeTime(f.modified)}${where}`;
 }
 
 function updateRelativeTimes() {
@@ -313,6 +324,11 @@ async function deleteFile(file, row) {
     renderFiles();
   }, 260);
   try {
+    if (file.direct) {
+      forgetDirectFile(file.name);
+      toast(`Removed “${file.name}”`, { icon: "trash" });
+      return;
+    }
     if (inInbox()) {
       await api(`/api/inbox/files/${encodeURIComponent(file.name)}`, { method: "DELETE" });
       mesh.etag = null;
@@ -527,21 +543,6 @@ function buildTransferRow(t) {
   return row;
 }
 
-function guessKind(name) {
-  const ext = (name.split(".").pop() || "").toLowerCase();
-  const map = {
-    image: "png jpg jpeg gif webp heic heif bmp tiff svg avif",
-    video: "mp4 mov m4v webm mkv avi",
-    audio: "mp3 m4a aac wav flac ogg opus",
-    archive: "zip rar 7z tar gz tgz bz2 xz dmg iso",
-    document: "pdf doc docx odt rtf txt md pages epub",
-    spreadsheet: "xls xlsx csv ods numbers",
-    presentation: "ppt pptx odp key",
-    code: "py js ts json html css sh c cpp go rs java",
-    app: "apk exe msi pkg deb rpm appimage",
-  };
-  return Object.keys(map).find((k) => map[k].split(" ").includes(ext)) || "other";
-}
 
 function scheduleTransferRender() {
   if (renderQueued) return;
