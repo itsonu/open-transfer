@@ -8,8 +8,10 @@ import sys
 from pathlib import Path
 from types import ModuleType
 
+from open_transfer import network
 from open_transfer.config import Config
 from open_transfer.node import Node
+from tests.test_mesh import multicast_works
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -53,9 +55,17 @@ def test_device_check_passes_against_real_nodes(tmp_path: Path) -> None:
             ]
         )
         report = out.read_text(encoding="utf-8")
-        assert code == 0, report
-        assert "| ❌ |" not in report
-        for ref in ("1.1", "1.3", "2.2", "2.3", "2.4", "2.5", "2.6", "4.2", "4.4", "4.7", "6.4"):
+        failed = [line for line in report.splitlines() if line.startswith("| ❌ |")]
+        if multicast_works(random.randint(40000, 59000)) and network.lan_ips():
+            assert code == 0, report
+            assert not failed, report
+        else:
+            # Without multicast (some CI machines) only finding devices on their own
+            # fails, and the script carries on by address.
+            for line in failed:
+                assert line.split("|")[2].strip() in {"1.1", "2.2", "2.6"}, report
+                assert "by address" in line or "with the address: ok" in line, report
+        for ref in ("1.3", "2.3", "2.4", "2.5", "3", "4.1", "4.2", "4.4", "4.7", "6.2", "6.4"):
             assert f"| ✅ | {ref} |" in report, ref
         # Loopback can be fast enough to finish before the cancel; never a failure.
         assert "| ✅ | 6.3 |" in report or "| ⏭️ | 6.3 |" in report

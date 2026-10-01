@@ -683,12 +683,18 @@ class Checker:
                 self.report.add("1.1", f"{node.label} lists every other device on its own", True)
             except CheckError:
                 missing = [o.label for o in others if not node.sees(o)]
+                why = (
+                    "discovery is on but they weren't heard: multicast may be blocked "
+                    "(guest Wi-Fi, router isolation, firewall)"
+                    if node.state().get("discovery")
+                    else "discovery couldn't start on this device"
+                )
                 self.report.add(
                     "1.1",
                     f"{node.label} lists every other device on its own",
                     False,
                     f"missing {', '.join(missing)} after {self.args.discovery_timeout:.0f}s; "
-                    f"multicast={node.state().get('discovery')}. Adding them by address",
+                    f"{why}. Added them by address to go on",
                 )
                 for o in others:
                     if not node.sees(o):
