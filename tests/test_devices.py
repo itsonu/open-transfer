@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -32,7 +33,8 @@ def test_trust_store_persists_privately(tmp_path: Path) -> None:
     store.add("d-" + "a" * 24, "Laptop", b"k" * 32)
     again = devices.TrustStore(tmp_path)
     assert again.get("d-" + "a" * 24).name == "Laptop"  # type: ignore[union-attr]
-    assert (tmp_path / "trusted.json").stat().st_mode & 0o077 == 0
+    if os.name != "nt":  # POSIX permissions; Windows ACLs keep it in the user's profile
+        assert (tmp_path / "trusted.json").stat().st_mode & 0o077 == 0
     assert again.remove("d-" + "a" * 24)
     assert devices.TrustStore(tmp_path).get("d-" + "a" * 24) is None
 

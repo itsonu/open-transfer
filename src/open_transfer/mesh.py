@@ -970,6 +970,17 @@ class Mesh:
             return
         delivery.remote_id = str(data.get("id", ""))
         delivery.remote_secret = str(data.get("secret", ""))
+        if job.canceled or delivery.canceled:
+            # Canceled while the offer was on its way: withdraw it now we know its id.
+            delivery.state = CANCELED
+            with contextlib.suppress(OSError):
+                self._http(
+                    peer,
+                    "DELETE",
+                    f"{P2P}/offers/{delivery.remote_id}",
+                    headers={"X-OT-Secret": delivery.remote_secret},
+                )
+            return
         self._follow_remote(job, delivery, data)
 
     def _follow_remote(self, job: Job, delivery: Delivery, data: dict[str, Any]) -> None:

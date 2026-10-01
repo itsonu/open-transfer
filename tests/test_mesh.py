@@ -197,7 +197,7 @@ def test_send_to_one_device_after_accepting(make_node: NodeFactory) -> None:
     offer = incoming(bob)
     assert offer["from"]["name"] == "Alpha"
     assert offer["files"][0] == {**offer["files"][0], "name": "holiday.mov", "size": len(payload)}
-    assert target_states(alice, job) == {"Bravo": "waiting"}
+    wait_for(lambda: target_states(alice, job) == {"Bravo": "waiting"})
     assert bob("POST", f"/api/incoming/{offer['id']}/accept")[0] == 200
     wait_for(lambda: target_states(alice, job) == {"Bravo": "accepted"})
 

@@ -283,8 +283,19 @@ def _run(argv: Sequence[str] | None) -> int:
         print(f"open-transfer: error: {exc}", file=sys.stderr)
         return 2
 
+    from open_transfer.desktop import InstanceLock
     from open_transfer.node import Node
 
+    # Two copies on one state folder would announce the same device id.
+    lock = InstanceLock(config.state_path)
+    if not lock.acquire():
+        running = lock.read_info()
+        where = f" at http://127.0.0.1:{running.port}" if running else ""
+        print(
+            f"open-transfer: error: Open Transfer is already running for this folder{where}.",
+            file=sys.stderr,
+        )
+        return 1
     try:
         node = Node(config)
     except OSError as exc:
@@ -310,7 +321,9 @@ def _run(argv: Sequence[str] | None) -> int:
     if not (args.no_browser or env_bool("NO_BROWSER")):
         threading.Timer(0.4, webbrowser.open, args=(f"http://localhost:{port}",)).start()
 
+    lock.write_info(port)
     with contextlib.suppress(KeyboardInterrupt):  # Ctrl+C is the normal way to stop
         node.serve_forever()
+    lock.release()
     print("\n  " + style.dim("Stopped sharing. Your files are still in ") + str(config.storage_dir))
     return 0
