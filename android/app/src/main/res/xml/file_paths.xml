@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Files the "Open" button may share with other apps (read-only, per-file grants). -->
+<paths>
+    <!-- Download/Open Transfer (Environment.DIRECTORY_DOWNLOADS = "Download"). -->
+    <external-path name="downloads" path="Download/" />
+    <!-- Fallback folder when shared storage isn't writable (Android 10 without permission). -->
+    <external-files-path name="app_downloads" path="." />
+    <!-- Last resort when there's no external storage at all (Places.fallbackStorageDir). -->
+    <files-path name="private_downloads" path="downloads/" />
+</paths>
