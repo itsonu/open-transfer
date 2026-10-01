@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import io
+import ipaddress
 import logging
 import mimetypes
 import os
@@ -35,6 +36,9 @@ from werkzeug.middleware.proxy_fix import ProxyFix
 from open_transfer import __version__, network
 from open_transfer.archive import zip_stream
 from open_transfer.config import Config
+from open_transfer.mesh import Mesh, Viewer, visitor_identity
+from open_transfer.mesh_api import PUBLIC_P2P_ENDPOINTS
+from open_transfer.mesh_api import register as register_mesh_routes
 from open_transfer.security import (
     SAFE_METHODS,
     RateLimiter,
@@ -75,12 +79,13 @@ PUBLIC_ENDPOINTS = {
     "legacy_page",
     "auth",
     "info",
+    *PUBLIC_P2P_ENDPOINTS,
 }
 
 
-def _load_secret(storage: Storage) -> bytes:
+def _load_secret(state_dir: Path) -> bytes:
     """Keep the session key across restarts so PIN logins survive them."""
-    path = storage.root / ".open-transfer" / "secret"
+    path = state_dir / "secret"
     try:
         data = path.read_bytes()
         if len(data) >= 32:
@@ -104,9 +109,10 @@ def create_app(config: Config | None = None) -> Flask:
         reserve_bytes=config.reserve_disk_bytes,
         trash_ttl=config.trash_ttl,
     )
+    mesh = Mesh(config, storage)
     app = Flask(__name__, static_folder="static", template_folder="templates")
     app.config.update(
-        SECRET_KEY=_load_secret(storage),
+        SECRET_KEY=_load_secret(config.state_path),
         SESSION_COOKIE_NAME="open_transfer",
         SESSION_COOKIE_SAMESITE="Lax",
         SESSION_COOKIE_HTTPONLY=True,
@@ -119,7 +125,7 @@ def create_app(config: Config | None = None) -> Flask:
     if (config.public_url or "").startswith("https://"):
         app.config["SESSION_COOKIE_SECURE"] = True
     app.json.sort_keys = False  # type: ignore[attr-defined]
-    app.extensions["open_transfer"] = {"config": config, "storage": storage}
+    app.extensions["open_transfer"] = {"config": config, "storage": storage, "mesh": mesh}
     limiter = RateLimiter(attempts=5, window=60)
     machine_names = (network.hostname().lower(), f"{network.hostname().lower()}.local")
     pin_digest = hashlib.sha256((config.pin or "").encode()).hexdigest()[:16]
@@ -142,8 +148,42 @@ def create_app(config: Config | None = None) -> Flask:
         response.status_code = status
         return response
 
+    def is_owner() -> bool:
+        """The person using this device: requests from the machine itself."""
+        if not config.owner_loopback:
+            return False
+        try:
+            return ipaddress.ip_address(request.remote_addr or "").is_loopback
+        except ValueError:
+            return False
+
     def is_authenticated() -> bool:
-        return not config.pin or session.get("pin") == pin_digest
+        return not config.pin or is_owner() or session.get("pin") == pin_digest
+
+    def current_viewer() -> Viewer:
+        if is_owner():
+            ident = mesh.identity
+            return Viewer("owner", ident.id, ident.name, ident.form, ident.platform, True)
+        vid, name, form, plat = visitor_identity(
+            session.get("wid"), session.get("wname"), session.get("wform"), session.get("wplat")
+        )
+        if session.get("wid") != vid:
+            session.permanent = True
+            session["wid"] = vid
+        trusted = session.get("wtrust") == mesh.id
+        mesh.touch_visitor(
+            vid, name=name, form=form, platform=plat, address=client_id(), trusted=trusted
+        )
+        return Viewer("visitor", vid, name, form, plat, trusted)
+
+    def can_browse() -> bool:
+        return is_owner() or (config.share_folder and config.allow_browse)
+
+    def can_upload() -> bool:
+        return is_owner() or (config.share_folder and config.allow_upload)
+
+    def can_delete() -> bool:
+        return is_owner() or (config.share_folder and config.allow_browse and config.allow_delete)
 
     def request_host_port() -> tuple[str, int]:
         parts = urlsplit(f"//{request.host}")
@@ -195,10 +235,12 @@ def create_app(config: Config | None = None) -> Flask:
 
     def server_info() -> dict[str, Any]:
         authed = is_authenticated()
+        owner = is_owner()
         info: dict[str, Any] = {
             "app": "Open Transfer",
             "version": __version__,
-            "device": network.hostname(),
+            "device": mesh.identity.name,
+            "owner": owner,
             "auth": {
                 "required": bool(config.pin),
                 "authenticated": authed,
@@ -210,10 +252,12 @@ def create_app(config: Config | None = None) -> Flask:
                 share_url=share_url(),
                 urls=all_urls(),
                 permissions={
-                    "upload": config.allow_upload,
-                    "browse": config.allow_browse,
-                    "delete": config.allow_delete and config.allow_browse,
+                    "upload": can_upload(),
+                    "browse": can_browse(),
+                    "delete": can_delete() and can_browse(),
+                    "send": owner or config.allow_upload,
                 },
+                shared_folder=config.share_folder,
                 limits={"max_upload_size": config.max_upload_size},
                 storage={"free": storage.usage()["free"]},
                 pin=config.pin,
@@ -243,6 +287,9 @@ def create_app(config: Config | None = None) -> Flask:
         apply_security_headers(response)
         if request.path.startswith("/api/"):
             response.headers.setdefault("Cache-Control", "no-store")
+        elif request.path.endswith((".js", ".css")):
+            # ES module imports carry no version query; always revalidate (cheap 304s).
+            response.headers["Cache-Control"] = "no-cache"
         if log.isEnabledFor(logging.DEBUG):
             elapsed = (time.perf_counter() - g.get("started", time.perf_counter())) * 1000
             log.debug(
@@ -275,12 +322,21 @@ def create_app(config: Config | None = None) -> Flask:
     @app.get("/")
     def index() -> Any:
         supplied = request.args.get("pin")
-        if supplied is not None:
-            # QR codes embed the PIN so scanning is enough to get in. Strip it
-            # from the URL straight away so it does not linger in history.
-            # Goes through the same rate limit as the PIN form.
-            if config.pin and not is_authenticated():
+        pair = request.args.get("pair")
+        if supplied is not None or pair is not None:
+            # QR codes embed the PIN (and the owner's pairing code) so scanning
+            # is enough to get in. Strip them from the URL straight away so
+            # they don't linger in history. Both are rate-limited.
+            if supplied is not None and config.pin and not is_authenticated():
                 check_pin(supplied)
+            if (
+                pair
+                and not is_owner()
+                and is_authenticated()
+                and mesh.check_visitor_code(pair, client_id()) is True
+            ):
+                session.permanent = True
+                session["wtrust"] = mesh.id
             return redirect(url_for("index"))
         return render_template("index.html", info=server_info(), version=__version__)
 
@@ -335,8 +391,10 @@ def create_app(config: Config | None = None) -> Flask:
         return jsonify({"authenticated": False})
 
     def require_browse() -> None:
-        if not config.allow_browse:
-            abort(403, "This computer only receives files. Browsing is turned off.")
+        if not can_browse():
+            if config.share_folder:
+                abort(403, "This computer only receives files. Browsing is turned off.")
+            abort(403, "This device’s files are private. Ask its owner to send you what you need.")
 
     @app.get("/api/files")
     def list_files() -> Response:
@@ -358,7 +416,7 @@ def create_app(config: Config | None = None) -> Flask:
     @app.post("/api/files")
     @app.post("/transfer")
     def upload() -> Any:
-        if not config.allow_upload:
+        if not can_upload():
             return error(403, "upload_disabled", "Uploading is turned off on this computer.")
         saved = []
         try:
@@ -406,7 +464,7 @@ def create_app(config: Config | None = None) -> Flask:
     @app.delete("/api/files/<path:name>")
     def delete_file(name: str) -> Response:
         require_browse()
-        if not config.allow_delete:
+        if not can_delete():
             return error(403, "delete_disabled", "Deleting is turned off on this computer.")
         token = storage.delete(name)
         log.info("Deleted %s (by %s)", log_safe(name), client_id())
@@ -472,4 +530,12 @@ def create_app(config: Config | None = None) -> Flask:
             log.info("Sent %s to %s", log_safe(path.name), client_id())
         return response
 
+    register_mesh_routes(
+        app,
+        mesh,
+        viewer=current_viewer,
+        client=client_id,
+        file_csp=FILE_CSP,
+        share_url=share_url,
+    )
     return app

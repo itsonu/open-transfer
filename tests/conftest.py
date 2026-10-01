@@ -18,6 +18,11 @@ def make_app(tmp_path: Path) -> AppFactory:
     def factory(**overrides: object) -> Flask:
         overrides.setdefault("storage_dir", tmp_path / "share")
         overrides.setdefault("reserve_disk_bytes", 0)
+        # The classic suite tests the shared-folder mode as seen by a visitor;
+        # tests/test_mesh*.py cover the owner and nearby devices.
+        overrides.setdefault("share_folder", True)
+        overrides.setdefault("owner_loopback", False)
+        overrides.setdefault("discovery", False)
         app = create_app(Config(**overrides))  # type: ignore[arg-type]
         app.config["TESTING"] = True
         return app

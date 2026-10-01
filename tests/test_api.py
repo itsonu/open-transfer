@@ -190,7 +190,7 @@ def test_qr_code_svg(client: FlaskClient) -> None:
 
 def test_info_reports_permissions(make_app: AppFactory) -> None:
     info = make_app(allow_delete=False, max_upload_size=100).test_client().get("/api/info").json
-    assert info["permissions"] == {"upload": True, "browse": True, "delete": False}
+    assert info["permissions"] == {"upload": True, "browse": True, "delete": False, "send": True}
     assert info["limits"]["max_upload_size"] == 100
     assert info["share_url"].startswith("http://")
 

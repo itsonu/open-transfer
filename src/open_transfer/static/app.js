@@ -1,11 +1,14 @@
 // Open Transfer — client
-// Plain ES module, no build step. Sections: helpers · API · views · connection
-// & polling · file list · uploads · drag/drop/paste · connect sheet · PIN · boot.
+// Plain ES modules, no build step. This file: views · connection & polling ·
+// file list · shared-folder uploads · drag/drop/paste · PIN · boot.
+// lib.js has the helpers, nearby.js the devices, sending and pairing.
 
-const $ = (selector, root = document) => root.querySelector(selector);
+import { $, api, can, formatBytes, formatDuration, guessKind, h, icon, plural, relativeTime, setLockHandler, state, toast } from "./lib.js";
+import { announceSelf, busy, fetchState, forgetDirectFile, initNearby, isDeviceMode, mesh, openAddDevice, stageFiles } from "./nearby.js";
 
-const POLL_MS = 3000;
-const POLL_HIDDEN_MS = 20000;
+const POLL_MS = 1500;
+const POLL_BUSY_MS = 700;
+const POLL_HIDDEN_MS = 10000;
 const MAX_PARALLEL_UPLOADS = 3;
 const THUMB_MAX_BYTES = 25_000_000;
 const THUMB_MIME = new Set(["image/png", "image/jpeg", "image/gif", "image/webp", "image/avif", "image/bmp"]);
@@ -15,8 +18,7 @@ const KIND_ICON = {
   spreadsheet: "table", presentation: "slides", code: "code", app: "app", other: "file",
 };
 
-const state = {
-  info: JSON.parse($("#boot").textContent),
+Object.assign(state, {
   files: [],
   etag: null,
   loaded: false,
@@ -31,106 +33,16 @@ const state = {
   locked: false,
   sentInBatch: [], // names sent since the last "Sent N files" toast
   started: false,
-};
+});
 
-// ---------------------------------------------------------------- helpers
-
-function h(tag, attrs = {}, ...children) {
-  const el = document.createElement(tag);
-  for (const [key, value] of Object.entries(attrs)) {
-    if (value === false || value == null) continue;
-    if (key === "class") el.className = value;
-    else if (key === "dataset") Object.assign(el.dataset, value);
-    else if (key.startsWith("on")) el.addEventListener(key.slice(2), value);
-    else el.setAttribute(key, value === true ? "" : value);
-  }
-  el.append(...children.flat().filter((c) => c != null && c !== false));
-  return el;
-}
-
-function icon(name) {
-  const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
-  svg.setAttribute("class", "icon");
-  svg.setAttribute("aria-hidden", "true");
-  const use = document.createElementNS("http://www.w3.org/2000/svg", "use");
-  use.setAttribute("href", `#i-${name}`);
-  svg.append(use);
-  return svg;
-}
-
-function formatBytes(bytes) {
-  if (!Number.isFinite(bytes) || bytes < 0) return "—";
-  if (bytes < 1000) return `${bytes} ${bytes === 1 ? "byte" : "bytes"}`;
-  const units = ["KB", "MB", "GB", "TB"];
-  let value = bytes;
-  let unit = "B";
-  for (const u of units) {
-    value /= 1000;
-    unit = u;
-    if (value < 1000) break;
-  }
-  return `${value < 10 ? value.toFixed(1) : Math.round(value)} ${unit}`;
-}
-
-function formatDuration(seconds) {
-  if (!Number.isFinite(seconds) || seconds <= 0) return "";
-  if (seconds < 60) return `${Math.max(1, Math.round(seconds))} s left`;
-  if (seconds < 3600) return `${Math.round(seconds / 60)} min left`;
-  return `${(seconds / 3600).toFixed(1)} hr left`;
-}
-
-function relativeTime(epochSeconds) {
-  const diff = Date.now() / 1000 - epochSeconds;
-  if (diff < 45) return "Just now";
-  if (diff < 3600) return `${Math.round(diff / 60)} min ago`;
-  if (diff < 86400) return `${Math.round(diff / 3600)} hr ago`;
-  const date = new Date(epochSeconds * 1000);
-  const yesterday = new Date();
-  yesterday.setDate(yesterday.getDate() - 1);
-  if (date.toDateString() === yesterday.toDateString()) return "Yesterday";
-  const sameYear = date.getFullYear() === new Date().getFullYear();
-  return date.toLocaleDateString(undefined, { month: "short", day: "numeric", year: sameYear ? undefined : "numeric" });
-}
-
-function plural(n, word) {
-  return `${n} ${word}${n === 1 ? "" : "s"}`;
-}
-
-const fileUrl = (name, inline = false) => `/files/${encodeURIComponent(name)}${inline ? "?inline=1" : ""}`;
-const can = (perm) => Boolean(state.info.permissions?.[perm]);
-
-// -------------------------------------------------------------------- API
-
-class ApiError extends Error {
-  constructor(status, code, message, detail = {}) {
-    super(message);
-    this.status = status;
-    this.code = code;
-    this.detail = detail;
-  }
-}
-
-async function api(path, { method = "GET", json, headers = {} } = {}) {
-  const init = { method, credentials: "same-origin", headers: { Accept: "application/json", ...headers } };
-  if (json !== undefined) {
-    init.body = JSON.stringify(json);
-    init.headers["Content-Type"] = "application/json";
-  }
-  let res;
-  try {
-    res = await fetch(path, init);
-  } catch {
-    throw new ApiError(0, "network", "Can’t reach the sharing computer.");
-  }
-  if (res.status === 304) return { notModified: true, res };
-  const body = (res.headers.get("Content-Type") || "").includes("json") ? await res.json().catch(() => null) : null;
-  if (!res.ok) {
-    const err = body?.error || {};
-    if (res.status === 401 && err.code === "pin_required") showLock();
-    throw new ApiError(res.status, err.code || `http_${res.status}`, err.message || `Request failed (${res.status}).`, err);
-  }
-  return { data: body, res };
-}
+// "owner": this device's own window — its received files.
+// "shared": a visitor in shared-folder mode — the folder everyone sees.
+// "inbox": a visitor — files that were sent to them.
+const libraryMode = () => (state.info.owner ? "owner" : can("browse") ? "shared" : "inbox");
+const inInbox = () => libraryMode() === "inbox";
+const fileUrl = (name, inline = false) =>
+  inInbox() ? `/api/inbox/files/${encodeURIComponent(name)}` : `/files/${encodeURIComponent(name)}${inline ? "?inline=1" : ""}`;
+const nativeApp = () => window.OpenTransferAndroid;
 
 // ------------------------------------------------------------------ views
 
@@ -148,18 +60,30 @@ function applyInfo(info) {
   $("#pin-input").inputMode = info.auth.numeric ? "numeric" : "text";
   if (!authed) return;
 
-  $("#send-section").hidden = !can("upload");
+  const mode = libraryMode();
+  const deviceMode = isDeviceMode();
+  $("#send-section").hidden = !(can("send") || can("upload"));
   $("#empty-connect").hidden = false;
+  $("#drop-title-pointer").textContent = deviceMode ? "Drop files to send" : "Drop files to share";
+  $("#drop-title-touch").textContent = deviceMode ? "Send files" : "Share files";
   const hints = [];
-  if (!can("browse")) hints.push(`Files are delivered privately to ${info.device}.`);
+  if (deviceMode) hints.push("Then choose who gets them — or drop files straight onto a device.");
   else if (!info.auth.required) hints.push("Everyone on this network with the link can see shared files.");
   const max = info.limits?.max_upload_size;
   if (max) hints.push(`Up to ${formatBytes(max)} per file.`);
   $("#drop-hint").textContent = hints.join(" ");
+  $("#overlay-text").textContent = deviceMode ? "Drop to send" : `Drop to share with everyone`;
+  $("#library-title").textContent = { owner: "Received", shared: "Shared files", inbox: "Sent to you" }[mode];
+  $("#empty-title").textContent = mode === "shared" ? "No files yet" : "Nothing received yet";
   $("#empty-text").hidden = false;
-  if (!can("upload")) {
-    $("#empty-text").textContent = `Nothing is being shared from ${info.device} right now.`;
-  }
+  $("#empty-text").textContent =
+    mode === "owner"
+      ? `Files that people send to ${info.device} are saved in its Open Transfer folder and show up here.`
+      : mode === "inbox"
+        ? "Files that someone sends to this browser show up here, ready to save."
+        : can("upload")
+          ? `Files you send — or that others send to ${info.device} — will show up here.`
+          : `Nothing is being shared from ${info.device} right now.`;
 }
 
 function showLock() {
@@ -167,6 +91,7 @@ function showLock() {
   state.online = null; // so unlocking shows "Connected" again
   stopPolling();
   showView("lock");
+  $("#send-bar").hidden = true;
   setConnection("online", `Locked · ${state.info.device}`);
   $("#connect-button").hidden = true;
   requestAnimationFrame(() => $("#pin-input").focus());
@@ -175,9 +100,8 @@ function showLock() {
 function enterMain() {
   state.locked = false;
   showView("main");
-  if (!can("browse")) {
-    $("#file-list").hidden = true;
-    $("#library .section-head").hidden = true;
+  if (libraryMode() === "inbox" && state.info.shared_folder) {
+    // A shared folder in receive-only mode: say where files go.
     $("#receive-only").hidden = false;
   }
   if (!state.started) {
@@ -186,6 +110,8 @@ function enterMain() {
       if (!document.hidden) poll(true);
     });
     setInterval(updateRelativeTimes, 30_000);
+    announceSelf().then(() => poll(true));
+    return;
   }
   poll(true);
 }
@@ -204,7 +130,7 @@ function markOnline(online) {
   state.online = online;
   if (online) {
     state.failures = 0;
-    setConnection("online", `Connected to ${state.info.device}`);
+    setConnection("online", state.info.owner ? "Ready" : `Connected to ${state.info.device}`);
     if (wasOffline) toast("Reconnected", { tone: "success", icon: "check" });
   } else {
     setConnection("offline", "Reconnecting…");
@@ -225,15 +151,16 @@ async function poll(immediate = false) {
     ? POLL_HIDDEN_MS
     : state.online === false
       ? Math.min(1000 * 2 ** state.failures, 10_000)
-      : POLL_MS;
+      : busy()
+        ? POLL_BUSY_MS
+        : POLL_MS;
   state.pollTimer = setTimeout(() => poll(true), delay);
 }
 
 async function refresh() {
   try {
-    if (!can("browse")) {
-      await api("/api/health");
-    } else {
+    await fetchState();
+    if (libraryMode() !== "inbox") {
       const headers = state.etag ? { "If-None-Match": `"${state.etag}"` } : {};
       const result = await api("/api/files", { headers });
       if (!result.notModified) {
@@ -251,7 +178,7 @@ async function refresh() {
     if (err.status === 401) return;
     state.failures += 1;
     markOnline(false);
-    if (!state.loaded && can("browse") && state.failures >= 2) {
+    if (!state.loaded && !mesh.data && state.failures >= 2) {
       showView("fatal");
       $("#fatal-text").textContent = err.status
         ? err.message
@@ -265,28 +192,33 @@ async function refresh() {
 const rows = new Map(); // name -> { el, sig }
 
 function buildFileRow(file) {
-  const href = fileUrl(file.name);
+  // Files received straight from another browser live in this page (a blob: URL).
+  const href = file.url || fileUrl(file.name);
   const previewable = PREVIEW_MIME.has(file.mime);
   const thumb = h(
     previewable ? "a" : "span",
     previewable
-      ? { class: "thumb thumb-link", href: fileUrl(file.name, true), target: "_blank", rel: "noopener", tabindex: "-1", "aria-hidden": "true" }
+      ? { class: "thumb thumb-link", href: file.url || fileUrl(file.name, true), target: "_blank", rel: "noopener", tabindex: "-1", "aria-hidden": "true" }
       : { class: "thumb", "aria-hidden": "true" },
     icon(KIND_ICON[file.kind] || "file"),
   );
   thumb.style.setProperty("--kind", `var(--k-${file.kind})`);
   if (THUMB_MIME.has(file.mime) && file.size <= THUMB_MAX_BYTES) {
-    const img = h("img", { src: fileUrl(file.name, true), alt: "", loading: "lazy", decoding: "async" });
+    const img = h("img", { src: file.url || fileUrl(file.name, true), alt: "", loading: "lazy", decoding: "async" });
     img.addEventListener("load", () => img.classList.add("is-loaded"), { once: true });
     img.addEventListener("error", () => img.remove(), { once: true });
     thumb.append(img);
   }
   const sub = h("span", { class: "row-sub" });
+  if (file.direct) sub.dataset.direct = "1";
+  const openNative = nativeApp()?.openFile && libraryMode() === "owner";
   const actions = h(
     "div",
     { class: "row-actions" },
-    h("a", { class: "icon-btn is-accent", href, download: file.name, "aria-label": `Download ${file.name}`, title: "Download" }, icon("download")),
-    can("delete") &&
+    openNative
+      ? h("button", { class: "icon-btn is-accent", type: "button", "aria-label": `Open ${file.name}`, title: "Open", onclick: () => nativeApp().openFile(file.name) }, icon("download"))
+      : h("a", { class: "icon-btn is-accent", href, download: file.name, "aria-label": `Download ${file.name}`, title: "Download" }, icon("download")),
+    (can("delete") || inInbox()) &&
       h(
         "button",
         { class: "icon-btn is-danger", type: "button", "aria-label": `Delete ${file.name}`, title: "Delete", onclick: () => deleteFile(file, row) },
@@ -300,6 +232,20 @@ function buildFileRow(file) {
     h("div", { class: "row-main" }, h("a", { class: "row-title", href, download: file.name, title: file.name }, file.name), sub),
     actions,
   );
+  if (openNative) {
+    row.querySelector(".row-title").addEventListener("click", (event) => {
+      event.preventDefault();
+      nativeApp().openFile(file.name);
+    });
+  }
+  if (file.direct) {
+    for (const link of row.querySelectorAll("a[download]")) {
+      link.addEventListener("click", () => {
+        file.saved = true;
+        updateRowTime(row);
+      });
+    }
+  }
   row._file = file;
   updateRowTime(row);
   return row;
@@ -307,7 +253,8 @@ function buildFileRow(file) {
 
 function updateRowTime(row) {
   const f = row._file;
-  row.querySelector(".row-sub").textContent = `${formatBytes(f.size)} · ${relativeTime(f.modified)}`;
+  const where = f.direct ? (f.saved ? " · saved" : " · in this browser — save it") : "";
+  row.querySelector(".row-sub").textContent = `${formatBytes(f.size)} · ${relativeTime(f.modified)}${where}`;
 }
 
 function updateRelativeTimes() {
@@ -363,7 +310,7 @@ function renderFiles() {
   const download = $("#download-all");
   download.hidden = all.length < 2 || (term && visible.length === 0);
   const query = term ? visible.map((f) => `name=${encodeURIComponent(f.name)}`).join("&") : "";
-  download.href = `/api/archive${query ? `?${query}` : ""}`;
+  download.href = inInbox() ? "/api/inbox/archive" : `/api/archive${query ? `?${query}` : ""}`;
   download.querySelector("span").textContent = term ? `Download ${visible.length}` : "Download all";
 }
 
@@ -377,6 +324,17 @@ async function deleteFile(file, row) {
     renderFiles();
   }, 260);
   try {
+    if (file.direct) {
+      forgetDirectFile(file.name);
+      toast(`Removed “${file.name}”`, { icon: "trash" });
+      return;
+    }
+    if (inInbox()) {
+      await api(`/api/inbox/files/${encodeURIComponent(file.name)}`, { method: "DELETE" });
+      mesh.etag = null;
+      toast(`Removed “${file.name}”`, { icon: "trash" });
+      return;
+    }
     const { data } = await api(`/api/files/${encodeURIComponent(file.name)}`, { method: "DELETE" });
     state.etag = null;
     toast(`Deleted “${file.name}”`, {
@@ -412,20 +370,33 @@ async function restoreFile(token, name) {
 let transferSeq = 0;
 let renderQueued = false;
 
+function pastedName(file, source) {
+  const name = file.name || "Untitled";
+  if (source === "paste" && /^image\.\w+$/i.test(name)) {
+    const stamp = new Date().toISOString().slice(0, 19).replace("T", " ").replace(/:/g, ".");
+    return `Pasted image ${stamp}.${name.split(".").pop()}`;
+  }
+  return name;
+}
+
 function enqueueFiles(fileList, { source = "picker" } = {}) {
+  const files = [...fileList];
+  if (!files.length) return;
+  if (isDeviceMode()) {
+    if (!can("send")) {
+      toast("Sending files is turned off on this device.", { tone: "error", icon: "alert" });
+      return;
+    }
+    stageFiles(files.map((f) => (pastedName(f, source) === f.name ? f : new File([f], pastedName(f, source), { type: f.type }))));
+    return;
+  }
   if (!can("upload")) {
     toast("Sending files is turned off on this computer.", { tone: "error", icon: "alert" });
     return;
   }
-  const files = [...fileList];
-  if (!files.length) return;
   const max = state.info.limits?.max_upload_size || 0;
   for (const file of files) {
-    let name = file.name || "Untitled";
-    if (source === "paste" && /^image\.\w+$/i.test(name)) {
-      const stamp = new Date().toISOString().slice(0, 19).replace("T", " ").replace(/:/g, ".");
-      name = `Pasted image ${stamp}.${name.split(".").pop()}`;
-    }
+    const name = pastedName(file, source);
     const t = { id: ++transferSeq, file, name, size: file.size, loaded: 0, state: "queued", speed: 0, error: "" };
     if (max && file.size > max) {
       t.state = "error";
@@ -572,21 +543,6 @@ function buildTransferRow(t) {
   return row;
 }
 
-function guessKind(name) {
-  const ext = (name.split(".").pop() || "").toLowerCase();
-  const map = {
-    image: "png jpg jpeg gif webp heic heif bmp tiff svg avif",
-    video: "mp4 mov m4v webm mkv avi",
-    audio: "mp3 m4a aac wav flac ogg opus",
-    archive: "zip rar 7z tar gz tgz bz2 xz dmg iso",
-    document: "pdf doc docx odt rtf txt md pages epub",
-    spreadsheet: "xls xlsx csv ods numbers",
-    presentation: "ppt pptx odp key",
-    code: "py js ts json html css sh c cpp go rs java",
-    app: "apk exe msi pkg deb rpm appimage",
-  };
-  return Object.keys(map).find((k) => map[k].split(" ").includes(ext)) || "other";
-}
 
 function scheduleTransferRender() {
   if (renderQueued) return;
@@ -677,18 +633,22 @@ function setupDropAndPaste() {
   const zone = $("#dropzone");
   const input = $("#file-input");
   let depth = 0;
-  const canDrop = () => can("upload") && !$("#main-view").hidden;
+  const canDrop = () => (can("upload") || can("send")) && !$("#main-view").hidden;
   const hide = () => {
     depth = 0;
     overlay.classList.remove("is-visible");
     zone.classList.remove("is-over");
+    document.body.classList.remove("is-dragging");
   };
+  document.addEventListener("ot-drop-handled", hide);
 
   window.addEventListener("dragenter", (event) => {
     if (!hasFiles(event) || !canDrop()) return;
     event.preventDefault();
     depth += 1;
-    overlay.classList.add("is-visible");
+    // With devices on screen, keep them visible so files can be dropped onto one.
+    if (isDeviceMode()) document.body.classList.add("is-dragging");
+    else overlay.classList.add("is-visible");
     zone.classList.add("is-over");
   });
   window.addEventListener("dragover", (event) => {
@@ -726,124 +686,6 @@ function setupDropAndPaste() {
     if (files.length) {
       event.preventDefault();
       enqueueFiles(files, { source: "paste" });
-    }
-  });
-}
-
-// ------------------------------------------------------------------ toasts
-
-function toast(message, { tone = "info", icon: iconName, action, duration = 3200 } = {}) {
-  const host = $("#toasts");
-  while (host.children.length >= 3) host.firstElementChild.remove();
-  let timer;
-  const close = () => {
-    clearTimeout(timer);
-    el.classList.add("is-leaving");
-    setTimeout(() => el.remove(), 260);
-  };
-  const el = h(
-    "div",
-    { class: "toast", role: tone === "error" ? "alert" : "status", dataset: { tone } },
-    iconName && icon(iconName),
-    h("span", { class: "toast-text" }, message),
-    action &&
-      h(
-        "button",
-        {
-          class: "toast-action",
-          type: "button",
-          onclick: () => {
-            close();
-            action.run();
-          },
-        },
-        action.label,
-      ),
-  );
-  host.append(el);
-  const arm = () => {
-    timer = setTimeout(close, duration);
-  };
-  el.addEventListener("mouseenter", () => clearTimeout(timer));
-  el.addEventListener("mouseleave", arm);
-  el.addEventListener("focusin", () => clearTimeout(timer));
-  arm();
-  return close;
-}
-
-// ---------------------------------------------------------- connect sheet
-
-async function copyText(text) {
-  try {
-    if (navigator.clipboard && window.isSecureContext) {
-      await navigator.clipboard.writeText(text);
-      return true;
-    }
-  } catch {
-    /* fall through to the legacy path */
-  }
-  const area = h("textarea", { readonly: true, "aria-hidden": "true" });
-  area.value = text;
-  area.style.position = "fixed";
-  area.style.opacity = "0";
-  document.body.append(area);
-  area.select();
-  let ok = false;
-  try {
-    ok = document.execCommand("copy");
-  } catch {
-    ok = false;
-  }
-  area.remove();
-  return ok;
-}
-
-function setupConnectSheet() {
-  const dialog = $("#connect-dialog");
-  const open = async () => {
-    try {
-      const { data } = await api("/api/info");
-      applyInfo(data);
-    } catch {
-      /* use what we have */
-    }
-    const info = state.info;
-    $("#share-url").textContent = info.share_url;
-    const qr = $("#qr-image");
-    qr.src = `/api/qr.svg?v=${encodeURIComponent(info.share_url)}`;
-    $("#pin-note").hidden = !info.pin;
-    $("#pin-note-value").textContent = info.pin || "";
-    $("#share-url-button").hidden = !navigator.share;
-    const others = (info.urls || []).filter((u) => u !== info.share_url);
-    $("#other-urls").hidden = others.length === 0;
-    $("#other-url-list").replaceChildren(...others.map((u) => h("li", {}, u)));
-    dialog.showModal();
-  };
-  $("#connect-button").addEventListener("click", open);
-  $("#empty-connect").addEventListener("click", open);
-  dialog.addEventListener("click", (event) => {
-    if (event.target === dialog) dialog.close();
-  });
-  $("#copy-url").addEventListener("click", async () => {
-    const button = $("#copy-url");
-    const ok = await copyText(state.info.share_url);
-    const label = button.querySelector("span");
-    label.textContent = ok ? "Copied" : "Press ⌘C";
-    if (!ok) {
-      const range = document.createRange();
-      range.selectNodeContents($("#share-url"));
-      getSelection().removeAllRanges();
-      getSelection().addRange(range);
-    }
-    setTimeout(() => {
-      label.textContent = "Copy";
-    }, 1600);
-  });
-  $("#share-url-button").addEventListener("click", async () => {
-    try {
-      await navigator.share({ title: "Open Transfer", text: `Get files from ${state.info.device}`, url: state.info.share_url });
-    } catch {
-      /* the user closed the share sheet */
     }
   });
 }
@@ -906,9 +748,26 @@ function setupPinForm() {
 // -------------------------------------------------------------------- boot
 
 function boot() {
+  setLockHandler(showLock);
   applyInfo(state.info);
   setupDropAndPaste();
-  setupConnectSheet();
+  initNearby({
+    requestPoll: () => poll(true),
+    droppedFiles,
+    libraryChanged: (inbox) => {
+      if (inbox && inInbox()) {
+        const sig = JSON.stringify(inbox.map((f) => [f.name, f.size, f.modified]));
+        if (sig !== state.inboxSig) {
+          state.inboxSig = sig;
+          state.files = inbox;
+          renderFiles();
+        }
+      } else if (!inbox) {
+        state.etag = null;
+      }
+    },
+  });
+  for (const button of [$("#connect-button"), $("#empty-connect")]) button.addEventListener("click", () => openAddDevice());
   setupPinForm();
   $("#search").addEventListener("input", (event) => {
     state.search = event.target.value;

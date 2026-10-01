@@ -49,30 +49,67 @@ jobs:
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
+        # Same builds as the CI "app" job. Attached to the release:
+        #   open-transfer-linux-x64.tar.gz        command-line app
+        #   open-transfer-windows-x64.exe         desktop app (window)
+        #   open-transfer-windows-x64-cli.exe     command-line app
+        #   open-transfer-macos-arm64.dmg         desktop app, Apple silicon
+        #   open-transfer-macos-arm64-cli.tar.gz  command-line app, Apple silicon
+        #   open-transfer-macos-x64.dmg           desktop app, Intel Mac
         include:
-          - { os: ubuntu-latest, name: linux-x64 }
-          - { os: macos-latest, name: macos-arm64 }
-          - { os: windows-latest, name: windows-x64 }
+          - { os: ubuntu-latest, name: linux-x64, cli: open-transfer-linux-x64, desktop: false }
+          - { os: windows-latest, name: windows-x64, cli: open-transfer-windows-x64-cli, desktop: true }
+          - { os: macos-latest, name: macos-arm64, cli: open-transfer-macos-arm64-cli, desktop: true, desktop-flags: --require-window }
+          - { os: macos-15-intel, name: macos-x64, cli: "", desktop: true, desktop-flags: --require-window }
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7
         with:
           python-version: "3.13"
-      - run: python scripts/build_app.py
-      - name: Package
+      - name: Build the command-line app
+        if: matrix.cli != ''
+        run: python scripts/build_app.py
+      - name: Package the command-line app
+        if: matrix.cli != ''
         shell: bash
         # .tar.gz keeps the executable bit on macOS/Linux; Windows gets the .exe as-is.
         run: |
           cd dist
           if [ "$RUNNER_OS" = "Windows" ]; then
-            mv open-transfer.exe "open-transfer-${{ matrix.name }}.exe"
+            mv open-transfer.exe "${{ matrix.cli }}.exe"
           else
-            tar -czf "open-transfer-${{ matrix.name }}.tar.gz" open-transfer && rm open-transfer
+            tar -czf "${{ matrix.cli }}.tar.gz" open-transfer && rm open-transfer
           fi
+      - name: Install the WebView2 runtime
+        if: matrix.desktop && runner.os == 'Windows'
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          $installer = "$env:RUNNER_TEMP\MicrosoftEdgeWebview2Setup.exe"
+          Invoke-WebRequest "https://go.microsoft.com/fwlink/p/?LinkId=2124703" -OutFile $installer
+          Start-Process $installer -ArgumentList "/silent", "/install" -Wait
+      # Builds and smoke-tests the desktop app (macOS: makes and tests the .dmg).
+      - name: Build the desktop app
+        if: matrix.desktop
+        run: python scripts/build_app.py --desktop ${{ matrix.desktop-flags }}
+      - name: Package the desktop app
+        if: matrix.desktop && runner.os == 'Windows'
+        shell: bash
+        run: mv "dist/Open Transfer.exe" "dist/open-transfer-${{ matrix.name }}.exe"
       - uses: actions/upload-artifact@v7
         with:
           name: binary-${{ matrix.name }}
           path: dist/open-transfer-*
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------- Android
+  # Builds, smoke-tests and uploads open-transfer-android.apk (artifact
+  # "open-transfer-android"); publish attaches it with everything else.
+  # Signed with the ANDROID_KEYSTORE_* secrets when they are set.
+  android:
+    name: Android
+    uses: ./.github/workflows/android.yml
+    secrets: inherit
 
   docker:
     name: Docker image → GHCR
@@ -107,7 +144,7 @@ jobs:
 
   publish:
     name: GitHub release
-    needs: [python, binaries]
+    needs: [python, binaries, android]
     runs-on: ubuntu-latest
     permissions:
       contents: write
