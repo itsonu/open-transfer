@@ -236,7 +236,7 @@ def _print_banner(
         out.write(f"  {style.dim('PIN')}                {style.bold(config.pin)}\n")
     out.write(f"  {style.dim('Saving files to')}    {config.storage_dir}\n")
     if show_qr and (ips or config.public_url):
-        qr_url = share + (f"/?pin={config.pin}" if config.pin else "")
+        qr_url = share  # never the PIN: people type it (it's printed just above)
         try:
             import segno
 

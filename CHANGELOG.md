@@ -16,6 +16,7 @@ All notable changes are documented here. The format follows [Keep a Changelog](h
 - **Unpairing is mutual**, and a device that missed it learns on next contact. Reinstalled devices show the old entry as "(old device)", same-name devices get a short id, and offline or old devices can be removed. Offline paired devices keep their type and show "last seen".
 
 ### Changed
+- **No QR code contains the PIN any more.** The share-link QR carries a 10-minute join token instead (useless once expired, or after the PIN changes); the terminal QR is just the address.
 - Pairing protocol v2 (`/pair/begin`, `/pair/prove`, `/pair/status`) replaces v1 (`/pair`, `/pair/confirm`); request signatures carry a nonce. Devices on an older 3.0 pre-release must be updated to pair.
 
 ### Fixed

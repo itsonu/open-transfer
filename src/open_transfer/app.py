@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import hmac
 import io
 import ipaddress
 import logging
@@ -81,6 +82,9 @@ PUBLIC_ENDPOINTS = {
     "info",
     *PUBLIC_P2P_ENDPOINTS,
 }
+
+
+JOIN_TTL = 600  # seconds a share-link QR code lets browsers in without the PIN
 
 
 def _load_secret(state_dir: Path) -> bytes:
@@ -218,6 +222,26 @@ def create_app(config: Config | None = None) -> Flask:
     def client_id() -> str:
         return log_safe(request.remote_addr or "unknown")
 
+    def join_token(now: float | None = None) -> str:
+        """For a share-link QR: lets a browser in instead of the PIN, for JOIN_TTL only.
+
+        ``<expiry>.<mac>`` — the MAC covers the expiry and the current PIN, so a
+        photographed QR code stops working after 10 minutes (or when the PIN
+        changes), and can't be extended or forged. The PIN itself is never in it.
+        """
+        expires = int((time.time() if now is None else now) + JOIN_TTL)
+        return f"{expires}.{_join_mac(expires)}"
+
+    def _join_mac(expires: int) -> str:
+        message = f"open-transfer-join|{expires}|{pin_digest}".encode()
+        return hmac.new(app.secret_key, message, hashlib.sha256).hexdigest()[:32]  # type: ignore[arg-type]
+
+    def join_token_valid(token: str) -> bool:
+        expires, _, mac = token.partition(".")
+        if not expires.isdigit() or int(expires) < time.time():
+            return False
+        return hmac.compare_digest(_join_mac(int(expires)), mac)
+
     def check_pin(supplied: str) -> float | bool:
         """``True`` if right, ``False`` if wrong, or seconds to wait if rate-limited."""
         if not config.pin:
@@ -323,12 +347,16 @@ def create_app(config: Config | None = None) -> Flask:
     def index() -> Any:
         supplied = request.args.get("pin")
         pair = request.args.get("pair")
-        if supplied is not None or pair is not None:
-            # Share-link QR codes embed the PIN, pairing QR codes the owner's code, so scanning
-            # is enough to get in. Strip them from the URL straight away so
-            # they don't linger in history. Both are rate-limited.
+        join = request.args.get("join")
+        if supplied is not None or pair is not None or join is not None:
+            # QR codes carry a short-lived join token (share link) or the owner's
+            # pairing code, never the PIN; a hand-typed ?pin= link still works.
+            # Strip them from the URL straight away so they don't linger in history.
             if supplied is not None and config.pin and not is_authenticated():
                 check_pin(supplied)
+            if join and config.pin and not is_authenticated() and join_token_valid(join):
+                session.permanent = True
+                session["pin"] = pin_digest
             if pair and not is_owner() and mesh.check_visitor_code(pair, client_id()) is True:
                 # The owner is showing this code right now (Add device is open), and
                 # it's single-use and rate-limited: it admits this browser like the
@@ -501,7 +529,7 @@ def create_app(config: Config | None = None) -> Flask:
     def qr_code() -> Response:
         url = share_url()
         if config.pin:
-            url += f"/?pin={quote(config.pin)}"
+            url += f"/?join={join_token()}"  # 10 minutes, never the PIN itself
         buffer = io.BytesIO()
         segno.make(url, error="m").save(
             buffer, kind="svg", scale=8, border=0, dark="#000", light=None

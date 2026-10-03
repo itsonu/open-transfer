@@ -148,11 +148,16 @@ files meant for it, and cannot rename it.
 6. **Safe to send by multicast:** device id, name, form, platform, HTTP port,
    version, and whether the pairing window is open. Never anything derived
    from a code or a key.
-7. **Safe to put in a QR code:** the address, the device id, the current
-   pairing code and when the window closes. The QR is only on screen while the
-   window is open, and the code in it is good for one pairing. The PIN is **not**
-   in the QR any more: for a browser, scanning the QR (a valid code) admits it
-   like the PIN would, for that browser only.
+7. **Safe to put in a QR code:** the address, the device id, and something
+   short-lived — never the PIN or a key.
+   * *Add device* (pairing) QR: the current pairing code; it works only while
+     the window is open, for one pairing. A browser that scans it is admitted
+     like the PIN would admit it, that browser only.
+   * Share-link QR (`--share-folder`, the visitor's share sheet): when a PIN is
+     set, a **join token** `<expiry>.<HMAC(secret key, expiry, PIN digest)>`
+     valid for 10 minutes. A photo of the QR is useless afterwards, can't be
+     extended or forged, and stops working at once if the PIN changes.
+   * Terminal QR: just the address; the PIN is typed (it's printed next to it).
 8. **What the 6-digit code authenticates.** That B is talking to the device
    whose screen the user is looking at (and A to the device whose user read the
    code), for one pairing attempt. Nothing else; it is never reused as a key.

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 from flask.testing import FlaskClient
 
@@ -196,3 +198,78 @@ def test_log_safe_neutralises_newlines() -> None:
     from open_transfer.security import log_safe
 
     assert log_safe("a\nFAKE LOG LINE\r") == "a\\nFAKE LOG LINE\\r"
+
+
+# ------------------------------------------------- QR codes never hold the PIN
+
+
+def _qr_url(client: FlaskClient, monkeypatch: pytest.MonkeyPatch) -> str:
+    import segno
+
+    seen: list[str] = []
+    real = segno.make
+    monkeypatch.setattr(segno, "make", lambda url, **kw: (seen.append(url), real(url, **kw))[1])
+    assert client.get("/api/qr.svg").status_code == 200
+    return seen[0]
+
+
+def test_share_qr_holds_a_short_lived_token_not_the_pin(
+    make_app: AppFactory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    app = make_app(pin="4821")
+    inside = app.test_client()
+    inside.post("/api/auth", json={"pin": "4821"})
+    url = _qr_url(inside, monkeypatch)
+    assert "4821" not in url
+    assert "pin=" not in url
+    token = url.split("join=", 1)[1]
+
+    scanner = app.test_client()  # a phone camera opening the QR
+    res = scanner.get(f"/?join={token}")
+    assert res.status_code == 302
+    assert "join" not in res.headers["Location"]  # stripped from the address bar
+    assert scanner.get("/api/files").status_code == 200
+
+
+def test_an_intercepted_share_qr_stops_working(
+    make_app: AppFactory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from open_transfer import app as app_module
+
+    app = make_app(pin="4821")
+    inside = app.test_client()
+    inside.post("/api/auth", json={"pin": "4821"})
+    token = _qr_url(inside, monkeypatch).split("join=", 1)[1]
+    expires, mac = token.split(".")
+
+    later = app_module.time.time() + app_module.JOIN_TTL + 1
+    monkeypatch.setattr(app_module.time, "time", lambda: later)
+    photo = app.test_client()
+    photo.get(f"/?join={token}")
+    assert photo.get("/api/files").status_code == 401  # expired
+
+    monkeypatch.undo()
+    for forged in (f"{int(expires) + 86400}.{mac}", f"{expires}.{'0' * 32}", "garbage"):
+        attacker = app.test_client()
+        attacker.get(f"/?join={forged}")
+        assert attacker.get("/api/files").status_code == 401, forged
+
+
+def test_changing_the_pin_invalidates_qr_codes(
+    make_app: AppFactory, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    old = make_app(pin="4821", state_dir=tmp_path / "state")
+    inside = old.test_client()
+    inside.post("/api/auth", json={"pin": "4821"})
+    token = _qr_url(inside, monkeypatch).split("join=", 1)[1]
+    new = make_app(pin="9999", state_dir=tmp_path / "state")  # same secret key, new PIN
+    browser = new.test_client()
+    browser.get(f"/?join={token}")
+    assert browser.get("/api/files").status_code == 401
+
+
+def test_share_qr_without_a_pin_is_just_the_address(
+    make_app: AppFactory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    url = _qr_url(make_app().test_client(), monkeypatch)
+    assert "?" not in url
