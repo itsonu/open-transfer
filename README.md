@@ -152,7 +152,7 @@ Any device can send to any other — there's no host or server role. A phone wit
 - Each device shows its **name, type and platform**; rename yours in one tap
 - Send to **one, several or all** devices; recipients are always shown before you send, and sending to everyone needs a confirmation
 - **Accept / Decline** prompt on the receiver with the sender, file names and sizes; offers expire after 2 minutes
-- **Pairing** with a QR code or 6-digit code (proved with HMAC, never sent in clear); paired devices auto-accept
+- **Pairing** with a QR code or 6-digit code, using SRP (a password-authenticated key exchange, so the code can't be guessed offline from network traffic) and confirmed on both devices; works without multicast; paired devices auto-accept and prove who they are. See [docs/trust-model.md](docs/trust-model.md)
 - **Paired-only** mode (like AirDrop's "Contacts only"), and add-by-address where multicast is blocked
 - Browsers without the app join a device's group by QR code and can send and receive too — **browser to browser goes direct** over WebRTC (falls back to the app if the network blocks it). Add the page to the home screen to use it like an app.
 
@@ -280,7 +280,8 @@ flowchart LR
 | `discovery.py` | Multicast announce / reply / find / bye |
 | `mesh.py` | Nearby devices, visitors, offers, one-to-many streaming, pairing |
 | `mesh_api.py` | App↔app protocol (`/api/p2p/v1`) and the UI's device endpoints |
-| `devices.py` | Device identity, paired devices, signatures, pairing proofs |
+| `devices.py` | Device identity, paired devices, signatures |
+| `srp.py` | SRP-6a for pairing (RFC 5054) |
 | `app.py`, `storage.py`, `security.py` | Flask app, safe streaming storage, host/origin/PIN guards |
 | `static/`, `templates/` | The web UI: vanilla ES modules + CSS, no build step |
 | `android/` | Kotlin shell: WebView, file picker, QR scanner, foreground service |
@@ -314,7 +315,7 @@ The front end is plain HTML, CSS and ES modules in `src/open_transfer/static/` �
 
 - Both must be on the **same Wi‑Fi** network. Guest networks and many routers isolate devices ("AP/client isolation"); mesh Wi‑Fi and VPNs can block multicast.
 - Allow Open Transfer through the firewall: **Windows** asks on first run — tick *Private networks*. **macOS** asks for *Local Network* access (System Settings → Privacy & Security → Local Network). **Linux**: `sudo ufw allow 5000/tcp && sudo ufw allow 47823/udp`.
-- Still nothing? Pair with **Add device → Enter a code** and open *Not found? Enter its address* (the address is shown on the other device), or start with `--peer IP:PORT`.
+- Still nothing? Pair with **Add device → Enter a code** and open *Can’t find it? Enter its address* (the address is shown under the other device’s code), or start with `--peer IP:PORT`.
 </details>
 
 <details markdown="1">

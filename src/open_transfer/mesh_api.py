@@ -21,6 +21,7 @@ from flask import (
     Flask,
     Response,
     abort,
+    g,
     jsonify,
     request,
     send_file,
@@ -30,7 +31,8 @@ from flask import (
 from werkzeug.exceptions import ClientDisconnected
 
 from open_transfer.archive import zip_stream
-from open_transfer.devices import clean_form, clean_name, clean_platform, valid_id
+from open_transfer.devices import clean_form, clean_name, clean_platform, sign_response, valid_id
+from open_transfer.lifecycle import REASONS
 from open_transfer.mesh import P2P, Mesh, MeshError, Viewer
 from open_transfer.security import log_safe
 from open_transfer.storage import IncompleteUpload
@@ -42,10 +44,14 @@ PUBLIC_P2P_ENDPOINTS = {
     "p2p_offer_status",
     "p2p_offer_upload",
     "p2p_offer_cancel",
-    "p2p_pair",
-    "p2p_pair_confirm",
+    "p2p_pair_begin",
+    "p2p_pair_prove",
+    "p2p_pair_status",
+    "p2p_unpair",
     "p2p_signal",
 }
+#: App-to-app routes whose (small) body may be read to check a signature.
+SIGNED_P2P_ENDPOINTS = PUBLIC_P2P_ENDPOINTS - {"p2p_offer_upload"}
 MAX_PENDING_PER_CLIENT = 10
 DRAIN_LIMIT = 8 * 1024 * 1024
 
@@ -84,14 +90,39 @@ def register(
             raise MeshError(400, "bad_request", "Expected a JSON object.")
         return data
 
+    @app.before_request
+    def check_signature() -> None:
+        """A request from a paired app: verify its signature once (each is single-use)."""
+        g.ot_signed = None
+        if request.endpoint not in SIGNED_P2P_ENDPOINTS:
+            return
+        sender = request.headers.get("X-OT-From")
+        auth = request.headers.get("X-OT-Auth")
+        if not sender or not auth:
+            return
+        trusted = mesh.trust.get(sender)
+        if trusted is None:
+            g.ot_unknown_sender = True  # signed with a key we no longer have
+            return
+        body = request.get_data(cache=True)
+        if mesh.verify_request(sender, auth, request.method, request.path, body):
+            g.ot_signed = sender
+            g.ot_key = bytes.fromhex(trusted.key)
+
+    @app.after_request
+    def sign_answer(response: Response) -> Response:
+        """Answers to a paired app carry our signature, so it knows it's really us."""
+        if getattr(g, "ot_signed", None) and not response.is_streamed:
+            response.headers["X-OT-Auth"] = sign_response(
+                g.ot_key, request.headers.get("X-OT-Auth", ""), response.status_code,
+                response.get_data(),
+            )  # fmt: skip
+        elif getattr(g, "ot_unknown_sender", False):
+            response.headers["X-OT-Unpaired"] = "1"
+        return response
+
     def signed_by(sender: str | None) -> bool:
-        return mesh.verify_request(
-            sender,
-            request.headers.get("X-OT-Auth"),
-            request.method,
-            request.path,
-            request.get_data(cache=True),
-        )
+        return bool(sender) and getattr(g, "ot_signed", None) == sender
 
     def owner_only() -> Viewer:
         current = viewer()
@@ -101,7 +132,10 @@ def register(
 
     @app.errorhandler(MeshError)
     def mesh_error(exc: MeshError) -> Response:
-        response = jsonify({"error": {"code": exc.code, "message": str(exc)}})
+        error: dict[str, Any] = {"code": exc.code, "message": str(exc), **exc.extra}
+        if exc.code in REASONS:
+            error["action"] = REASONS[exc.code][1]
+        response = jsonify({"error": error})
         response.status_code = exc.status
         return response
 
@@ -115,7 +149,7 @@ def register(
     @app.post(f"{P2P}/hello")
     def p2p_hello() -> Response:
         info = body_json()
-        reply = mesh.handle_hello(info, client())
+        reply = mesh.handle_hello(info, client(), signed=signed_by(str(info.get("id", ""))))
         if config.pin and not signed_by(str(info.get("id", ""))):
             reply.pop("visitors", None)
         return jsonify(reply)
@@ -148,6 +182,7 @@ def register(
                 "secret": session.secret,
                 "state": session.state,
                 "reason": session.reason,
+                "reason_code": session.reason_code,
             }
         ), 201
 
@@ -174,7 +209,12 @@ def register(
 
     @app.delete(f"{P2P}/offers/<session_id>")
     def p2p_offer_cancel(session_id: str) -> Response:
-        mesh.cancel_incoming(session_id, None, secret=request.headers.get("X-OT-Secret", ""))
+        mesh.cancel_incoming(
+            session_id,
+            None,
+            secret=request.headers.get("X-OT-Secret", ""),
+            why=request.headers.get("X-OT-Reason", ""),
+        )
         return jsonify({"ok": True})
 
     @app.post(f"{P2P}/signal")
@@ -182,20 +222,37 @@ def register(
         mesh.handle_signal(body_json())
         return jsonify({"ok": True})
 
-    @app.post(f"{P2P}/pair")
-    def p2p_pair() -> Response:
-        data = body_json()
-        device = data.get("device")
+    @app.post(f"{P2P}/pair/begin")
+    def p2p_pair_begin() -> Response:
+        device = body_json().get("device")
         if not isinstance(device, dict):
-            raise MeshError(400, "bad_request", "Missing device.")
-        return jsonify(mesh.pair_begin(device, str(data.get("nonce", "")), client()))
+            raise MeshError(400, "invalid_request", "Missing device.")
+        return jsonify(mesh.pair_begin(device, client()))
 
-    @app.post(f"{P2P}/pair/confirm")
-    def p2p_pair_confirm() -> Response:
+    @app.post(f"{P2P}/pair/prove")
+    def p2p_pair_prove() -> Response:
         data = body_json()
         return jsonify(
-            mesh.pair_confirm(str(data.get("id", "")), str(data.get("proof", "")), client())
+            mesh.pair_prove(
+                str(data.get("session", "")),
+                str(data.get("a", "")),
+                str(data.get("m1", "")),
+                client(),
+            )
         )
+
+    @app.post(f"{P2P}/pair/status")
+    def p2p_pair_status() -> Response:
+        data = body_json()
+        return jsonify(mesh.pair_status(str(data.get("session", "")), str(data.get("mac", ""))))
+
+    @app.delete(f"{P2P}/pair")
+    def p2p_unpair() -> Response:
+        sender = request.headers.get("X-OT-From", "")
+        if not signed_by(sender):
+            raise MeshError(403, "trust_rejected", "Only the paired device can remove a pairing.")
+        mesh.unpaired_by(sender)
+        return jsonify({"ok": True})
 
     # ================================================================ web UI
 
@@ -393,8 +450,33 @@ def register(
         owner_only()
         data = body_json()
         address = str(data.get("address") or "").strip() or None
-        peer = mesh.pair_with(str(data.get("code", "")), address)
+        device_id = str(data.get("device_id") or "").strip() or None
+        peer = mesh.pair_with(str(data.get("code", "")), address, device_id)
         return jsonify({"device": {"id": peer.id, "name": peer.name}})
+
+    @app.post("/api/pair/open")
+    def ui_pair_open() -> Response:
+        owner_only()
+        return jsonify(mesh.open_pairing())
+
+    @app.post("/api/pair/close")
+    def ui_pair_close() -> Response:
+        owner_only()
+        mesh.close_pairing()
+        return jsonify({"ok": True})
+
+    @app.post("/api/pair/requests/<session_id>/<any(allow, deny):decision>")
+    def ui_pair_decide(session_id: str, decision: str) -> Response:
+        owner_only()
+        mesh.decide_pairing(session_id, decision == "allow")
+        return jsonify({"ok": True})
+
+    @app.delete("/api/devices/<device_id>")
+    def ui_forget_device(device_id: str) -> Response:
+        owner_only()
+        if not mesh.forget(device_id):
+            raise MeshError(404, "not_found", "That device isn’t in the list.")
+        return jsonify({"ok": True})
 
     @app.post("/api/pair/new-code")
     def ui_new_code() -> Response:
@@ -412,9 +494,9 @@ def register(
     @app.get("/api/pair/qr.svg")
     def ui_pair_qr() -> Response:
         owner_only()
-        url = f"{share_url()}/?pair={mesh.pair_code}"
-        if config.pin:
-            url += f"&pin={quote(config.pin)}"
+        # Temporary only: the code (good while Add device is open, for one
+        # pairing) and who we are. Never the PIN or a key (docs/trust-model.md).
+        url = f"{share_url()}/?pair={mesh.pair_code}&id={mesh.id}"
         buffer = io.BytesIO()
         segno.make(url, error="m").save(
             buffer, kind="svg", scale=8, border=0, dark="#000", light=None

@@ -1853,9 +1853,26 @@ body.has-send-bar .toasts {
 }
 
 .job-target-state {
+  overflow: hidden;
+  max-width: 60vw;
   color: var(--text-2);
   font-size: 12px;
   text-align: right;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.job-details > summary {
+  margin: 8px 0 0 56px;
+  color: var(--text-2);
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.job-details > summary:focus-visible {
+  border-radius: 4px;
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
 }
 
 .job-target[data-state="done"] .job-target-state {
@@ -1867,6 +1884,7 @@ body.has-send-bar .toasts {
 }
 
 .job-target[data-state="declined"] .job-target-state,
+.job-target[data-state="partial"] .job-target-state,
 .job-target[data-state="failed"] .job-target-state,
 .job-target[data-state="expired"] .job-target-state,
 .job-target[data-state="canceled"] .job-target-state {
@@ -1874,6 +1892,7 @@ body.has-send-bar .toasts {
 }
 
 .job-target[data-state="declined"] .progress,
+.job-target[data-state="partial"] .progress,
 .job-target[data-state="failed"] .progress,
 .job-target[data-state="expired"] .progress,
 .job-target[data-state="canceled"] .progress {
@@ -2325,4 +2344,32 @@ body.has-send-bar .toasts {
 [tabindex="-1"]:focus-visible {
   outline: none;
   box-shadow: none;
+}
+
+/* pairing: choose the device, own address, remove old devices */
+.pair-target-label {
+  display: block;
+  margin: 12px 0 4px;
+  color: var(--text-2);
+  font-size: 13px;
+}
+
+.pair-own-address code {
+  user-select: all;
+}
+
+.device {
+  position: relative;
+}
+
+.device-remove {
+  position: absolute;
+  top: 2px;
+  right: 2px;
+  width: 26px;
+  height: 26px;
+}
+
+.device-remove[hidden] {
+  display: none;
 }

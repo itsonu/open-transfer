@@ -40,7 +40,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import Any
 
-from open_transfer import __version__
+from open_transfer import __version__, network, srp
 from open_transfer.config import Config
 from open_transfer.devices import (
     IdentityStore,
@@ -49,31 +49,35 @@ from open_transfer.devices import (
     clean_form,
     clean_name,
     clean_platform,
-    code_hint,
+    derive_pair_key,
     new_pair_code,
     new_visitor_id,
-    pair_key,
-    pair_proof,
+    session_mac,
     sign,
     valid_id,
+    verify_response,
 )
 from open_transfer.discovery import Discovery
 from open_transfer.history import (
-    COMPLETED,
+    DISCONNECT_CODES,
     PARTIAL,
     FileRecord,
     History,
     RecipientRecord,
     TransferRecord,
     lifecycle_state,
+    summarize,
 )
+from open_transfer.lifecycle import can_move, describe
 from open_transfer.security import RateLimiter, log_safe
 from open_transfer.storage import (
     FileInfo,
     IncompleteUpload,
+    InsufficientStorage,
     Readable,
     Storage,
     StorageError,
+    TooLarge,
     file_kind,
     safe_filename,
 )
@@ -81,6 +85,10 @@ from open_transfer.storage import (
 log = logging.getLogger("open_transfer")
 
 OFFER_TTL = 120.0  # seconds a receiver has to accept
+SENDER_GRACE = 15.0  # the sender hears about an expiry second; it gives up a little later
+ACCEPT_TTL = 90.0  # an accepted transfer with no first byte by then has lost its sender
+STATUS_KEEP = 600.0  # finished transfers still answer status questions this long
+RECONCILE_TRIES = 3
 PEER_STALE = 15.0  # an app we haven't heard from for this long is "not nearby"
 PEER_FORGET = 120.0  # …and is dropped from the list (paired apps stay, greyed out)
 VISITOR_STALE = 25.0  # browsers poll every 1.5 s, hidden tabs every 10 s
@@ -89,6 +97,11 @@ HELLO_EVERY = 6.0
 FINISHED_KEEP = 90.0  # finished transfers stay in the UI this long
 HISTORY_PRUNE_EVERY = 3600.0
 PAIR_CODE_TTL = 600.0
+PAIR_WINDOW = 30.0  # the code is accepted this long after the page last renewed the window
+PAIR_SESSION_TTL = 120.0  # one SRP attempt
+PAIR_CONFIRM_TTL = 60.0  # how long "Pair with …? Allow / Deny" waits
+PAIRING_ADVERT_STALE = 35.0  # a device's "my pairing window is open" is believed this long
+VERIFY_EVERY = 10.0  # at most one address check per device and address this often
 STALL_TIMEOUT = 60.0  # a receiver that takes no data for this long is dropped
 CHUNK = 256 * 1024
 MAX_FILES = 1000
@@ -101,7 +114,15 @@ SIGNAL_TTL = 60.0
 # Incoming session states
 PENDING, ACCEPTED, RECEIVING, DONE = "pending", "accepted", "receiving", "done"
 DECLINED, EXPIRED, CANCELED, FAILED = "declined", "expired", "canceled", "failed"
-FINAL = {DONE, DECLINED, EXPIRED, CANCELED, FAILED}
+FINAL = {DONE, PARTIAL, DECLINED, EXPIRED, CANCELED, FAILED}
+#: Sender-side codes for the ``error.code`` of a refused offer.
+OFFER_ERRORS = {
+    "paired_only": (DECLINED, "permission_denied"),
+    "insufficient_storage": (DECLINED, "insufficient_storage"),
+    "not_here": (FAILED, "destination_unavailable"),
+    "bad_request": (FAILED, "invalid_request"),
+    "busy": (FAILED, "receiver_unreachable"),
+}
 
 Listener = Callable[[str, dict[str, Any]], None]
 
@@ -109,13 +130,36 @@ Listener = Callable[[str, dict[str, Any]], None]
 class MeshError(StorageError):
     """An error with an HTTP status, shown to the user as-is."""
 
-    def __init__(self, status: int, code: str, message: str) -> None:
+    def __init__(self, status: int, code: str, message: str, **extra: Any) -> None:
         super().__init__(message)
         self.status = status
         self.code = code
+        self.extra = extra
+
+
+class IdentityMismatch(ConnectionError):
+    """A paired device's answer wasn't signed with our pair key (or it unpaired us)."""
+
+    def __init__(self, message: str, *, unpaired: bool = False) -> None:
+        super().__init__(message)
+        self.unpaired = unpaired
 
 
 # ===================================================================== models
+
+
+@dataclass
+class PairSession:
+    """One attempt by another device to pair with us (we show the code)."""
+
+    id: str
+    device: dict[str, Any]  # the device asking
+    client: str  # its address
+    server: srp.Server
+    created: float = field(default_factory=time.monotonic)
+    state: str = "proving"  # proving → confirming → allowed | denied | expired | failed
+    key: bytes = b""
+    confirm_by: float = 0.0
 
 
 @dataclass
@@ -150,6 +194,11 @@ class Peer:
     manual: bool = False
     visitors: list[dict[str, str]] = field(default_factory=list)
     accepts: str = "everyone"
+    pairing_at: float = 0.0  # when it last said its pairing window is open
+
+    @property
+    def pairing(self) -> bool:
+        return self.pairing_at > 0 and time.monotonic() - self.pairing_at < PAIRING_ADVERT_STALE
 
     @property
     def online(self) -> bool:
@@ -184,6 +233,7 @@ class IncomingFile:
     state: str = PENDING
     saved_name: str | None = None
     error: str = ""
+    reason_code: str = ""
     direct: bool = False  # received browser-to-browser; it lives in the receiving browser
 
 
@@ -198,9 +248,13 @@ class IncomingSession:
     created: float = field(default_factory=time.monotonic)
     state: str = PENDING
     reason: str = ""
+    reason_code: str = ""
     finished: float = 0.0
+    deadline: float = 0.0  # accepted: when it fails without a first byte
+    last_activity: float = 0.0  # receiving: last time any byte arrived
     created_at: float = field(default_factory=time.time)  # wall clock, for history
     started_at: float | None = None
+    finished_at: float | None = None  # wall clock
     local: bool = False  # offered by our own owner/visitor (no HTTP involved)
     source: str = ""  # address the offer came from (rate limiting)
     job: str = ""  # the sender's job id (to route direct-transfer signals back)
@@ -226,14 +280,19 @@ class Delivery:
     remote_secret: str = ""
     state: str = "offering"
     reason: str = ""
+    reason_code: str = ""
     sent: int = 0
     files_done: set[int] = field(default_factory=set)
-    canceled: bool = False
+    files_failed: dict[int, str] = field(default_factory=dict)  # index -> reason code
+    canceled: bool = False  # stop feeding this receiver (its final state may follow later)
     direct: bool = False  # the sender's browser is sending straight to the receiver's (WebRTC)
+    deadline: float = 0.0  # accepted: when it fails without a first byte
+    last_activity: float = 0.0  # sending: last time the receiver took any byte
+    busy: int = 0  # files being streamed to it right now
+    started_at: float | None = None  # wall clock: first byte to this receiver
+    finished_at: float | None = None  # wall clock: its final state
 
     def view_state(self) -> str:
-        if self.canceled:
-            return CANCELED
         if self.session is not None:
             mapping = {PENDING: "waiting", RECEIVING: "sending"}
             return mapping.get(self.session.state, self.session.state)
@@ -274,6 +333,8 @@ class Mesh:
         self.history.interrupt_unfinished()
         self.history.prune()
         self._recorded: dict[str, tuple[Any, ...]] = {}  # last snapshot saved, per live transfer
+        # Ended sessions, kept for the sender's status questions: id -> (secret, status, ended)
+        self._finished_status: dict[str, tuple[str, dict[str, Any], float]] = {}
         self._inbox_root = state / "inbox"
         self._lock = threading.RLock()
         self._peers: dict[str, Peer] = {}
@@ -284,9 +345,11 @@ class Mesh:
         self._listeners: list[Listener] = []
         self._signatures = SignatureChecker()
         self._pair_limiter = RateLimiter(attempts=5, window=60)
-        self._pair_pending: dict[str, tuple[str, str, dict[str, Any], str, float]] = {}
         self._pair_failures = 0
-        self._find_waiters: dict[str, list[tuple[threading.Event, list[Peer]]]] = {}
+        self._pair_window_until = 0.0
+        self._pair_sessions: dict[str, PairSession] = {}
+        self._verifying: dict[tuple[str, str, int], float] = {}
+        self._multicast_heard = 0.0  # last time another device's datagram arrived
         self._mail: dict[str, list[tuple[float, dict[str, Any]]]] = {}
         self._rotate_code()
         self._rev = 0
@@ -318,14 +381,27 @@ class Mesh:
         self._thread.start()
 
     def stop(self) -> None:
+        """Shut down. Closing the app during a transfer is a failure, not a cancel:
+        the transfer ends ``failed``/``app_closed`` here, and the receivers are
+        told (``failed``/``sender_disconnected`` there), so it shows up as
+        something to send again on both sides. A crash ends as ``app_restart``
+        on the next start (History.interrupt_unfinished).
+        """
         self._stop.set()
         if self.discovery:
             self.discovery.stop()
         with self._lock:
             jobs = list(self._jobs.values())
+            sessions = [s for s in self._incoming.values() if s.state not in FINAL]
+            for session in sessions:
+                self._move_session(session, FAILED, "app_closed")
+        tellers: list[threading.Thread] = []
         for job in jobs:
             if not job.finished:
-                self.cancel_job(job.id, job.owner, quiet=True)
+                tellers += self.cancel_job(job.id, job.owner, quiet=True, code="app_closed")
+        deadline = time.monotonic() + 3
+        for thread in tellers:
+            thread.join(max(0.0, deadline - time.monotonic()))
         self._executor.shutdown(wait=False, cancel_futures=True)
         if self._thread:
             self._thread.join(timeout=5)
@@ -356,6 +432,7 @@ class Mesh:
             "port": self.port,
             "rev": self._rev,
             "ver": __version__,
+            "pairing": self.pairing_open,
         }
 
     def self_info(self, *, include_visitors: bool = True) -> dict[str, Any]:
@@ -369,6 +446,7 @@ class Mesh:
             "port": self.port,
             "version": __version__,
             "accepts": "paired" if self.config.paired_only else "everyone",
+            "pairing": self.pairing_open,
         }
         if include_visitors:
             with self._lock:
@@ -401,9 +479,11 @@ class Mesh:
         if body is not None:
             all_headers["Content-Type"] = "application/json"
         trusted = self.trust.get(peer.id)
+        auth = ""
         if trusted:
+            auth = sign(bytes.fromhex(trusted.key), method, path, self.id, data)
             all_headers["X-OT-From"] = self.id
-            all_headers["X-OT-Auth"] = sign(bytes.fromhex(trusted.key), method, path, self.id, data)
+            all_headers["X-OT-Auth"] = auth
         all_headers.update(headers or {})
         conn = http.client.HTTPConnection(peer.host, peer.port, timeout=timeout)
         try:
@@ -412,6 +492,17 @@ class Mesh:
             raw = res.read(2_000_000)
         finally:
             conn.close()
+        if trusted:
+            # Whoever answers at this address must hold our pair key.
+            if res.getheader("X-OT-Unpaired"):
+                self._peer_unpaired(peer.id)
+                raise IdentityMismatch(f"{trusted.name} removed this pairing.", unpaired=True)
+            key = bytes.fromhex(trusted.key)
+            if not verify_response(key, auth, res.status, raw, res.getheader("X-OT-Auth")):
+                log.warning(
+                    "An answer claiming to be %s wasn't signed by it", log_safe(trusted.name)
+                )
+                raise IdentityMismatch(f"The device at {peer.address} isn’t {trusted.name}.")
         try:
             parsed = json.loads(raw) if raw else {}
         except ValueError:
@@ -433,7 +524,15 @@ class Mesh:
 
     # ------------------------------------------------------------- peers
 
-    def _upsert_peer(self, info: dict[str, Any], host: str, *, manual: bool = False) -> Peer | None:
+    def _upsert_peer(
+        self, info: dict[str, Any], host: str, *, manual: bool = False, verified: bool = False
+    ) -> Peer | None:
+        """Note what a device says about itself.
+
+        For a paired device, nothing changes unless ``verified`` (it proved the
+        pair key at ``host``): otherwise anyone could copy its id into their own
+        announcements and have its files sent to them, or rename it.
+        """
         peer_id = info.get("id")
         port = info.get("port")
         if not valid_id(peer_id) or peer_id == self.id or not str(peer_id).startswith("d-"):
@@ -441,12 +540,19 @@ class Mesh:
         if not isinstance(port, int) or not 1 <= port <= 65535:
             return None
         assert isinstance(peer_id, str)  # noqa: S101 - narrowed by valid_id
+        trusted = self.trust.get(peer_id) is not None
         with self._lock:
             peer = self._peers.get(peer_id)
+            if trusted and not verified:
+                if peer is not None and (peer.host, peer.port) == (host, port):
+                    peer.last_seen = time.monotonic()  # alive where we know it is
+                    peer.pairing_at = time.monotonic() if info.get("pairing") else 0.0
+                return peer
             is_new = peer is None or not peer.online
             if peer is None:
                 peer = Peer(peer_id, "", "computer", "unknown", host, port)
                 self._peers[peer_id] = peer
+            moved = (peer.host, peer.port) != (host, port)
             peer.name = clean_name(info.get("name"))
             peer.form = clean_form(info.get("form"))
             peer.platform = clean_platform(info.get("platform"))
@@ -455,42 +561,57 @@ class Mesh:
             peer.accepts = "paired" if info.get("accepts") == "paired" else "everyone"
             peer.manual = peer.manual or manual
             peer.last_seen = time.monotonic()
+            peer.pairing_at = time.monotonic() if info.get("pairing") else 0.0
             if isinstance(info.get("visitors"), list):
                 peer.visitors = _clean_visitors(info["visitors"])
-            if is_new:
+            if is_new or moved:
                 log.info("Found %s (%s) at %s", log_safe(peer.name), peer.platform, peer.address)
-        self.trust.rename(peer_id, peer.name)
+        if trusted:
+            self.trust.rename(peer_id, peer.name)
+            self.trust.seen(peer_id, form=peer.form, platform=peer.platform)
         return peer
 
     def _on_packet(self, packet: dict[str, Any], src: str) -> None:
         if packet.get("id") == self.id:
             return
+        self._multicast_heard = time.monotonic()
         kind = packet["type"]
         if kind == "find":
-            if packet.get("find") == code_hint(self.pair_code) and self.discovery:
-                self.discovery.send({"type": "reply", **self._describe(), "found": packet["find"]})
+            if self.pairing_open and self.discovery:
+                # Answer straight back too: on some networks multicast only goes one way.
+                answer = {"type": "reply", **self._describe()}
+                self.discovery.send(answer)
+                self.discovery.send_to(answer, src)
             return
         if kind == "bye":
             with self._lock:
                 peer = self._peers.get(packet["id"])
-                if peer:
+                if peer and peer.host == src:  # only from where we know it is
                     peer.last_seen = 0.0
                     peer.visitors = []
             return
+        peer_id = str(packet["id"])
+        port = packet.get("port")
+        if self.trust.get(peer_id) is not None:
+            with self._lock:
+                peer = self._peers.get(peer_id)
+                here = peer is not None and (peer.host, peer.port) == (src, port)
+            if here:
+                self._upsert_peer(packet, src)  # liveness only
+                if peer is not None and peer.rev != packet.get("rev"):
+                    peer.rev = packet.get("rev", -1) if isinstance(packet.get("rev"), int) else -1
+                    self._executor.submit(self._hello, peer)
+            elif isinstance(port, int):
+                self._verify_address_soon(peer_id, src, port)
+            return
         with self._lock:
-            known = self._peers.get(packet["id"])
+            known = self._peers.get(peer_id)
             fresh = known is None or not known.online
             changed = known is not None and known.rev != packet.get("rev")
         peer = self._upsert_peer(packet, src)
         if peer is None:
             return
         peer.rev = packet.get("rev", -1) if isinstance(packet.get("rev"), int) else -1
-        found = packet.get("found")
-        if isinstance(found, str):
-            with self._lock:
-                for event, results in self._find_waiters.get(found, []):
-                    results.append(peer)
-                    event.set()
         if fresh:
             # Answer straight away, and say hello over HTTP so they learn about
             # us even if multicast only works in one direction.
@@ -501,19 +622,49 @@ class Mesh:
             self._executor.submit(self._hello, peer)
 
     def _hello(self, peer: Peer) -> bool:
+        """Say hello over HTTP. For a paired device, a valid (signed) answer also
+        proves it is really at ``peer.host``."""
         try:
             status, info = self._http(
                 peer, "POST", f"{P2P}/hello", body=self.self_info(include_visitors=False), timeout=3
             )
+        except IdentityMismatch as exc:
+            if not exc.unpaired:
+                log.info("address_verification_failed: %s at %s", log_safe(peer.name), peer.address)
+            return False
         except OSError:
             return False
-        if status != 200:
+        if status != 200 or info.get("id") != peer.id:
             return False
-        self._upsert_peer(info, peer.host, manual=peer.manual)
+        self._upsert_peer(info, peer.host, manual=peer.manual, verified=True)
         return True
 
-    def handle_hello(self, info: dict[str, Any], host: str) -> dict[str, Any]:
-        self._upsert_peer(info, host)
+    def _verify_address_soon(self, peer_id: str, host: str, port: int) -> None:
+        """A paired device seems to be at a new address: check before believing it."""
+        key = (peer_id, host, port)
+        now = time.monotonic()
+        with self._lock:
+            if now - self._verifying.get(key, -1e9) < VERIFY_EVERY:
+                return
+            self._verifying[key] = now
+            trusted = self.trust.get(peer_id)
+        if trusted is None:
+            return
+        candidate = Peer(peer_id, trusted.name, trusted.form, trusted.platform, host, port)
+        self._executor.submit(self._hello, candidate)
+
+    def handle_hello(
+        self, info: dict[str, Any], host: str, *, signed: bool = False
+    ) -> dict[str, Any]:
+        """Another app says hello. ``signed``: it proved it's the paired device it claims."""
+        peer = self._upsert_peer(info, host, verified=signed)
+        if (
+            peer is None
+            and self.trust.get(str(info.get("id", "")))
+            and isinstance(info.get("port"), int)
+        ):
+            # A paired id at an unproven address: check it ourselves.
+            self._verify_address_soon(str(info["id"]), host, int(info["port"]))
         return self.self_info()
 
     def connect(self, address: str) -> Peer:
@@ -523,14 +674,29 @@ class Mesh:
         try:
             status, info = self._http(probe, "GET", f"{P2P}/info", timeout=4)
         except OSError as exc:
-            raise MeshError(502, "unreachable", f"Couldn’t reach {host}:{port}.") from exc
-        if status != 200:
-            raise MeshError(502, "not_open_transfer", f"{host}:{port} isn’t an Open Transfer app.")
+            raise MeshError(
+                502,
+                "device_unreachable",
+                f"Couldn’t reach {host}:{port}. Check the address and that both devices are on the same Wi-Fi.",
+            ) from exc
+        if status != 200 or not valid_id(info.get("id")):
+            raise MeshError(502, "device_unreachable", f"{host}:{port} isn’t an Open Transfer app.")
         if info.get("id") == self.id:
-            raise MeshError(400, "is_self", "That’s this device.")
-        peer = self._upsert_peer(info, host, manual=True)
+            raise MeshError(400, "invalid_request", "That’s this device.")
+        if self.trust.get(str(info["id"])):
+            # Paired: it has to prove it's really that device at this address.
+            candidate = Peer(str(info["id"]), "", "computer", "unknown", host, port)
+            if not self._hello(candidate) and self.trust.get(str(info["id"])):
+                raise MeshError(
+                    502, "identity_mismatch",
+                    f"The device at {host}:{port} says it’s a device you paired with, but couldn’t prove it.",
+                )  # fmt: skip
+            peer = self._peers.get(str(info["id"])) or self._upsert_peer(info, host, manual=True)
+        else:
+            peer = self._upsert_peer(info, host, manual=True)
         if peer is None:
-            raise MeshError(502, "not_open_transfer", f"{host}:{port} isn’t an Open Transfer app.")
+            raise MeshError(502, "device_unreachable", f"{host}:{port} isn’t an Open Transfer app.")
+        peer.manual = True
         self._executor.submit(self._hello, peer)
         return peer
 
@@ -569,6 +735,10 @@ class Mesh:
         return (self._inbox_root / visitor_id).is_dir()
 
     # ------------------------------------------------------------- pairing
+    #
+    # SRP over the 6-digit code; see docs/trust-model.md. "A" shows the code,
+    # "B" enters (or scans) it. The code is only accepted while A's Add device
+    # screen is open (the pairing window), and A's owner must press Allow.
 
     @property
     def pair_code(self) -> str:
@@ -584,12 +754,46 @@ class Mesh:
     def pair_code_expires_in(self) -> int:
         return max(0, round(PAIR_CODE_TTL - (time.monotonic() - self._pair_code_at)))
 
+    @property
+    def pairing_open(self) -> bool:
+        return time.monotonic() < self._pair_window_until
+
+    def open_pairing(self) -> dict[str, Any]:
+        """The owner opened (or still has open) the Add device screen."""
+        was_open = self.pairing_open
+        if not was_open:
+            self._rotate_code()  # a fresh code each time the screen opens
+        self._pair_window_until = time.monotonic() + PAIR_WINDOW
+        if not was_open:
+            self._bump()
+        return self.pairing_view()
+
+    def close_pairing(self) -> None:
+        if self.pairing_open:
+            self._pair_window_until = 0.0
+            self._bump()
+
+    def pairing_view(self) -> dict[str, Any]:
+        ip = network.primary_ip()
+        return {
+            "code": self.pair_code,
+            "expires_in": self.pair_code_expires_in(),
+            "open": self.pairing_open,
+            "address": f"{ip}:{self.port}" if ip else "",
+        }
+
+    def multicast_working(self) -> bool:
+        """Have we heard another device's multicast lately?"""
+        return bool(self.discovery and self.discovery.working) and (
+            time.monotonic() - self._multicast_heard < 60
+        )
+
     def check_visitor_code(self, code: str, client: str) -> bool | float:
         """``True`` if ``code`` is the current pairing code; seconds to wait if rate-limited."""
         wait = self._pair_limiter.attempt(f"visitor:{client}")
         if wait:
             return wait
-        if secrets.compare_digest(str(code).strip(), self.pair_code):
+        if self.pairing_open and secrets.compare_digest(str(code).strip(), self.pair_code):
             self._pair_limiter.reset(f"visitor:{client}")
             self._rotate_code()
             return True
@@ -602,111 +806,558 @@ class Mesh:
             log.warning("Too many wrong pairing codes; showing a new one.")
             self._rotate_code()
 
-    def pair_begin(self, info: dict[str, Any], nonce_b: str, client: str) -> dict[str, Any]:
-        """Step 1 on the device showing the code."""
-        if not valid_id(info.get("id")) or not _valid_nonce(nonce_b):
-            raise MeshError(400, "bad_request", "Invalid pairing request.")
-        nonce_a = secrets.token_hex(16)
-        with self._lock:
-            now = time.monotonic()
-            for key, pending in list(self._pair_pending.items()):
-                if now - pending[4] > 60:
-                    del self._pair_pending[key]
-            self._pair_pending[str(info["id"])] = (nonce_a, nonce_b, info, client, now)
-        return {"nonce": nonce_a, "device": self.self_info(include_visitors=False)}
+    # A: the device showing the code
 
-    def pair_confirm(self, device_id: str, proof: str, client: str) -> dict[str, Any]:
-        """Step 2 on the device showing the code."""
+    def pair_begin(self, device: dict[str, Any], client: str) -> dict[str, Any]:
+        """Step 1 on the device showing the code: start an SRP exchange."""
+        device_id = device.get("id")
+        if not valid_id(device_id) or device_id == self.id or not str(device_id).startswith("d-"):
+            raise MeshError(400, "invalid_request", "Invalid pairing request.")
+        if not self.pairing_open:
+            raise MeshError(
+                409, "pairing_not_open",
+                f"{self.identity.name} isn’t showing a pairing code. Open Add device on it first.",
+            )  # fmt: skip
+        session = PairSession(
+            id=secrets.token_urlsafe(12),
+            device={k: device.get(k) for k in ("id", "name", "form", "platform", "port")},
+            client=client,
+            server=srp.Server(f"{self.id}|{device_id}", self.pair_code),
+        )
+        with self._lock:
+            self._prune_pair_sessions()
+            if sum(1 for p in self._pair_sessions.values() if p.client == client) >= 5:
+                raise MeshError(
+                    429,
+                    "rate_limited",
+                    "Too many pairing attempts. Try again in a minute.",
+                    retry_after=60,
+                )
+            self._pair_sessions[session.id] = session
+        return {
+            "session": session.id,
+            "salt": session.server.salt.hex(),
+            "b": format(session.server.b_pub, "x"),
+            "device": self.self_info(include_visitors=False),
+        }
+
+    def pair_prove(
+        self, session_id: str, a_hex: str, proof_hex: str, client: str
+    ) -> dict[str, Any]:
+        """Step 2: check the other device's SRP proof, then ask our owner."""
+        with self._lock:
+            session = self._pair_sessions.get(session_id)
+        if session is None or session.client != client or session.state != "proving":
+            raise MeshError(409, "pairing_expired", "That pairing attempt has ended. Start again.")
         wait = self._pair_limiter.attempt(f"pair:{client}")
         if wait:
             raise MeshError(
-                429, "too_many_attempts", "Too many pairing attempts. Try again shortly."
+                429, "rate_limited", f"Too many wrong codes. Try again in {round(wait)} s.",
+                retry_after=round(wait),
+            )  # fmt: skip
+        if not self.pairing_open:
+            session.state = "expired"
+            raise MeshError(
+                409, "pairing_expired", f"{self.identity.name} closed its pairing screen."
             )
-        with self._lock:
-            pending = self._pair_pending.pop(device_id, None)
-        if pending is None or pending[3] != client:
-            raise MeshError(400, "no_pairing", "Start pairing again.")
-        nonce_a, nonce_b, info, _, _ = pending
-        code = self.pair_code
-        expected = pair_proof(code, "b", nonce_a, nonce_b, self.id, device_id)
-        if not secrets.compare_digest(expected, str(proof)):
+        try:
+            server_proof = session.server.verify(int(a_hex, 16), bytes.fromhex(proof_hex))
+        except (srp.SRPError, ValueError) as exc:
+            session.state = "failed"
             self._note_pair_failure()
-            raise MeshError(403, "wrong_code", "That code isn’t right.")
+            raise MeshError(
+                403, "pairing_code_invalid",
+                f"That code isn’t the one {self.identity.name} is showing. Codes change every 10 minutes.",
+            ) from exc  # fmt: skip
         self._pair_limiter.reset(f"pair:{client}")
-        key = pair_key(code, nonce_a, nonce_b, self.id, device_id)
-        self.trust.add(device_id, clean_name(info.get("name")), key)
-        self._rotate_code()
-        self._upsert_peer(info, client)
-        log.info("Paired with %s", log_safe(clean_name(info.get("name"))))
-        return {"proof": pair_proof(code, "a", nonce_a, nonce_b, self.id, device_id)}
+        session.key = session.server.key or b""
+        session.state, session.confirm_by = "confirming", time.monotonic() + PAIR_CONFIRM_TTL
+        self._rotate_code()  # this code is used up
+        self._emit("pair_request", self._pair_request_view(session))
+        self._bump()
+        return {"m2": server_proof.hex()}
 
-    def pair_with(self, code: str, address: str | None = None) -> Peer:
-        """Pair with the app showing ``code`` (found on the network, or at ``address``)."""
+    def pair_status(self, session_id: str, mac: str) -> dict[str, Any]:
+        """Step 3, polled by the other device: has our owner allowed it?"""
+        with self._lock:
+            session = self._pair_sessions.get(session_id)
+        if (
+            session is None
+            or not session.key
+            or not secrets.compare_digest(session_mac(session.key, "status", session_id), str(mac))
+        ):
+            raise MeshError(404, "pairing_expired", "That pairing attempt has ended. Start again.")
+        if session.state == "confirming" and time.monotonic() > session.confirm_by:
+            session.state = "expired"
+        return {
+            "status": session.state,
+            "mac": session_mac(session.key, "answer", session_id, session.state),
+        }
+
+    def decide_pairing(self, session_id: str, allow: bool) -> None:
+        """Our owner answered "Pair with …?"."""
+        with self._lock:
+            session = self._pair_sessions.get(session_id)
+        if (
+            session is None
+            or session.state != "confirming"
+            or time.monotonic() > session.confirm_by
+        ):
+            raise MeshError(409, "pairing_expired", "That pairing request has ended.")
+        device = session.device
+        if not allow:
+            session.state = "denied"
+            self._bump()
+            return
+        key = derive_pair_key(session.key, self.id, str(device["id"]))
+        self.trust.add(
+            str(device["id"]), clean_name(device.get("name")), key,
+            form=clean_form(device.get("form")), platform=clean_platform(device.get("platform")),
+        )  # fmt: skip
+        session.state = "allowed"
+        if isinstance(device.get("port"), int):
+            self._upsert_peer(device, session.client, verified=True)
+        log.info("Paired with %s", log_safe(clean_name(device.get("name"))))
+        self._bump()
+
+    def _pair_request_view(self, session: PairSession) -> dict[str, Any]:
+        d = session.device
+        return {
+            "id": session.id,
+            "device": {
+                "id": d.get("id"),
+                "name": clean_name(d.get("name")),
+                "form": clean_form(d.get("form")),
+                "platform": clean_platform(d.get("platform")),
+            },
+            "expires_in": max(0, round(session.confirm_by - time.monotonic())),
+        }
+
+    def _prune_pair_sessions(self) -> None:
+        now = time.monotonic()
+        for sid, s in list(self._pair_sessions.items()):
+            if now - s.created > PAIR_SESSION_TTL + PAIR_CONFIRM_TTL:
+                del self._pair_sessions[sid]
+
+    # B: the device entering the code
+
+    def pair_with(
+        self, code: str, address: str | None = None, device_id: str | None = None
+    ) -> Peer:
+        """Pair with the device showing ``code``: the chosen one, the one at
+        ``address``, or whichever nearby device has its pairing window open."""
         code = "".join(ch for ch in str(code) if ch.isdigit())
         if len(code) != 6:
-            raise MeshError(400, "bad_code", "Enter the 6-digit code shown on the other device.")
-        found = self.connect(address) if address else self._find_by_code(code)
-        # Use one address for both steps: the shared entry's host can change under
-        # us (we hear a device on each of its interfaces), and the other side
-        # checks that both steps come from the same address.
-        peer = dataclasses.replace(found, visitors=[])
-        nonce_b = secrets.token_hex(16)
-        try:
-            status, data = self._http(
-                peer,
-                "POST",
-                f"{P2P}/pair",
-                body={"device": self.self_info(include_visitors=False), "nonce": nonce_b},
-            )
-            if status != 200 or not _valid_nonce(data.get("nonce")):
-                raise MeshError(502, "pair_failed", _remote_message(data, "Pairing failed."))
-            nonce_a = str(data["nonce"])
-            proof_b = pair_proof(code, "b", nonce_a, nonce_b, peer.id, self.id)
-            status, data = self._http(
-                peer, "POST", f"{P2P}/pair/confirm", body={"id": self.id, "proof": proof_b}
-            )
-        except OSError as exc:
-            raise MeshError(502, "unreachable", f"Lost connection to {peer.name}.") from exc
-        if status == 403:
-            raise MeshError(403, "wrong_code", "That code isn’t right.")
-        if status != 200:
-            raise MeshError(status, "pair_failed", _remote_message(data, "Pairing failed."))
-        expected = pair_proof(code, "a", nonce_a, nonce_b, peer.id, self.id)
-        if not secrets.compare_digest(expected, str(data.get("proof", ""))):
-            raise MeshError(502, "pair_failed", "The other device couldn’t prove it has the code.")
-        self.trust.add(peer.id, peer.name, pair_key(code, nonce_a, nonce_b, peer.id, self.id))
-        log.info("Paired with %s", log_safe(peer.name))
-        return peer
-
-    def _find_by_code(self, code: str) -> Peer:
-        if not self.discovery or not self.discovery.working:
             raise MeshError(
-                400, "no_discovery", "Discovery is off — enter the other device’s address too."
+                400, "pairing_code_invalid", "Enter the 6-digit code shown on the other device."
             )
-        hint = code_hint(code)
-        event = threading.Event()
-        results: list[Peer] = []
-        with self._lock:
-            self._find_waiters.setdefault(hint, []).append((event, results))
-        try:
-            for _ in range(6):
-                self.discovery.find(hint)
-                if event.wait(0.6):
-                    return results[0]
-        finally:
+        if address:
+            candidates = [self.connect(address)]
+        elif device_id:
             with self._lock:
-                waiters = self._find_waiters.get(hint, [])
-                waiters[:] = [w for w in waiters if w[0] is not event]
-                if not waiters:
-                    self._find_waiters.pop(hint, None)
+                peer = self._peers.get(device_id)
+            if peer is None or not peer.online:
+                raise MeshError(
+                    404,
+                    "device_unreachable",
+                    "That device isn’t reachable right now. Check it’s nearby with Open Transfer open.",
+                )
+            candidates = [peer]
+        else:
+            candidates = self._pairing_candidates()
+        if len(candidates) == 1 and self.trust.get(candidates[0].id) and self._hello(candidates[0]):
+            raise MeshError(
+                409, "already_paired", f"You’re already paired with {candidates[0].name}."
+            )
+        failures: list[MeshError] = []
+        for peer in candidates:
+            try:
+                return self._pair_srp(peer, code)
+            except MeshError as exc:
+                if exc.code in {"rate_limited", "trust_rejected"}:
+                    raise
+                failures.append(exc)
+        wrong = [f for f in failures if f.code == "pairing_code_invalid"]
+        raise (wrong[0] if wrong else failures[0])
+
+    def _pairing_candidates(self) -> list[Peer]:
+        """Devices that may be showing a code: never just the ones multicast found."""
+        if self.discovery and self.discovery.working:
+            self.discovery.find()
+        with self._lock:
+            online = [p for p in self._peers.values() if p.online]
+        # Ask the devices we can already reach whether their pairing window is open.
+        for peer in online:
+            if not peer.pairing:
+                self._executor.submit(self._refresh_info, peer)
+        deadline = time.monotonic() + 1.5
+        while time.monotonic() < deadline:
+            with self._lock:
+                found = [p for p in self._peers.values() if p.online and p.pairing]
+            if found:
+                return found
+            time.sleep(0.1)
+        if not online:
+            raise MeshError(
+                404, "discovery_unavailable",
+                "No nearby devices found automatically — this network may block it. "
+                "Scan the QR code on the other device, or enter the address it shows.",
+            )  # fmt: skip
         raise MeshError(
-            404,
-            "code_not_found",
-            "No device on this network is showing that code. Check it, or enter its address.",
+            404, "pairing_not_open",
+            "None of the nearby devices is showing a pairing code. Open Add device on the other device first.",
+        )  # fmt: skip
+
+    def _refresh_info(self, peer: Peer) -> None:
+        with contextlib.suppress(OSError):
+            status, info = self._http(peer, "GET", f"{P2P}/info", timeout=2)
+            if status == 200 and info.get("id") == peer.id:
+                self._upsert_peer(info, peer.host, verified=self.trust.get(peer.id) is not None)
+
+    def _pair_srp(self, peer: Peer, code: str) -> Peer:
+        target = dataclasses.replace(peer, visitors=[])  # one address for every step
+        client = srp.Client(f"{peer.id}|{self.id}", code)
+
+        def post(path: str, body: dict[str, Any], timeout: float = 8) -> dict[str, Any]:
+            try:
+                status, data = self._unsigned_http(
+                    target, "POST", f"{P2P}/pair/{path}", body, timeout
+                )
+            except OSError as exc:
+                raise MeshError(
+                    502, "device_unreachable", f"Lost connection to {peer.name}."
+                ) from exc
+            if status != 200:
+                raw_error = data.get("error")
+                error: dict[str, Any] = raw_error if isinstance(raw_error, dict) else {}
+                code_ = str(error.get("code") or "pairing_failed")
+                extra = (
+                    {"retry_after": error.get("retry_after")} if error.get("retry_after") else {}
+                )
+                raise MeshError(status, code_, _remote_message(data, "Pairing failed."), **extra)
+            return data
+
+        begun = post("begin", {"device": self.self_info(include_visitors=False)})
+        if (begun.get("device") or {}).get("id") != peer.id:
+            raise MeshError(
+                502, "identity_mismatch", f"The device at {peer.address} isn’t {peer.name}."
+            )
+        session = str(begun.get("session", ""))
+        try:
+            proof = client.respond(bytes.fromhex(str(begun["salt"])), int(str(begun["b"]), 16))
+        except (KeyError, ValueError, srp.SRPError) as exc:
+            raise MeshError(
+                502, "identity_mismatch", f"{peer.name} sent an invalid pairing answer."
+            ) from exc
+        proved = post(
+            "prove", {"session": session, "a": format(client.a_pub, "x"), "m1": proof.hex()}
         )
+        try:
+            client.check(bytes.fromhex(str(proved.get("m2", ""))))
+        except (ValueError, srp.SRPError) as exc:
+            raise MeshError(
+                502, "identity_mismatch", f"{peer.name} couldn’t prove it’s showing that code."
+            ) from exc
+        key = client.key or b""
+        deadline = time.monotonic() + PAIR_CONFIRM_TTL + 5
+        while True:
+            answer = post(
+                "status", {"session": session, "mac": session_mac(key, "status", session)}
+            )
+            state = str(answer.get("status", ""))
+            if not secrets.compare_digest(
+                session_mac(key, "answer", session, state), str(answer.get("mac", ""))
+            ):
+                raise MeshError(
+                    502, "identity_mismatch", f"{peer.name}’s answer couldn’t be verified."
+                )
+            if state == "allowed":
+                break
+            if state in {"denied", "expired"} or time.monotonic() > deadline:
+                raise MeshError(
+                    403, "trust_rejected",
+                    f"{peer.name} didn’t allow the pairing." if state == "denied"
+                    else f"Nobody allowed the pairing on {peer.name} in time.",
+                )  # fmt: skip
+            time.sleep(1.0)
+        self.trust.add(
+            peer.id, peer.name, derive_pair_key(key, peer.id, self.id),
+            form=peer.form, platform=peer.platform,
+        )  # fmt: skip
+        self._upsert_peer(begun["device"], target.host, verified=True)
+        log.info("Paired with %s", log_safe(peer.name))
+        return self._peers.get(peer.id, peer)
+
+    def _unsigned_http(
+        self, peer: Peer, method: str, path: str, body: dict[str, Any], timeout: float
+    ) -> tuple[int, dict[str, Any]]:
+        """Pairing messages are authenticated by SRP itself, not the pair key."""
+        stranger = dataclasses.replace(peer, id="d-00000000")
+        return self._http(stranger, method, path, body=body, timeout=timeout)
+
+    # Unpairing
 
     def unpair(self, device_id: str) -> bool:
-        return self.trust.remove(device_id)
+        """Forget the pair key here and, if it's reachable, on the other device too."""
+        trusted = self.trust.get(device_id)
+        if trusted is None:
+            return False
+        with self._lock:
+            peer = self._peers.get(device_id)
+        if peer is not None and peer.online:
+            with contextlib.suppress(OSError):
+                self._http(peer, "DELETE", f"{P2P}/pair", timeout=4)
+        removed = self.trust.remove(device_id)
+        log.info("Unpaired %s", log_safe(trusted.name))
+        self._bump()
+        return removed
+
+    def unpaired_by(self, device_id: str) -> None:
+        """The other device unpaired us (a signed request)."""
+        if self.trust.remove(device_id):
+            log.info("A device removed its pairing with this one")
+            self._bump()
+
+    def _peer_unpaired(self, device_id: str) -> None:
+        """A device answered that it no longer trusts us: drop our side too.
+
+        Not within a minute of pairing: the device that shows the code stores the
+        key first and the other a moment later, so a hello in between would
+        otherwise undo a pairing that is still completing.
+        """
+        trusted = self.trust.get(device_id)
+        if trusted and time.time() - trusted.paired_at < PAIR_CONFIRM_TTL:
+            return
+        if trusted and self.trust.remove(device_id):
+            log.info("%s removed this pairing", log_safe(trusted.name))
+            self._emit("unpaired", {"id": device_id, "name": trusted.name})
+            self._bump()
+
+    def forget(self, device_id: str) -> bool:
+        """Remove a device from the list: unpair it and drop what we know about it."""
+        unpaired = self.unpair(device_id)
+        with self._lock:
+            dropped = self._peers.pop(device_id, None) is not None
+        self._bump()
+        return unpaired or dropped
+
+    # ----------------------------------------------------------- lifecycle
+    #
+    # Every state change goes through _move_session (receiver) or _move_delivery
+    # (sender), which refuse transitions lifecycle.can_move doesn't allow, so a
+    # final state is never overwritten by a late or duplicate message.
+    # Authority: the receiver decides accepted, file completed and the final
+    # state of what it received; the sender asks it (_settle) before recording
+    # a failure it can't prove on its own.
+
+    def _move_session(
+        self, session: IncomingSession, state: str, code: str = "", detail: str = ""
+    ) -> bool:
+        """Change an incoming session's state. Call with ``self._lock`` held."""
+        if not can_move(lifecycle_state(session.state), lifecycle_state(state)):
+            if state != session.state:
+                log.debug("ignored %s -> %s for %s", session.state, state, session.id)
+            return False
+        now = time.monotonic()
+        if state == ACCEPTED and session.state != ACCEPTED:
+            session.deadline = now + ACCEPT_TTL
+        if state == RECEIVING:
+            session.last_activity = now
+            session.started_at = session.started_at or time.time()
+        session.state = state
+        if code or detail:
+            info = describe(code, detail)
+            session.reason_code, session.reason = info["reason_code"], info["reason"]
+        if state in FINAL:
+            session.finished = now
+            session.finished_at = time.time()
+        return True
+
+    def _move_delivery(
+        self, delivery: Delivery, state: str, code: str = "", detail: str = ""
+    ) -> bool:
+        """Change the state of a delivery to another app or a visitor of another app."""
+        with self._lock:
+            if not can_move(lifecycle_state(delivery.view_state()), lifecycle_state(state)):
+                return False
+            now = time.monotonic()
+            if state == ACCEPTED and delivery.state != ACCEPTED:
+                delivery.deadline = now + ACCEPT_TTL
+            if state == "sending":
+                delivery.last_activity = now
+                delivery.started_at = delivery.started_at or time.time()
+            if state in FINAL:
+                delivery.finished_at = time.time()
+            delivery.state = state
+            if code or detail:
+                info = describe(code, detail)
+                delivery.reason_code, delivery.reason = info["reason_code"], info["reason"]
+            return True
+
+    def _finish_session(self, session: IncomingSession) -> None:
+        """Once every file has an outcome: completed, partial or failed. Lock held."""
+        files = session.files
+        if session.state in FINAL or not all(f.state in {DONE, FAILED} for f in files):
+            return
+        failed = [f for f in files if f.state == FAILED]
+        if not failed:
+            self._move_session(session, DONE)
+        elif len(failed) == len(files):
+            self._move_session(session, FAILED, failed[0].reason_code or "unknown_failure")
+        else:
+            arrived = len(files) - len(failed)
+            self._move_session(
+                session, PARTIAL, failed[0].reason_code or "unknown_failure",
+                f"{arrived} of {len(files)} files arrived. "
+                + describe(failed[0].reason_code or "unknown_failure")["reason"],
+            )  # fmt: skip
+
+    def _finish_delivery(self, job: Job, delivery: Delivery) -> None:
+        """Once every file has an outcome for this receiver: completed, partial or failed."""
+        if delivery.session is not None:
+            return  # a local receiver's session decides
+        total = len(job.files)
+        done, failed = delivery.files_done, delivery.files_failed
+        if len(done | set(failed)) < total:
+            return
+        if not failed:
+            self._move_delivery(delivery, DONE)
+            return
+        code = next(iter(failed.values())) or "unknown_failure"
+        if not done:
+            self._move_delivery(delivery, FAILED, code)
+        else:
+            self._move_delivery(
+                delivery, PARTIAL, code,
+                f"{len(done)} of {total} files arrived. " + describe(code)["reason"],
+            )  # fmt: skip
+
+    def _remote_status(self, delivery: Delivery) -> dict[str, Any] | None:
+        """Ask the receiving app how this transfer went, or ``None`` if it can't say."""
+        peer = delivery.peer
+        if peer is None or not delivery.remote_id:
+            return None
+        for attempt in range(RECONCILE_TRIES):
+            try:
+                status, data = self._http(
+                    peer, "GET", f"{P2P}/offers/{delivery.remote_id}",
+                    headers={"X-OT-Secret": delivery.remote_secret}, timeout=5,
+                )  # fmt: skip
+            except OSError:
+                if attempt + 1 < RECONCILE_TRIES and not self._stop.is_set():
+                    time.sleep(1.0)
+                continue
+            return data if status == 200 else None
+        return None
+
+    def _adopt(self, job: Job, delivery: Delivery, status: dict[str, Any]) -> bool:
+        """Take the receiver's word for what arrived; True if the delivery is now final."""
+        files = status.get("files")
+        if isinstance(files, list):
+            for i, f in enumerate(files[: len(job.files)]):
+                if not isinstance(f, dict):
+                    continue
+                if f.get("state") == DONE:
+                    delivery.files_done.add(i)
+                    delivery.files_failed.pop(i, None)
+                elif f.get("state") == FAILED and i not in delivery.files_done:
+                    delivery.files_failed[i] = str(f.get("reason_code") or "unknown_failure")
+        state = str(status.get("state") or "")
+        code = str(status.get("reason_code") or "")
+        detail = str(status.get("reason") or "")
+        if state in {DONE, PARTIAL, FAILED, DECLINED, EXPIRED, CANCELED}:
+            fallback = {
+                DECLINED: "receiver_declined",
+                EXPIRED: "expired",
+                CANCELED: "receiver_cancelled",
+            }
+            if state == FAILED and not code:
+                code = "unknown_failure"
+            self._move_delivery(delivery, state, code or fallback.get(state, ""), detail)
+        elif state in {ACCEPTED, RECEIVING} and delivery.state in {"offering", "waiting"}:
+            self._move_delivery(delivery, ACCEPTED)
+        elif state == PENDING and delivery.state == "offering":
+            self._move_delivery(delivery, "waiting")
+        return delivery.view_state() in FINAL
+
+    def _settle(self, job: Job, delivery: Delivery, code: str, detail: str = "") -> None:
+        """Give up on a delivery, unless the receiver can show it got further than we know."""
+        status = self._remote_status(delivery)
+        if status is not None and self._adopt(job, delivery, status):
+            self._touch_job(job)
+            return
+        stage = delivery.view_state()
+        if status is None and code not in {"expired", "sender_disconnected", "app_closed"}:
+            code, detail = "receiver_disconnected", detail
+        if stage in {"offering", "waiting"}:
+            self._move_delivery(delivery, EXPIRED if code == "expired" else FAILED, code, detail)
+        else:
+            for i in range(len(job.files)):
+                if i not in delivery.files_done:
+                    delivery.files_failed.setdefault(i, code)
+            self._finish_delivery(job, delivery)
+            if delivery.view_state() not in FINAL:  # nothing was tracked per file
+                self._move_delivery(delivery, FAILED, code, detail)
+        self._touch_job(job)
+
+    def _touch_job(self, job: Job) -> None:
+        """Note when every delivery has ended, and save the job to history."""
+        if not job.finished and all(d.view_state() in FINAL for d in job.deliveries.values()):
+            job.finished = time.monotonic()
+        self._record_job(job)
+
+    def _check_deadlines(self, now: float | None = None) -> None:
+        """End every transfer that has waited too long in a non-final state.
+
+        Called by housekeeping every 2 s; tests call it with a ``now`` in the future.
+        """
+        now = time.monotonic() if now is None else now
+        sessions: list[IncomingSession] = []
+        due: list[tuple[Job, Delivery, str]] = []
+        with self._lock:
+            for s in self._incoming.values():
+                changed = False
+                if s.state == PENDING and now - s.created > OFFER_TTL:
+                    changed = self._move_session(s, EXPIRED, "expired")
+                elif s.state == ACCEPTED and s.deadline and now > s.deadline:
+                    changed = self._move_session(s, FAILED, "sender_disconnected")
+                elif s.state == RECEIVING and now - s.last_activity > STALL_TIMEOUT:
+                    for f in s.files:
+                        if f.state not in {DONE, FAILED}:
+                            f.state, f.reason_code = FAILED, "transfer_stalled"
+                            f.error = describe("transfer_stalled")["reason"]
+                    self._finish_session(s)
+                    changed = True
+                if changed:
+                    sessions.append(s)
+            for job in self._jobs.values():
+                for d in job.deliveries.values():
+                    if d.session is not None or d.busy or d.view_state() in FINAL:
+                        continue
+                    if d.state in {"offering", "waiting"}:
+                        if now - job.created > OFFER_TTL + SENDER_GRACE:
+                            due.append((job, d, "expired"))
+                    elif d.state == ACCEPTED:
+                        if d.deadline and now > d.deadline:
+                            due.append((job, d, "sender_disconnected"))
+                    elif d.state == "sending" and now - d.last_activity > STALL_TIMEOUT:
+                        due.append((job, d, "transfer_stalled"))
+        for s in sessions:
+            self._record_session(s)
+        for job, d, code in due:
+            self._settle(job, d, code)
+
+    def _status_view(self, session: IncomingSession) -> dict[str, Any]:
+        return {
+            "id": session.id,
+            "state": session.state,
+            "reason": session.reason,
+            "reason_code": session.reason_code,
+            "files": [
+                {"state": f.state, "received": f.received, "reason_code": f.reason_code}
+                for f in session.files
+            ],
+        }
 
     # ----------------------------------------------------------- incoming
 
@@ -748,7 +1399,7 @@ class Mesh:
         )
         problem = self._space_problem(session)
         if problem:
-            session.state, session.reason, session.finished = DECLINED, problem, time.monotonic()
+            self._move_session(session, DECLINED, problem)
         elif owner_target and (self.config.auto_accept or paired):
             self._accept(session)
         with self._lock:
@@ -771,16 +1422,17 @@ class Mesh:
             )
 
     def _space_problem(self, session: IncomingSession) -> str:
+        """The reason code that rules this offer out, or ``""``."""
         limit = self.config.max_upload_size
         if limit and any(f.size > limit for f in session.files):
-            return "A file is larger than this device accepts."
+            return "file_too_large"
         store = self.storage if session.target == self.id else self.inbox(session.target)
         if session.total > store.usage()["free"]:
-            return "Not enough free space on the receiving device."
+            return "insufficient_storage"
         return ""
 
     def _accept(self, session: IncomingSession) -> None:
-        session.state = ACCEPTED
+        self._move_session(session, ACCEPTED)
         for f in session.files:
             f.state = "waiting"
 
@@ -789,38 +1441,52 @@ class Mesh:
         with self._lock:
             if session.state != PENDING:
                 raise MeshError(409, "already_decided", "This transfer was already answered.")
-            if accept:
-                problem = self._space_problem(session)
-                if problem:
-                    raise MeshError(507, "insufficient_storage", problem)
+            problem = self._space_problem(session) if accept else ""
+            if problem:
+                # Say why to both sides instead of leaving the offer waiting forever.
+                self._move_session(session, DECLINED, problem)
+            elif accept:
                 self._accept(session)
             else:
-                session.state, session.finished = DECLINED, time.monotonic()
-                session.reason = "Declined"
+                self._move_session(session, DECLINED, "receiver_declined")
         self._record_session(session)
+        if problem:
+            status = 507 if problem == "insufficient_storage" else 413
+            raise MeshError(status, problem, session.reason)
         return session
 
-    def cancel_incoming(self, session_id: str, viewer: Viewer | None, *, secret: str = "") -> None:
-        """Stop receiving: by the receiver (``viewer``) or the sender (``secret``)."""
+    def cancel_incoming(
+        self, session_id: str, viewer: Viewer | None, *, secret: str = "", why: str = ""
+    ) -> None:
+        """Stop receiving: by the receiver (``viewer``) or the sender (``secret``).
+
+        ``why == "app_closed"``: the sender's app is shutting down, which is a
+        failure (send again), not a decision to cancel.
+        """
         if viewer is not None:
             session = self._session_for(session_id, viewer)
         else:
             session = self._session_by_secret(session_id, secret)
         with self._lock:
-            if session.state in FINAL:
-                return
-            session.state, session.finished = CANCELED, time.monotonic()
-            session.reason = "Canceled by the sender" if viewer is None else "Canceled"
+            if viewer is not None:
+                self._move_session(session, CANCELED, "receiver_cancelled")
+            elif why == "app_closed":
+                self._move_session(
+                    session, FAILED, "sender_disconnected", "The sender closed Open Transfer."
+                )
+            else:
+                self._move_session(session, CANCELED, "sender_cancelled")
         self._record_session(session)
 
     def offer_status(self, session_id: str, secret: str) -> dict[str, Any]:
-        session = self._session_by_secret(session_id, secret)
-        return {
-            "id": session.id,
-            "state": session.state,
-            "reason": session.reason,
-            "files": [{"state": f.state, "received": f.received} for f in session.files],
-        }
+        """For the sender: where its offer stands (answered for a while after it ends)."""
+        with self._lock:
+            kept = self._finished_status.get(session_id)
+        if kept is not None and session_id not in self._incoming:
+            if not secrets.compare_digest(kept[0], secret or ""):
+                raise MeshError(404, "not_found", "Unknown transfer.")
+            return kept[1]
+        return self._status_view(self._session_by_secret(session_id, secret))
 
     def _session_for(self, session_id: str, viewer: Viewer) -> IncomingSession:
         with self._lock:
@@ -850,47 +1516,58 @@ class Mesh:
         if session is None:
             session = self._session_by_secret(session_id, secret or "")
         with self._lock:
-            if session.state in {DECLINED, EXPIRED, CANCELED}:
-                raise MeshError(410, session.state, session.reason or "This transfer was stopped.")
+            if session.state in FINAL:
+                raise MeshError(
+                    410,
+                    session.reason_code or session.state,
+                    session.reason or "This transfer has ended.",
+                )
             if session.state not in {ACCEPTED, RECEIVING}:
                 raise MeshError(409, "not_accepted", "The receiver hasn’t accepted yet.")
             if not 0 <= index < len(session.files):
                 raise MeshError(404, "not_found", "No such file in this transfer.")
             item = session.files[index]
-            if item.state in {RECEIVING, DONE}:
-                raise MeshError(409, "duplicate", "This file is already being received.")
+            if item.state in {RECEIVING, DONE, FAILED}:
+                raise MeshError(409, "duplicate", "This file was already sent.")
             if length is None:
                 raise MeshError(411, "length_required", "Send a Content-Length header.")
             if length != item.size:
                 raise MeshError(400, "size_mismatch", "The file size doesn’t match the offer.")
             item.state, item.received, item.error = RECEIVING, 0, ""
-            session.state = RECEIVING
-            session.started_at = session.started_at or time.time()
+            self._move_session(session, RECEIVING)
         self._record_session(session)
         store = self.storage if session.target == self.id else self.inbox(session.target)
 
         def count(n: int) -> None:
             item.received += n
+            if n:
+                session.last_activity = time.monotonic()
 
-        reader = _Watched(stream, count, lambda: session.state == CANCELED)
+        def stopped() -> bool:  # canceled, or given up on by the stall deadline
+            return session.state in FINAL or item.state == FAILED
+
+        reader = _Watched(stream, count, stopped)
         try:
             saved = store.save_stream(
                 item.name, reader, length=length, max_size=self.config.max_upload_size
             )
-        except (StorageError, OSError, ValueError) as exc:
+        except BaseException as exc:  # record every failure; nothing may stay "receiving"
             with self._lock:
-                item.state = FAILED
-                item.error = str(exc) if isinstance(exc, StorageError) else "Interrupted"
-                self._maybe_finish(session)
+                if item.state != FAILED:
+                    item.state, item.reason_code = FAILED, _receive_error_code(exc)
+                    item.error = str(exc) if isinstance(exc, StorageError) else "Interrupted"
+                self._finish_session(session)
             self._record_session(session)
             if session.state == CANCELED:
-                raise MeshError(410, CANCELED, session.reason) from exc
+                raise MeshError(410, session.reason_code or CANCELED, session.reason) from exc
             if isinstance(exc, StorageError):
                 raise
-            raise IncompleteUpload("The transfer was interrupted before it finished.") from exc
+            if isinstance(exc, Exception):
+                raise IncompleteUpload("The transfer was interrupted before it finished.") from exc
+            raise
         with self._lock:
             item.state, item.saved_name, item.received = DONE, saved.name, item.size
-            self._maybe_finish(session)
+            self._finish_session(session)
         self._record_session(session)
         log.info(
             "Received %s (%s bytes) from %s", log_safe(saved.name), saved.size,
@@ -899,15 +1576,6 @@ class Mesh:
         if session.target == self.id:
             self._emit("received", {"path": str(store.root / saved.name), "name": saved.name})
         return saved
-
-    def _maybe_finish(self, session: IncomingSession) -> None:
-        if session.state == CANCELED:
-            return
-        if all(f.state in {DONE, FAILED} for f in session.files):
-            failed = sum(f.state == FAILED for f in session.files)
-            session.state = FAILED if failed == len(session.files) else DONE
-            session.reason = f"{failed} file(s) failed" if failed else ""
-            session.finished = time.monotonic()
 
     # ----------------------------------------------------------- outgoing
 
@@ -978,7 +1646,9 @@ class Mesh:
                     target=_target(peer.id, peer.name, peer.form, peer.platform, "app"), peer=peer
                 )
                 if not peer.online:
-                    delivery.state, delivery.reason = FAILED, f"{peer.name} isn’t nearby."
+                    delivery.state = FAILED
+                    delivery.reason_code = "receiver_unreachable"
+                    delivery.reason = f"{peer.name} isn’t nearby."
                 return delivery
             for host in self._peers.values():
                 for v in host.visitors:
@@ -1003,7 +1673,8 @@ class Mesh:
                 job=job.id,
             )
         except MeshError as exc:
-            delivery.state, delivery.reason = FAILED, str(exc)
+            state, code = OFFER_ERRORS.get(exc.code, (FAILED, "unknown_failure"))
+            self._move_delivery(delivery, state, code, str(exc))
 
     def _offer_remote(self, job: Job, target_id: str, delivery: Delivery) -> None:
         peer = delivery.peer
@@ -1018,49 +1689,49 @@ class Mesh:
         try:
             status, data = self._http(peer, "POST", f"{P2P}/offers", body=body, timeout=8)
         except OSError:
-            delivery.state, delivery.reason = FAILED, f"Couldn’t reach {peer.name}."
+            self._move_delivery(
+                delivery, FAILED, "receiver_unreachable", f"Couldn’t reach {peer.name}."
+            )
             return
         if status != 201:
-            delivery.state = DECLINED if status in {403, 507} else FAILED
-            delivery.reason = _remote_message(data, f"{peer.name} refused the transfer.")
+            error = data.get("error")
+            error_code = str(error.get("code", "")) if isinstance(error, dict) else ""
+            state, code = OFFER_ERRORS.get(error_code, (FAILED, "unknown_failure"))
+            if status == 403 and code == "unknown_failure":
+                state, code = DECLINED, "permission_denied"
+            self._move_delivery(
+                delivery, state, code, _remote_message(data, f"{peer.name} refused the transfer.")
+            )
             return
         delivery.remote_id = str(data.get("id", ""))
         delivery.remote_secret = str(data.get("secret", ""))
         if job.canceled or delivery.canceled:
-            # Canceled while the offer was on its way: withdraw it now we know its id.
-            delivery.state = CANCELED
+            # Canceled (or the app closed) while the offer was on its way:
+            # withdraw it now we know its id, saying why.
+            self._move_delivery(delivery, CANCELED, "sender_cancelled")
+            why = delivery.reason_code or "sender_cancelled"
             with contextlib.suppress(OSError):
                 self._http(
                     peer,
                     "DELETE",
                     f"{P2P}/offers/{delivery.remote_id}",
-                    headers={"X-OT-Secret": delivery.remote_secret},
+                    headers={"X-OT-Secret": delivery.remote_secret, "X-OT-Reason": why},
                 )
             return
         self._follow_remote(job, delivery, data)
 
     def _follow_remote(self, job: Job, delivery: Delivery, data: dict[str, Any]) -> None:
+        """Watch an offer until it is answered (the deadline itself is in _check_deadlines)."""
         peer = delivery.peer
         assert peer is not None  # noqa: S101
-        deadline = time.monotonic() + OFFER_TTL + 15
         errors = 0
         while True:
-            state = data.get("state")
-            if state == PENDING:
-                delivery.state = "waiting"
-            elif state in {ACCEPTED, RECEIVING}:
-                if delivery.state in {"offering", "waiting"}:
-                    delivery.state = ACCEPTED
-                return
-            elif state in FINAL:
-                if delivery.state not in {"sending", DONE}:
-                    delivery.state = state
-                    delivery.reason = str(data.get("reason") or "")
-                return
+            if self._adopt(job, delivery, data) or delivery.view_state() not in {
+                "offering",
+                "waiting",
+            }:
+                return  # answered (or settled by the deadline meanwhile)
             if job.canceled or delivery.canceled or self._stop.is_set():
-                return
-            if time.monotonic() > deadline:
-                delivery.state, delivery.reason = EXPIRED, "No answer"
                 return
             time.sleep(0.8)
             try:
@@ -1072,14 +1743,19 @@ class Mesh:
                     timeout=5,
                 )
                 if status != 200:
-                    data = {"state": FAILED, "reason": _remote_message(data, "Transfer lost")}
+                    self._settle(
+                        job, delivery, "receiver_disconnected", "The receiver lost the transfer."
+                    )
+                    return
                 errors = 0
             except OSError:
                 errors += 1
                 if errors >= 5:
-                    delivery.state, delivery.reason = FAILED, f"Lost connection to {peer.name}."
+                    self._settle(
+                        job, delivery, "receiver_disconnected", f"Lost connection to {peer.name}."
+                    )
                     return
-                data = {"state": delivery.state if delivery.state != "offering" else PENDING}
+                data = {}
 
     def job_for(self, job_id: str, viewer: Viewer) -> Job:
         with self._lock:
@@ -1107,7 +1783,9 @@ class Mesh:
             for target_id, delivery in job.deliveries.items()
             if delivery.view_state() in {ACCEPTED, "sending"}
             and index not in delivery.files_done
+            and index not in delivery.files_failed
             and not delivery.direct
+            and not delivery.canceled
         ]
         if not sinks:
             if any(d.view_state() in {"offering", "waiting"} for d in job.deliveries.values()):
@@ -1123,7 +1801,12 @@ class Mesh:
                 if not chunk:
                     break
                 received += len(chunk)
-                live = [s for s in sinks if s.alive]
+                live = []
+                for sink in sinks:
+                    if sink.alive:
+                        live.append(sink)
+                    elif sink.delivery.canceled:  # that one receiver was canceled: stop its stream
+                        sink.abort("Canceled", "sender_cancelled")
                 if not live or job.canceled:
                     break
                 for sink in live:
@@ -1133,8 +1816,9 @@ class Mesh:
                 sink.abort("The sender stopped the transfer.")
             raise
         if received != length or job.canceled:
+            why = "sender_cancelled" if job.canceled else "sender_disconnected"
             for sink in sinks:
-                sink.abort("Canceled" if job.canceled else "The sender’s connection was lost.")
+                sink.abort(describe(why)["reason"], why)
             for sink in sinks:
                 sink.join(10)
             if job.canceled:
@@ -1151,61 +1835,93 @@ class Mesh:
     def _upload_result(self, job: Job, index: int, sinks: list[_Sink]) -> dict[str, Any]:
         results = {}
         for sink in sinks:
-            ok = sink.ok
             delivery = sink.delivery
+            ok = sink.ok
+            if delivery.session is None and not ok and not delivery.canceled:
+                # The receiver may have the whole file even though its reply got
+                # lost: ask before recording a failure.
+                status = self._remote_status(delivery)
+                if status is not None:
+                    self._adopt(job, delivery, status)
+                ok = index in delivery.files_done
+                if not ok and delivery.view_state() not in FINAL:
+                    delivery.files_failed.setdefault(
+                        index, "receiver_disconnected" if status is None else sink.code
+                    )
             if ok:
                 delivery.files_done.add(index)
-                if delivery.session is None and len(delivery.files_done) == len(job.files):
-                    delivery.state = DONE
-            elif delivery.session is None and delivery.state not in {CANCELED, DECLINED}:
-                delivery.state, delivery.reason = FAILED, sink.error or "Transfer failed"
-            results[sink.target_id] = {"ok": ok, "error": sink.error}
-        if all(d.view_state() in FINAL for d in job.deliveries.values()):
-            job.finished = time.monotonic()
-        self._record_job(job)
+                delivery.files_failed.pop(index, None)
+            self._finish_delivery(job, delivery)
+            results[sink.target_id] = {"ok": ok, "error": "" if ok else sink.error}
+        self._touch_job(job)
         return {"targets": results}
 
-    def cancel_job(self, job_id: str, viewer_id: str, *, quiet: bool = False) -> None:
+    def cancel_job(
+        self, job_id: str, viewer_id: str, *, quiet: bool = False, code: str = "sender_cancelled"
+    ) -> list[threading.Thread]:
+        """Stop sending to everyone; returns the threads telling the receivers."""
         with self._lock:
             job = self._jobs.get(job_id)
         if job is None or job.owner != viewer_id:
             if quiet:
-                return
+                return []
             raise MeshError(404, "not_found", "That transfer is no longer available.")
         job.canceled = True
-        job.finished = job.finished or time.monotonic()
-        for delivery in job.deliveries.values():
-            self._cancel_delivery(delivery)
-        self._record_job(job)
+        tellers = [t for d in job.deliveries.values() if (t := self._cancel_delivery(job, d, code))]
+        self._touch_job(job)
+        return tellers
 
     def cancel_target(self, job_id: str, viewer: Viewer, target_id: str) -> None:
         job = self.job_for(job_id, viewer)
         delivery = job.deliveries.get(target_id)
         if delivery is None:
             raise MeshError(404, "not_found", "That device isn’t part of this transfer.")
-        self._cancel_delivery(delivery)
-        if all(d.view_state() in FINAL for d in job.deliveries.values()):
-            job.finished = time.monotonic()
-        self._record_job(job)
+        self._cancel_delivery(job, delivery)
+        self._touch_job(job)
 
-    def _cancel_delivery(self, delivery: Delivery) -> None:
-        if delivery.view_state() in {DONE, DECLINED, EXPIRED, FAILED, CANCELED}:
-            return
-        delivery.canceled = True
-        delivery.state = CANCELED
+    def _cancel_delivery(
+        self, job: Job, delivery: Delivery, code: str = "sender_cancelled"
+    ) -> threading.Thread | None:
+        """Stop one delivery and tell the receiver (on a thread, which is returned).
+
+        ``code`` is ``sender_cancelled``, or ``app_closed`` when this app is
+        shutting down (a failure to send again, not a decision).
+        """
+        if delivery.view_state() in FINAL:
+            return None
+        delivery.canceled = True  # stops feeding it
+        state = FAILED if code == "app_closed" else CANCELED
         if delivery.session is not None:
             with contextlib.suppress(MeshError):
-                self.cancel_incoming(delivery.session.id, None, secret=delivery.session.secret)
-        elif delivery.peer is not None and delivery.remote_id:
-            peer, remote_id, secret = delivery.peer, delivery.remote_id, delivery.remote_secret
+                self.cancel_incoming(
+                    delivery.session.id, None, secret=delivery.session.secret, why=code
+                )
+            return None
+        if delivery.peer is None or not delivery.remote_id:
+            self._move_delivery(delivery, state, code)  # the offer itself withdraws on arrival
+            return None
+        receiving = delivery.view_state() == "sending" and code != "app_closed"
+        if not receiving:
+            self._move_delivery(delivery, state, code)
+        peer, remote_id, secret = delivery.peer, delivery.remote_id, delivery.remote_secret
 
-            def tell() -> None:
-                with contextlib.suppress(OSError):
-                    self._http(
-                        peer, "DELETE", f"{P2P}/offers/{remote_id}", headers={"X-OT-Secret": secret}
-                    )
+        def tell() -> None:
+            with contextlib.suppress(OSError):
+                self._http(
+                    peer, "DELETE", f"{P2P}/offers/{remote_id}",
+                    headers={"X-OT-Secret": secret, "X-OT-Reason": code}, timeout=3,
+                )  # fmt: skip
+            if receiving:
+                # The last bytes may have landed just before the cancel: if the
+                # receiver finished, it was delivered after all.
+                status = self._remote_status(delivery)
+                if status is None or not self._adopt(job, delivery, status):
+                    self._move_delivery(delivery, state, code)
+                self._touch_job(job)
 
-            self._executor.submit(tell)
+        thread = threading.Thread(target=tell, name="ot-cancel", daemon=True)
+        thread.start()
+        return thread
 
     # ------------------------------------------------- direct (browser↔browser)
     #
@@ -1313,21 +2029,20 @@ class Mesh:
             if delivery.view_state() not in {ACCEPTED, "sending"}:
                 raise MeshError(409, "not_accepted", "That device hasn’t accepted this transfer.")
             delivery.direct = True
+            delivery.last_activity = time.monotonic()
             job.started_at = job.started_at or time.time()
         elif state == "failed":
             delivery.direct = False  # the files go the usual way instead
         elif state == "progress":
             delivery.sent = max(delivery.sent, int(sent))
+            delivery.last_activity = time.monotonic()
         elif state == "done":
             delivery.sent = sum(int(f["size"]) for f in job.files)
             delivery.files_done = set(range(len(job.files)))
-            if delivery.session is None:
-                delivery.state = DONE
+            self._finish_delivery(job, delivery)
         else:
             raise MeshError(400, "bad_request", "Unknown state.")
-        if all(d.view_state() in FINAL for d in job.deliveries.values()):
-            job.finished = time.monotonic()
-        self._record_job(job)
+        self._touch_job(job)
 
     def direct_received(
         self, session_id: str, viewer: Viewer, index: int, received: int, done: bool
@@ -1336,19 +2051,22 @@ class Mesh:
         session = self._session_for(session_id, viewer)
         with self._lock:
             if session.state not in {ACCEPTED, RECEIVING}:
-                raise MeshError(410, session.state, session.reason or "This transfer was stopped.")
+                raise MeshError(
+                    410,
+                    session.reason_code or session.state,
+                    session.reason or "This transfer has ended.",
+                )
             if not 0 <= index < len(session.files):
                 raise MeshError(404, "not_found", "No such file in this transfer.")
             item = session.files[index]
-            if item.state == DONE:
-                return
+            if item.state in {DONE, FAILED}:
+                return  # a late or repeated report
             item.received = max(0, min(item.size, int(received)))
-            session.state = RECEIVING
-            session.started_at = session.started_at or time.time()
+            self._move_session(session, RECEIVING)
             if done:
                 item.state, item.received, item.direct = DONE, item.size, True
                 item.saved_name = item.name
-                self._maybe_finish(session)
+                self._finish_session(session)
         self._record_session(session)
 
     # ------------------------------------------------------------- history
@@ -1363,7 +2081,7 @@ class Mesh:
         if session.target != self.id:
             return
         view = self._incoming_view(session)
-        state = _with_failures(lifecycle_state(session.state), session.files)
+        state = lifecycle_state(session.state)
         ident = self.identity
         record = TransferRecord(
             transfer_id=session.job or session.id,
@@ -1386,14 +2104,21 @@ class Mesh:
                     device_id=ident.id,
                     device={"name": ident.name, "form": ident.form, "platform": ident.platform},
                     state=state,
+                    reason_code=session.reason_code,
                     reason=session.reason,
                     session_id=session.id,
                     bytes_done=session.received,
                     files_done=[i for i, f in enumerate(session.files) if f.state == DONE],
+                    files_failed={
+                        i: f.reason_code for i, f in enumerate(session.files) if f.state == FAILED
+                    },
+                    started_at=session.started_at,
+                    finished_at=session.finished_at,
                 )
             ],
             created_at=session.created_at,
             started_at=session.started_at,
+            reason_code=session.reason_code,
             reason=session.reason,
         )
         self._save_record(f"s:{session.id}", record)
@@ -1406,15 +2131,8 @@ class Mesh:
         recipients = []
         for target in view["targets"]:
             delivery = job.deliveries[target["id"]]
-            files = delivery.session.files if delivery.session is not None else None
-            done = (
-                {i for i, f in enumerate(files) if f.state == DONE}
-                if files is not None
-                else delivery.files_done
-            )
+            local = delivery.session
             state = lifecycle_state(target["state"])
-            if files is not None:
-                state = _with_failures(state, files)
             recipients.append(
                 RecipientRecord(
                     device_id=target["id"],
@@ -1422,15 +2140,22 @@ class Mesh:
                         k: target.get(k) for k in ("name", "form", "platform", "kind", "via_name")
                     },
                     state=state,
+                    reason_code=target["reason_code"],
                     reason=target["reason"],
-                    session_id=delivery.session.id if delivery.session else delivery.remote_id,
+                    session_id=local.id if local else delivery.remote_id,
                     bytes_done=target["sent"],
-                    files_done=sorted(done),
+                    files_done=target["files_done"],
+                    files_failed=target["files_failed"],
+                    started_at=local.started_at if local else delivery.started_at,
+                    finished_at=local.finished_at if local else delivery.finished_at,
                 )
             )
+        failed = [r for r in recipients if r.reason_code and r.state != "completed"]
         record = TransferRecord(
             transfer_id=job.id,
             direction="sent",
+            reason_code=failed[0].reason_code if failed else "",
+            reason=failed[0].reason if failed else "",
             sender=dict(job.origin),
             files=[
                 FileRecord(name=str(f["name"]), size=int(f["size"]), mime=str(f.get("mime", "")))
@@ -1497,16 +2222,22 @@ class Mesh:
                 last_prune = now
                 with contextlib.suppress(Exception):
                     self.history.prune()
+            self._check_deadlines(now)
             with self._lock:
-                for session in self._incoming.values():
-                    if session.state == PENDING and now - session.created > OFFER_TTL:
-                        session.state, session.reason, session.finished = EXPIRED, "No answer", now
+                self._prune_pair_sessions()
+                for attempt in [k for k, at in self._verifying.items() if now - at > 60]:
+                    del self._verifying[attempt]
                 for key in [
                     k for k, s in self._incoming.items()
                     if s.state in FINAL and now - s.finished > FINISHED_KEEP
                 ]:  # fmt: skip
-                    del self._incoming[key]
+                    session = self._incoming.pop(key)
+                    self._finished_status[key] = (session.secret, self._status_view(session), now)
                     self._recorded.pop(f"s:{key}", None)
+                for key in [
+                    k for k, kept in self._finished_status.items() if now - kept[2] > STATUS_KEEP
+                ]:  # fmt: skip
+                    del self._finished_status[key]
                 for key in [
                     k
                     for k, j in self._jobs.items()
@@ -1531,10 +2262,8 @@ class Mesh:
             if went_offline:
                 self._bump()
             for job in self._jobs_snapshot():
-                if not job.finished and all(
-                    d.view_state() in FINAL for d in job.deliveries.values()
-                ):
-                    job.finished = now
+                if not job.finished:
+                    self._touch_job(job)
             if now - last_hello >= HELLO_EVERY:
                 last_hello = now
                 for peer in peers:
@@ -1599,10 +2328,17 @@ class Mesh:
                 for trusted in self.trust.all():
                     if trusted.id not in known:
                         entry = _device(
-                            trusted.id, trusted.name, "computer", "unknown", "app", online=False
-                        )
+                            trusted.id, trusted.name, trusted.form, trusted.platform, "app",
+                            online=False,
+                        )  # fmt: skip
                         entry["paired"] = True
                         out.append(entry)
+        if viewer.is_owner:
+            for entry in out:
+                pair = self.trust.get(entry["id"])
+                if pair is not None:
+                    entry["last_seen"] = pair.last_seen or None
+        _tell_apart(out)
         return out
 
     def _incoming_view(self, s: IncomingSession) -> dict[str, Any]:
@@ -1611,7 +2347,7 @@ class Mesh:
             "from": {k: s.origin.get(k) for k in ("id", "name", "form", "platform", "via_name")},
             "paired": s.paired,
             "state": s.state,
-            "reason": s.reason,
+            **describe(s.reason_code, s.reason),
             "total": s.total,
             "received": s.received,
             "files": [
@@ -1623,6 +2359,7 @@ class Mesh:
                     "state": f.state,
                     "received": f.received,
                     "saved_name": f.saved_name,
+                    "reason_code": f.reason_code,
                     "direct": f.direct,
                 }
                 for f in s.files
@@ -1639,21 +2376,43 @@ class Mesh:
             sent = d.sent
             if d.session is not None:
                 sent = max(sent, d.session.received)
+            if d.session is not None:
+                done = [i for i, f in enumerate(d.session.files) if f.state == DONE]
+                failed = {
+                    i: f.reason_code for i, f in enumerate(d.session.files) if f.state == FAILED
+                }
+            else:
+                done, failed = sorted(d.files_done), dict(sorted(d.files_failed.items()))
             targets.append(
                 {
                     **d.target,
                     "id": target_id,
+                    "files_done": done,
+                    "files_failed": failed,
                     "state": d.view_state(),
-                    "reason": d.reason or (d.session.reason if d.session else ""),
+                    **describe(
+                        d.session.reason_code if d.session else d.reason_code,
+                        d.session.reason if d.session else d.reason,
+                    ),
                     "sent": min(sent, total),
                     "direct": d.direct,
                 }
             )
+        for t in targets:
+            t["disconnected"] = t["reason_code"] in DISCONNECT_CODES
+        summary = summarize(
+            [
+                {"state": lifecycle_state(t["state"]), "reason_code": t["reason_code"]}
+                for t in targets
+            ]
+        )
         return {
             "id": job.id,
             "files": job.files,
             "total": total,
             "targets": targets,
+            "state": summary["state"],
+            "summary": summary,
             "canceled": job.canceled,
             "finished": bool(job.finished),
         }
@@ -1693,7 +2452,14 @@ class Mesh:
             "signals": len(self._mail.get(viewer.id, [])),
         }
         if viewer.is_owner:
-            state["pairing"] = {"code": self.pair_code, "expires_in": self.pair_code_expires_in()}
+            state["pairing"] = self.pairing_view()
+            with self._lock:
+                state["pair_requests"] = [
+                    self._pair_request_view(s)
+                    for s in self._pair_sessions.values()
+                    if s.state == "confirming" and time.monotonic() < s.confirm_by
+                ]
+            state["multicast"] = self.multicast_working()
             state["settings"] = {
                 "auto_accept": self.config.auto_accept,
                 "paired_only": self.config.paired_only,
@@ -1777,6 +2543,7 @@ class _Sink:
         self.reader = _QueueReader(self._count)
         self.ok = False
         self.error = ""
+        self.code = ""  # reason code when it failed
         self._finished = threading.Event()
         self._thread = threading.Thread(target=self._run, name="ot-send", daemon=True)
 
@@ -1786,10 +2553,13 @@ class _Sink:
 
     def _count(self, n: int) -> None:
         self.delivery.sent += n
+        if n:
+            self.delivery.last_activity = time.monotonic()
 
     def start(self) -> None:
+        self.delivery.busy += 1
         if self.delivery.session is None:
-            self.delivery.state = "sending"
+            self.mesh._move_delivery(self.delivery, "sending")
         self._thread.start()
 
     def feed(self, chunk: bytes) -> None:
@@ -1801,6 +2571,7 @@ class _Sink:
             except queue.Full:
                 if time.monotonic() > deadline:
                     self.error = f"{self.delivery.target['name']} stopped responding."
+                    self.code = "transfer_stalled"
                     self.reader.aborted = True
                     return
 
@@ -1811,9 +2582,12 @@ class _Sink:
                 return
             except queue.Full:
                 continue
+        if self.delivery.canceled:  # don't leave its thread waiting for more
+            self.abort("Canceled", "sender_cancelled")
 
-    def abort(self, reason: str) -> None:
+    def abort(self, reason: str, code: str = "sender_disconnected") -> None:
         self.error = self.error or reason
+        self.code = self.code or code
         self.reader.aborted = True
 
     def join(self, timeout: float) -> None:
@@ -1831,8 +2605,10 @@ class _Sink:
             self.ok = True
         except Exception as exc:
             self.error = self.error or _describe_error(exc, self.delivery)
+            self.code = self.code or _send_error_code(exc)
             log.debug("delivery to %s failed", self.target_id, exc_info=True)
         finally:
+            self.delivery.busy -= 1
             self._finished.set()
 
     def _put_remote(self) -> None:
@@ -1862,11 +2638,41 @@ class _Sink:
                 data = json.loads(raw)
             except ValueError:
                 data = {}
-            if res.status == 410:
-                self.delivery.state = CANCELED
+            error = data.get("error") if isinstance(data, dict) else None
+            code = str(error.get("code", "")) if isinstance(error, dict) else ""
             raise MeshError(
-                res.status, "remote", _remote_message(data, "The receiver rejected the file.")
+                res.status,
+                code or "remote",
+                _remote_message(data, "The receiver rejected the file."),
             )
+
+
+#: ``error.code`` of a receiver's refusal -> reason code
+_REMOTE_CODES = {
+    "insufficient_storage": "insufficient_storage",
+    "too_large": "file_too_large",
+    "file_too_large": "file_too_large",
+    "size_mismatch": "invalid_request",
+    "duplicate": "invalid_request",
+    "not_accepted": "invalid_request",
+    "not_found": "receiver_disconnected",  # it restarted and forgot the transfer
+}
+
+
+def _send_error_code(exc: Exception) -> str:
+    """Why sending a file to another app failed, as a reason code (before reconciling)."""
+    if isinstance(exc, MeshError):
+        return _REMOTE_CODES.get(
+            exc.code,
+            exc.code
+            if exc.code in {"receiver_cancelled", "sender_cancelled"}
+            else "unknown_failure",
+        )
+    if isinstance(exc, TimeoutError):
+        return "network_timeout"
+    if isinstance(exc, (ConnectionError, OSError)):
+        return "receiver_disconnected"
+    return "unknown_failure"
 
 
 def _describe_error(exc: Exception, delivery: Delivery) -> str:
@@ -1877,11 +2683,19 @@ def _describe_error(exc: Exception, delivery: Delivery) -> str:
     return "Transfer failed."
 
 
-def _with_failures(state: str, files: list[IncomingFile]) -> str:
-    """A "done" session where some files failed is only a partial success."""
-    if state == COMPLETED and any(f.state == FAILED for f in files):
-        return PARTIAL
-    return state
+def _receive_error_code(exc: BaseException) -> str:
+    """Why a file couldn't be received, as a reason code."""
+    if isinstance(exc, InsufficientStorage):
+        return "insufficient_storage"
+    if isinstance(exc, TooLarge):
+        return "file_too_large"
+    if isinstance(exc, (StorageError, ConnectionError, TimeoutError)):
+        return "sender_disconnected"  # the stream ended or broke before the last byte
+    if isinstance(exc, OSError):
+        return "destination_unavailable"  # couldn't write where files go
+    if type(exc).__name__ == "ClientDisconnected":
+        return "sender_disconnected"
+    return "unknown_failure"
 
 
 def _target(device_id: str, name: str, form: str, platform: str, kind: str) -> dict[str, Any]:
@@ -1900,6 +2714,26 @@ def _device(
         "online": online,
         "paired": False,
     }
+
+
+def _tell_apart(devices: list[dict[str, Any]]) -> None:
+    """Devices with the same name must not look identical.
+
+    An offline device that shares its name and type with one that is online
+    (typically the same phone before a reinstall) is marked ``stale`` ("old
+    device"); any others get a short id to tell them apart.
+    """
+    groups: dict[tuple[str, str, str], list[dict[str, Any]]] = {}
+    for d in devices:
+        groups.setdefault((d["name"].casefold(), d["form"], d["kind"]), []).append(d)
+    for same in groups.values():
+        if len(same) < 2:
+            continue
+        online = [d for d in same if d["online"]]
+        for d in same:
+            d["short_id"] = d["id"][-4:]
+            if online and not d["online"]:
+                d["stale"] = True
 
 
 def _clean_visitors(items: list[Any]) -> list[dict[str, str]]:

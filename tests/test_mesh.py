@@ -9,6 +9,7 @@ import os
 import random
 import socket
 import struct
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -347,77 +348,49 @@ def test_not_enough_space_is_declined_up_front(make_node: NodeFactory) -> None:
     job = send(alice, [device_id(alice, "Bravo")], [("a.bin", b"x" * 11)])
     wait_for(lambda: target_states(alice, job) == {"Bravo": "declined"})
     (target,) = next(j for j in alice.state()["outgoing"] if j["id"] == job)["targets"]
-    assert target["reason"] == "A file is larger than this device accepts."
+    assert target["reason_code"] == "file_too_large"
+    assert target["reason"] == "A file is larger than the receiving device accepts."
+    assert target["action"]
 
 
 # ---------------------------------------------------------------------- pairing
+# (the protocol and its abuse cases are in tests/test_pairing.py)
 
 
-def test_pairing_by_code_and_address_auto_accepts(make_node: NodeFactory) -> None:
-    a, b = make_node("Alpha"), make_node("Bravo")
-    alice, bob = owner(a), owner(b)
-    code = bob.state()["pairing"]["code"]
-    status, data = alice("POST", "/api/pair", {"code": code, "address": f"127.0.0.1:{b.port}"})
-    assert status == 200, data
-    assert data["device"]["name"] == "Bravo"
-    assert bob.state()["pairing"]["code"] != code  # each code works once
-    devices = {d["name"]: d for d in alice.state()["devices"]}
-    assert devices["Bravo"]["paired"] is True
-    wait_for(lambda: any(d["name"] == "Alpha" and d["paired"] for d in bob.state()["devices"]))
-
-    job = send(alice, [devices["Bravo"]["id"]], [("auto.txt", b"trusted")])
-    wait_for(lambda: target_states(alice, job) == {"Bravo": "accepted"})
-    assert upload(alice, job, 0, b"trusted")[0] == 200
-    assert (Path(b.config.storage_dir) / "auto.txt").read_bytes() == b"trusted"
-    # …and in the other direction too.
-    job = send(bob, [device_id(bob, "Alpha")], [("back.txt", b"hi")])
-    wait_for(lambda: target_states(bob, job) == {"Alpha": "accepted"})
-
-
-def test_wrong_pairing_code_is_rejected_and_rate_limited(make_node: NodeFactory) -> None:
-    a, b = make_node("Alpha"), make_node("Bravo")
-    alice = owner(a)
-    real = owner(b).state()["pairing"]["code"]
-    wrong = f"{(int(real) + 1) % 10**6:06d}"
-    codes = []
-    for _ in range(6):
-        status, _ = alice("POST", "/api/pair", {"code": wrong, "address": f"127.0.0.1:{b.port}"})
-        codes.append(status)
-    assert codes[:5] == [403] * 5
-    assert codes[5] == 429
-    assert not any(d["paired"] for d in alice.state()["devices"])
-
-
-def test_unpair_removes_trust(make_node: NodeFactory) -> None:
-    a, b = make_node("Alpha"), make_node("Bravo")
-    alice = owner(a)
-    code = owner(b).state()["pairing"]["code"]
-    alice("POST", "/api/pair", {"code": code, "address": f"127.0.0.1:{b.port}"})
-    bravo = device_id(alice, "Bravo")
-    assert alice("DELETE", f"/api/pairs/{bravo}")[0] == 200
-    assert not {d["id"]: d for d in alice.state()["devices"]}[bravo]["paired"]
-
-
-def test_forged_signature_is_not_trusted(make_node: NodeFactory) -> None:
-    a, b = make_node("Alpha"), make_node("Bravo")
-    alice = owner(a)
-    code = owner(b).state()["pairing"]["code"]
-    alice("POST", "/api/pair", {"code": code, "address": f"127.0.0.1:{b.port}"})
-    # Someone else claims to be Alpha but can't sign with the pairing key.
-    forged = {
-        "from": {"id": a.mesh.id, "name": "Alpha", "port": a.port},
-        "origin": {"id": a.mesh.id, "name": "Alpha"},
-        "to": b.mesh.id,
-        "files": [{"name": "evil.exe", "size": 3}],
-    }
-    request = urllib.request.Request(
-        f"{b.local_url}/api/p2p/v1/offers",
-        data=json.dumps(forged).encode(),
-        method="POST",
-        headers={"Content-Type": "application/json", "X-OT-From": a.mesh.id, "X-OT-Auth": "1:00"},
-    )
-    with urllib.request.urlopen(request, timeout=5) as res:
-        assert json.loads(res.read())["state"] == "pending"  # asks instead of auto-accepting
+def pair_nodes(
+    enters: Node,
+    shows: Node,
+    *,
+    address: bool = True,
+    device: bool = False,
+    allow: bool = True,
+    code: str | None = None,
+) -> tuple[int, Any]:
+    """Pair like a person would: open Add device on ``shows``, type its code on
+    ``enters``, then press Allow (or Deny) on ``shows``."""
+    shower, enterer = owner(shows), owner(enters)
+    status, opened = shower("POST", "/api/pair/open")
+    assert status == 200, opened
+    body: Json = {"code": code or opened["code"]}
+    if address:
+        body["address"] = f"127.0.0.1:{shows.port}"
+    if device:
+        body["device_id"] = shows.mesh.id
+    result: dict[str, tuple[int, Any]] = {}
+    worker = threading.Thread(target=lambda: result.update(r=enterer("POST", "/api/pair", body)))
+    worker.start()
+    if code is None or code == opened["code"]:
+        deadline = time.monotonic() + 15
+        while worker.is_alive() and time.monotonic() < deadline:
+            requests = shower.state().get("pair_requests") or []
+            if requests:
+                shower(
+                    "POST", f"/api/pair/requests/{requests[0]['id']}/{'allow' if allow else 'deny'}"
+                )
+                break
+            time.sleep(0.1)
+    worker.join(90)
+    return result["r"]
 
 
 # ------------------------------------------------------------------ browsers
@@ -495,7 +468,7 @@ def test_visitor_sends_to_the_app_owner(make_node: NodeFactory) -> None:
 
 def test_visitor_paired_by_qr_code_is_auto_accepted(make_node: NodeFactory) -> None:
     a = make_node("Alpha")
-    code = owner(a).state()["pairing"]["code"]
+    code = owner(a)("POST", "/api/pair/open")[1]["code"]  # the QR is on screen
     phone = Client(f"http://{lan_ip()}:{a.port}")
     phone("GET", f"/?pair={code}", raw=True)
     assert phone.state()["me"]["paired"] is True
@@ -550,8 +523,7 @@ def test_devices_find_each_other_automatically(make_node: NodeFactory) -> None:
             )
         )
     # Pair by code alone: Alpha finds whoever shows Bravo's code on the network.
-    code = owner(b).state()["pairing"]["code"]
-    status, data = owner(a)("POST", "/api/pair", {"code": code})
+    status, data = pair_nodes(a, b, address=False)
     assert status == 200, data
     assert data["device"]["name"] == "Bravo"
     # Leaving says goodbye, so others update straight away.

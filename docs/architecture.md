@@ -140,7 +140,7 @@ Plus:
 - `safe_filename` keeps Unicode but strips directories, control and reserved characters, leading dots and Windows device names, and caps the length at 240 bytes. `Storage.resolve` re-checks the name and refuses hidden files, symlinks and anything whose real parent isn't the shared folder.
 - Responses carry a strict CSP (`script-src 'self'`, no inline script), `nosniff`, `X-Frame-Options: DENY`, `Referrer-Policy: no-referrer`, COOP/CORP. File downloads add `Content-Security-Policy: sandbox` and are always `attachment`, except `?inline=1` for a short allow-list of image/audio/video types (used for thumbnails).
 - PIN attempts are limited to 5 per minute per client address (per forwarded address with `--behind-proxy`) and compared in constant time. The session key is stored in `.open-transfer/secret` (mode 0600) so logins survive restarts.
-- The QR code embeds `?pin=…`; the server signs the visitor in and immediately redirects to `/` so the PIN doesn't stay in the address bar or history.
+- The classic share-link QR (`/api/qr.svg`, `--share-folder`) embeds `?pin=…`; the server signs the visitor in and immediately redirects to `/` so the PIN doesn't stay in the address bar or history. The pairing QR on *Add device* never contains the PIN: its single-use code admits the browser instead (docs/trust-model.md).
 
 ## Front end
 

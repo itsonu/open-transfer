@@ -1,10 +1,11 @@
 """Who this device is, and which other devices it trusts.
 
 Every Open Transfer app has a stable random **device id** (kept in
-``<state>/device.json``) and a human name. Pairing two devices stores a
-shared secret key on both sides (``<state>/trusted.json``); requests between
-paired devices are signed with it (see :func:`sign` / :func:`verify`), which
-lets them skip the "Accept?" prompt.
+``<state>/device.json``) and a human name. Pairing two devices (SRP, see
+:mod:`open_transfer.srp` and docs/trust-model.md) stores a shared secret key on
+both sides (``<state>/trusted.json``); requests between paired devices, and
+their answers, are signed with it (:func:`sign`, :func:`sign_response`), which
+lets them skip the "Accept?" prompt and proves who is at an address.
 """
 
 from __future__ import annotations
@@ -153,6 +154,9 @@ class TrustedDevice:
     name: str
     key: str  # hex
     paired_at: float
+    form: str = "computer"
+    platform: str = "unknown"
+    last_seen: float = 0.0  # wall clock, last time it proved itself
 
 
 class TrustStore:
@@ -170,6 +174,9 @@ class TrustStore:
                         clean_name(item.get("name")),
                         item["key"],
                         float(item.get("paired_at", 0)),
+                        clean_form(item.get("form")),
+                        clean_platform(item.get("platform")),
+                        float(item.get("last_seen", 0)),
                     )
             except (KeyError, TypeError, ValueError):
                 continue
@@ -186,8 +193,25 @@ class TrustStore:
         with self._lock:
             return list(self._devices.values())
 
-    def add(self, device_id: str, name: str, key: bytes) -> TrustedDevice:
-        device = TrustedDevice(device_id, clean_name(name), key.hex(), time.time())
+    def add(
+        self,
+        device_id: str,
+        name: str,
+        key: bytes,
+        *,
+        form: str = "computer",
+        platform: str = "unknown",
+    ) -> TrustedDevice:
+        now = time.time()
+        device = TrustedDevice(
+            device_id,
+            clean_name(name),
+            key.hex(),
+            now,
+            clean_form(form),
+            clean_platform(platform),
+            now,
+        )
         with self._lock:
             self._devices[device_id] = device
             self._save()
@@ -200,6 +224,19 @@ class TrustStore:
                 device.name = clean_name(name)
                 self._save()
 
+    def seen(self, device_id: str, *, form: str, platform: str) -> None:
+        """A paired device proved itself: remember what it is and when (saved now and then)."""
+        with self._lock:
+            device = self._devices.get(device_id)
+            if device is None:
+                return
+            changed = (device.form, device.platform) != (form, platform)
+            device.form, device.platform = clean_form(form), clean_platform(platform)
+            stale = time.time() - device.last_seen > 600
+            device.last_seen = time.time()
+            if changed or stale:
+                self._save()
+
     def remove(self, device_id: str) -> bool:
         with self._lock:
             removed = self._devices.pop(device_id, None) is not None
@@ -209,9 +246,12 @@ class TrustStore:
 
     def _save(self) -> None:
         data = {
-            d.id: {"name": d.name, "key": d.key, "paired_at": d.paired_at}
+            d.id: {
+                "name": d.name, "key": d.key, "paired_at": d.paired_at,
+                "form": d.form, "platform": d.platform, "last_seen": d.last_seen,
+            }
             for d in self._devices.values()
-        }
+        }  # fmt: skip
         try:
             _write_private(self._path, data)
         except OSError:
@@ -221,16 +261,20 @@ class TrustStore:
 # ------------------------------------------------------------------ signing
 
 
-def _message(timestamp: str, method: str, path: str, sender: str, body: bytes) -> bytes:
+def _message(stamp: str, method: str, path: str, sender: str, body: bytes) -> bytes:
     digest = hashlib.sha256(body).hexdigest()
-    return f"open-transfer/1\n{timestamp}\n{method.upper()}\n{path}\n{sender}\n{digest}".encode()
+    return f"open-transfer/2\n{stamp}\n{method.upper()}\n{path}\n{sender}\n{digest}".encode()
 
 
 def sign(key: bytes, method: str, path: str, sender: str, body: bytes = b"") -> str:
-    """Value for the ``X-OT-Auth`` header of a request to a paired device."""
-    timestamp = f"{time.time():.3f}"
-    mac = hmac.new(key, _message(timestamp, method, path, sender, body), hashlib.sha256)
-    return f"{timestamp}:{mac.hexdigest()}"
+    """Value for the ``X-OT-Auth`` header of a request to a paired device.
+
+    ``<time>.<nonce>:<mac>``: the random nonce keeps two identical requests sent
+    in the same millisecond from looking like a replay of each other.
+    """
+    stamp = f"{time.time():.3f}.{secrets.token_hex(8)}"
+    mac = hmac.new(key, _message(stamp, method, path, sender, body), hashlib.sha256)
+    return f"{stamp}:{mac.hexdigest()}"
 
 
 class SignatureChecker:
@@ -245,15 +289,18 @@ class SignatureChecker:
     ) -> bool:
         if not header or ":" not in header:
             return False
-        timestamp, _, mac = header.partition(":")
+        stamp, _, mac = header.partition(":")
+        seconds, _, nonce = stamp.rpartition(".")
         try:
-            sent_at = float(timestamp)
+            sent_at = float(seconds)
         except ValueError:
+            return False
+        if len(nonce) != 16:
             return False
         now = time.time()
         if abs(now - sent_at) > SIGNATURE_WINDOW:
             return False
-        expected = hmac.new(key, _message(timestamp, method, path, sender, body), hashlib.sha256)
+        expected = hmac.new(key, _message(stamp, method, path, sender, body), hashlib.sha256)
         if not hmac.compare_digest(expected.hexdigest(), mac):
             return False
         with self._lock:
@@ -266,33 +313,39 @@ class SignatureChecker:
         return True
 
 
+def sign_response(key: bytes, request_auth: str, status: int, body: bytes) -> str:
+    """``X-OT-Auth`` for an answer to a signed request: binds it to that request."""
+    message = (
+        f"open-transfer/1\nresponse\n{request_auth}\n{status}\n{hashlib.sha256(body).hexdigest()}"
+    )
+    return hmac.new(key, message.encode(), hashlib.sha256).hexdigest()
+
+
+def verify_response(
+    key: bytes, request_auth: str, status: int, body: bytes, header: str | None
+) -> bool:
+    return bool(header) and hmac.compare_digest(
+        sign_response(key, request_auth, status, body), str(header)
+    )
+
+
 # ------------------------------------------------------------------ pairing
 #
-# Pairing proves both sides know the same short code without sending it:
-#   1. B → A  {nonce_b}            A → B  {nonce_a}
-#   2. B → A  {proof_b}            A → B  {proof_a}
-# proof_x = HMAC(code, role | nonce_a | nonce_b | id_a | id_b), and the shared
-# key is HMAC(code, "key" | nonce_a | nonce_b | id_a | id_b). Each code is
-# short-lived and guesses are rate-limited.
+# SRP-6a over the 6-digit code (open_transfer.srp, docs/trust-model.md). The
+# SRP session key K never leaves either device; the pair key stored on both is
+# derived from it, and the "allowed?" polling in between is MAC'd with K.
 
 
-def _pair_mac(code: str, label: str, nonce_a: str, nonce_b: str, id_a: str, id_b: str) -> bytes:
-    message = f"open-transfer-pair/1\n{label}\n{nonce_a}\n{nonce_b}\n{id_a}\n{id_b}".encode()
-    return hmac.new(code.encode(), message, hashlib.sha256).digest()
+def derive_pair_key(session_key: bytes, id_a: str, id_b: str) -> bytes:
+    """The long-term key for the pair (id_a shows the code, id_b enters it)."""
+    message = f"open-transfer-pair-key/2|{id_a}|{id_b}".encode()
+    return hmac.new(session_key, message, hashlib.sha256).digest()
 
 
-def pair_proof(code: str, role: str, nonce_a: str, nonce_b: str, id_a: str, id_b: str) -> str:
-    return _pair_mac(code, role, nonce_a, nonce_b, id_a, id_b).hex()
-
-
-def pair_key(code: str, nonce_a: str, nonce_b: str, id_a: str, id_b: str) -> bytes:
-    return _pair_mac(code, "key", nonce_a, nonce_b, id_a, id_b)
+def session_mac(session_key: bytes, *parts: str) -> str:
+    message = "open-transfer-pair/2|" + "|".join(parts)
+    return hmac.new(session_key, message.encode(), hashlib.sha256).hexdigest()
 
 
 def new_pair_code() -> str:
     return f"{secrets.randbelow(10**6):06d}"
-
-
-def code_hint(code: str) -> str:
-    """What a device broadcasts to find whoever is showing ``code``."""
-    return hashlib.sha256(f"open-transfer-find/1\n{code}".encode()).hexdigest()[:16]

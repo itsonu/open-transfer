@@ -127,9 +127,23 @@ class Discovery:
         packet = {"type": "reply" if reply else "announce", **self._describe()}
         self.send(packet)
 
-    def find(self, hint: str) -> None:
-        """Ask whoever shows the pairing code with this hint to answer."""
-        self.send({"type": "find", "id": self._describe()["id"], "find": hint})
+    def find(self) -> None:
+        """Ask every device whose pairing window is open to answer.
+
+        Nothing about the code is sent: which device shows it is settled by the
+        pairing exchange itself (docs/trust-model.md).
+        """
+        self.send({"type": "find", "id": self._describe()["id"]})
+
+    def send_to(self, packet: dict[str, Any], address: str) -> None:
+        """Answer one device directly (works where multicast only goes one way)."""
+        sock = self._sock
+        if sock is None:
+            return
+        if "id" not in packet:
+            packet = {**packet, "id": self._describe()["id"]}
+        with contextlib.suppress(OSError, ValueError):
+            sock.sendto(encode(packet), (address, self.port))
 
     def send(self, packet: dict[str, Any]) -> None:
         sock = self._sock

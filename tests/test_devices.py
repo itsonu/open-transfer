@@ -61,14 +61,17 @@ def test_signatures_verify_once() -> None:
     assert not checker.verify(key, "garbage", "GET", "/", "d-1", b"")
 
 
-def test_pairing_proofs_bind_code_and_both_ids() -> None:
-    args = ("a" * 32, "b" * 32, "d-" + "1" * 24, "d-" + "2" * 24)
-    assert devices.pair_proof("123456", "b", *args) == devices.pair_proof("123456", "b", *args)
-    assert devices.pair_proof("123456", "b", *args) != devices.pair_proof("123457", "b", *args)
-    assert devices.pair_proof("123456", "a", *args) != devices.pair_proof("123456", "b", *args)
-    assert devices.pair_key("123456", *args) != bytes.fromhex(
-        devices.pair_proof("123456", "b", *args)
-    )
+def test_pair_key_is_bound_to_both_ids_and_responses_to_their_request() -> None:
+    k = b"k" * 32
+    a, b = "d-" + "1" * 24, "d-" + "2" * 24
+    assert devices.derive_pair_key(k, a, b) != devices.derive_pair_key(k, b, a)
+    assert devices.derive_pair_key(k, a, b) != devices.derive_pair_key(b"j" * 32, a, b)
+    sig = devices.sign_response(k, "req-1", 200, b"{}")
+    assert devices.verify_response(k, "req-1", 200, b"{}", sig)
+    assert not devices.verify_response(k, "req-2", 200, b"{}", sig)  # not another request's
+    assert not devices.verify_response(k, "req-1", 200, b'{"x":1}', sig)  # body changed
+    assert not devices.verify_response(b"j" * 32, "req-1", 200, b"{}", sig)  # someone else's key
+    assert not devices.verify_response(k, "req-1", 200, b"{}", None)
     assert len(devices.new_pair_code()) == 6
 
 

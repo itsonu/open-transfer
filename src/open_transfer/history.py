@@ -41,6 +41,24 @@ _STATE_NAMES = {
     "canceled": CANCELLED,
 }
 
+#: Endings that mean a device dropped out rather than chose to (UI: "disconnected").
+DISCONNECT_CODES = frozenset(
+    {
+        "receiver_disconnected",
+        "receiver_unreachable",
+        "sender_disconnected",
+        "transfer_stalled",
+        "network_timeout",
+        "app_closed",
+        "app_restart",
+    }
+)
+#: Count buckets of a group summary (``pending`` = offered, not yet answered).
+SUMMARY_KEYS = (
+    "pending", "accepted", "transferring", "completed", "partial",
+    "failed", "declined", "expired", "cancelled",
+)  # fmt: skip
+
 DEFAULT_MAX_ROWS = 1000
 DEFAULT_MAX_AGE = 180 * 24 * 3600.0
 MAX_PAGE = 200
@@ -77,6 +95,9 @@ CREATE TABLE IF NOT EXISTS recipients (
   reason      TEXT NOT NULL DEFAULT '',
   bytes_done  INTEGER NOT NULL DEFAULT 0,
   files_done  TEXT NOT NULL DEFAULT '[]',
+  files_failed TEXT NOT NULL DEFAULT '{}',
+  started_at  REAL,
+  finished_at REAL,
   PRIMARY KEY (row_id, device_id)
 );
 CREATE TABLE IF NOT EXISTS files (
@@ -110,6 +131,9 @@ class RecipientRecord:
     session_id: str = ""
     bytes_done: int = 0
     files_done: list[int] = field(default_factory=list)
+    files_failed: dict[int, str] = field(default_factory=dict)  # index -> reason code
+    started_at: float | None = None  # wall clock: first byte to this recipient
+    finished_at: float | None = None  # wall clock: its final state
 
 
 @dataclass
@@ -141,24 +165,53 @@ class TransferRecord:
         return aggregate_state([r.state for r in self.recipients])
 
 
+def summarize(recipients: list[dict[str, Any]]) -> dict[str, Any]:
+    """Counts for a transfer's recipients, plus its aggregate state.
+
+    ``delivered`` counts complete deliveries only; a ``partial`` recipient got
+    some files. The UI words it ("Delivered to 2 of 3") from these numbers.
+    """
+    states = [str(r.get("state", "")) for r in recipients]
+    counts = dict.fromkeys(SUMMARY_KEYS, 0)
+    for state in states:
+        key = "pending" if state == OFFERED else state
+        if key in counts:
+            counts[key] += 1
+    return {
+        "state": aggregate_state(states),
+        "total": len(states),
+        "delivered": counts["completed"],
+        "disconnected": sum(1 for r in recipients if r.get("reason_code") in DISCONNECT_CODES),
+        **counts,
+    }
+
+
 def aggregate_state(states: list[str]) -> str:
     """The state of a whole transfer, from the state of each recipient.
 
     Rules (docs/protocol.md, "Transfer lifecycle"):
-    - any recipient still active -> the earliest active state among them;
+    - any recipient still active -> the least advanced state among those who
+      have engaged (accepted/transferring), or offered if nobody has yet:
+      1 transferring + 2 offered -> transferring; 1 accepted + 1 transferring
+      -> accepted (someone is still to start);
     - everyone completed -> completed;
     - at least one completed/partial but not all completed -> partial
       (a group send must never look complete when someone missed out);
-    - nobody received anything -> their shared final state, or failed if they differ.
+    - nobody received anything -> their shared final state; when they differ,
+      the first of failed > cancelled > expired > declined (2 cancelled + 1
+      declined after the sender stopped is "cancelled", not "failed").
     """
-    for active in (OFFERED, ACCEPTED, TRANSFERRING):  # least advanced first
+    for active in (ACCEPTED, TRANSFERRING, OFFERED):  # engaged ones first
         if active in states:
             return active
     if states and all(s == COMPLETED for s in states):
         return COMPLETED
     if COMPLETED in states or PARTIAL in states:
         return PARTIAL
-    return states[0] if len(set(states)) == 1 else FAILED
+    for ending in (FAILED, CANCELLED, EXPIRED, DECLINED):
+        if ending in states:
+            return ending
+    return FAILED
 
 
 class History:
@@ -184,6 +237,14 @@ class History:
         self._db.execute("PRAGMA journal_mode=WAL")
         self._db.execute("PRAGMA foreign_keys=ON")
         self._db.executescript(_SCHEMA)
+        columns = {row[1] for row in self._db.execute("PRAGMA table_info(recipients)")}
+        for name, kind in (
+            ("files_failed", "TEXT NOT NULL DEFAULT '{}'"),
+            ("started_at", "REAL"),
+            ("finished_at", "REAL"),
+        ):
+            if name not in columns:  # a database from an earlier version
+                self._db.execute(f"ALTER TABLE recipients ADD COLUMN {name} {kind}")
 
     def close(self) -> None:
         with self._lock:
@@ -236,12 +297,14 @@ class History:
                 self._db.execute("DELETE FROM files WHERE row_id = ?", (row_id,))
             self._db.executemany(
                 "INSERT INTO recipients (row_id, device_id, device, device_name, session_id,"
-                " state, reason_code, reason, bytes_done, files_done)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                " state, reason_code, reason, bytes_done, files_done, files_failed,"
+                " started_at, finished_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 [
                     (row_id, r.device_id, json.dumps(r.device), str(r.device.get("name") or ""),
                      r.session_id, r.state,
-                     r.reason_code, r.reason, r.bytes_done, json.dumps(sorted(r.files_done)))
+                     r.reason_code, r.reason, r.bytes_done, json.dumps(sorted(r.files_done)),
+                     json.dumps({str(k): v for k, v in sorted(r.files_failed.items())}),
+                     r.started_at, r.finished_at)
                     for r in record.recipients
                 ],
             )  # fmt: skip
@@ -267,9 +330,9 @@ class History:
             ]
             for row_id in rows:
                 self._db.execute(
-                    "UPDATE recipients SET state = ?, reason_code = 'app_restart', reason = ?"
-                    " WHERE row_id = ? AND state IN (?, ?, ?)",
-                    (FAILED, reason, row_id, *ACTIVE_STATES),
+                    "UPDATE recipients SET state = ?, reason_code = 'app_restart', reason = ?,"
+                    " finished_at = ? WHERE row_id = ? AND state IN (?, ?, ?)",
+                    (FAILED, reason, time.time(), row_id, *ACTIVE_STATES),
                 )
                 states = [
                     str(r["state"])
@@ -391,6 +454,10 @@ class History:
                 "reason": r["reason"],
                 "bytes_done": r["bytes_done"],
                 "files_done": json.loads(r["files_done"]),
+                "files_failed": json.loads(r["files_failed"]),  # {"<file index>": reason code}
+                "started_at": r["started_at"],
+                "finished_at": r["finished_at"],
+                "disconnected": r["reason_code"] in DISCONNECT_CODES,
             }
             for r in self._db.execute(
                 "SELECT * FROM recipients WHERE row_id = ? ORDER BY rowid", (row_id,)
@@ -419,5 +486,6 @@ class History:
             "bytes_done": row["bytes_done"],
             "unseen": bool(row["unseen"]),
             "recipients": recipients,
+            "summary": summarize(recipients),
             "files": files,
         }

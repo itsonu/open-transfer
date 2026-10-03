@@ -96,7 +96,7 @@ Restores a deleted file within `undo_seconds`: `{"file": {…}}`, or `404`.
 Streams a ZIP of all files, or only those given as `?name=a.txt&name=b.jpg`.
 
 ### `GET /api/qr.svg`
-QR code (SVG) for the share URL; includes the PIN when one is set.
+QR code (SVG) for the classic share URL; includes the PIN when one is set (the pairing QR, `/api/pair/qr.svg`, never does).
 
 ### `POST /api/logout`
 Clears the session.
@@ -109,17 +109,20 @@ These power the device grid. "Owner" means a request from the device itself
 
 | Endpoint | Who | What |
 | -------- | --- | ---- |
-| `GET /api/state` | anyone | `{me, host, devices, incoming, outgoing, discovery, pairing?, inbox?}` with an `ETag` (poll with `If-None-Match`) |
+| `GET /api/state` | anyone | `{me, host, devices, incoming, outgoing, discovery, pairing?, pair_requests?, multicast?, inbox?}`; devices may carry `last_seen`, `short_id` (same-name devices) and `stale` (an old install) with an `ETag` (poll with `If-None-Match`) |
 | `POST /api/me` `{name, form?, platform?}` | anyone | Rename this device (owner) or how this browser appears (visitor) |
 | `POST /api/send` `{to: [ids], files: [{name, size, mime}]}` | anyone | Offer files to devices → `201 {job}` |
 | `PUT /api/send/<job>/files/<n>` | job creator | The file's bytes (`Content-Length` required), streamed to every receiver that accepted |
 | `DELETE /api/send/<job>` · `DELETE /api/send/<job>/targets/<id>` | job creator | Cancel everything / one receiver |
 | `POST /api/incoming/<id>/accept` · `/decline` · `DELETE /api/incoming/<id>` | the recipient | Answer or stop an incoming transfer |
 | `GET /api/inbox/files/<name>` · `DELETE …` · `GET /api/inbox/archive` | visitor | Files sent to this browser |
-| `POST /api/pair` `{code, address?}` | owner | Pair with the app showing `code` (found by multicast, or at `address`) |
+| `POST /api/pair/open` · `POST /api/pair/close` | owner | Open (renew every ≤30 s) or close the pairing window; returns `{code, expires_in, open, address}` |
+| `POST /api/pair` `{code, address?, device_id?}` | owner | Pair with the device showing `code`: the chosen one, the one at `address`, or any reachable device with its window open. Waits for the other owner's *Allow*. Errors carry `code`, `message`, `action` (see docs/trust-model.md) |
+| `POST /api/pair/requests/<id>/allow` · `…/deny` | owner | Answer "Pair with …?" (`pair_requests[]` in `/api/state`) |
+| `DELETE /api/devices/<id>` | owner | Remove a device from the list (unpairs it on both sides when reachable) |
 | `POST /api/devices` `{address}` | owner | Add an app by `host:port` |
-| `DELETE /api/pairs/<id>` · `POST /api/pair/new-code` · `GET /api/pair/qr.svg` | owner | Unpair · new code · QR with the code |
-| `GET /api/history?direction=sent\|received&failed=1&device=<id>&q=<text>&limit=<n>&before=<created_at>,<row_id>` | owner | Transfer history, newest first (≤200 per page). Each record: `transfer_id`, `direction`, `sender`, `recipients[]` (per-recipient `state`, `reason`, `bytes_done`, `files_done`), `files[]` (with `exists` for received files), `state`, timestamps |
+| `DELETE /api/pairs/<id>` · `POST /api/pair/new-code` · `GET /api/pair/qr.svg` | owner | Unpair (both sides) · new code · QR with the code and device id (never the PIN) |
+| `GET /api/history?direction=sent\|received&failed=1&device=<id>&q=<text>&limit=<n>&before=<created_at>,<row_id>` | owner | Transfer history, newest first (≤200 per page). Each record: `transfer_id`, `direction`, `sender`, `recipients[]` (per-recipient `state`, `reason_code`, `reason`, `bytes_done`, `files_done`), `files[]` (with `exists` for received files), `state`, timestamps, and `summary` (`total`, `delivered`, per-state counts, `disconnected`); each recipient also has `files_failed`, `started_at`, `finished_at`, `disconnected` |
 | `DELETE /api/history/<row_id>` · `POST /api/history/clear` `{completed_only}` | owner | Forget one finished record · forget finished (or only completed) records. **Files are never deleted.** |
 
 Sending from a script, end to end:

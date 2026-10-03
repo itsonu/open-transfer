@@ -174,11 +174,26 @@ def test_restart_turns_unfinished_transfers_into_failures(make_node: NodeFactory
     job = send(alice, [device_id(alice, "Bravo")], [("f.txt", b"hi")])
     record(bob, job, "offered", "received")
 
-    b.stop()  # the offer is still unanswered
+    # A crash: the server goes away without the app's own shutdown.
+    b.mesh._stop.set()
+    b._server.stop()
     bob = owner(make_node("Bravo"))
     item = record(bob, job, "failed", "received")
     assert item["reason_code"] == "app_restart"
     assert item["recipients"][0]["reason_code"] == "app_restart"
+
+
+def test_closing_the_app_fails_active_transfers_as_app_closed(make_node: NodeFactory) -> None:
+    a, b = make_node("Alpha"), make_node("Bravo")
+    connect(a, b)
+    alice, bob = owner(a), owner(b)
+    job = send(alice, [device_id(alice, "Bravo")], [("f.txt", b"hi")])
+    record(bob, job, "offered", "received")
+
+    b.stop()  # closed on purpose while the offer is unanswered
+    bob = owner(make_node("Bravo"))
+    item = record(bob, job, "failed", "received")
+    assert item["reason_code"] == "app_closed"
 
 
 def test_history_is_owner_only(make_node: NodeFactory) -> None:

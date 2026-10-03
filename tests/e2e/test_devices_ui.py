@@ -74,7 +74,7 @@ def test_send_to_a_chosen_device_and_accept(
 
     sample = tmp_path / "Holiday photo.jpg"
     sample.write_bytes(b"x" * 300_000)
-    tile(page, "Bravo").locator("button").click()
+    tile(page, "Bravo").locator(".device-button").click()
     expect(tile(page, "Bravo")).to_have_class(re.compile(r"\bis-selected\b"))
     expect(page.locator("#send-bar-to")).to_have_text("To Bravo")
     expect(page.locator("#send-go")).to_be_disabled()
@@ -107,7 +107,7 @@ def test_declining_tells_the_sender(
     second_page.goto(bravo.url)
     sample = tmp_path / "nope.txt"
     sample.write_bytes(b"nope")
-    tile(page, "Bravo").locator("button").click()
+    tile(page, "Bravo").locator(".device-button").click()
     page.set_input_files("#file-input", str(sample))
     page.click("#send-go")
     second_page.locator("#incoming-decline").click(timeout=10_000)
@@ -168,6 +168,7 @@ def test_pair_with_a_code(devices: list[Server], page, second_page) -> None:  # 
     alpha, bravo, _ = devices
     second_page.goto(bravo.url)
     second_page.click("#connect-button")
+    expect(second_page.locator("#pair-code[data-open='1']")).to_be_visible()  # the window is open
     code = second_page.locator("#pair-code").inner_text().replace(" ", "")
     assert code.isdigit()
     assert len(code) == 6
@@ -179,7 +180,12 @@ def test_pair_with_a_code(devices: list[Server], page, second_page) -> None:  # 
     page.locator("#pair-address-wrap summary").click()
     page.fill("#pair-address", bravo.url.removeprefix("http://"))
     page.click("#pair-submit")
-    expect(page.locator(".toast", has_text="Paired with Bravo")).to_be_visible()
+    # Bravo's owner is asked, and must allow it: a matching code alone isn't enough.
+    expect(second_page.locator("#pair-request-title")).to_have_text(
+        "Pair with Alpha?", timeout=10_000
+    )
+    second_page.click("#pair-request-allow")
+    expect(page.locator(".toast", has_text="Paired with Bravo")).to_be_visible(timeout=10_000)
     expect(tile(page, "Bravo")).to_have_class(re.compile(r"\bis-paired\b"), timeout=8000)
     # Bravo hears about it too, and its sheet (with the used code) closes.
     expect(second_page.locator(".toast", has_text="Paired with Alpha")).to_be_visible(timeout=8000)
@@ -219,7 +225,7 @@ def test_phone_browser_sends_through_the_app(devices: list[Server], browser, sec
         second_page.goto(bravo.url)
         expect(tile(second_page, "Galaxy phone")).to_be_visible(timeout=15_000)
 
-        tile(phone, "Bravo").locator("button").click()
+        tile(phone, "Bravo").locator(".device-button").click()
         phone.set_input_files(
             "#file-input",
             files=[{"name": "IMG_0001.jpg", "mimeType": "image/jpeg", "buffer": b"jpeg" * 1000}],
@@ -268,7 +274,7 @@ def test_browsers_send_to_each_other_directly(
         ipad.goto(url)
         expect(tile(phone, "iPad")).to_be_visible(timeout=10_000)
         payload = bytes(range(256)) * 4000  # ~1 MB, several data-channel chunks
-        tile(phone, "iPad").locator("button").click()
+        tile(phone, "iPad").locator(".device-button").click()
         phone.set_input_files(
             "#file-input",
             files=[{"name": "photo.heic", "mimeType": "image/heic", "buffer": payload}],

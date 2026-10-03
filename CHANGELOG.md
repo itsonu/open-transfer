@@ -6,6 +6,28 @@ All notable changes are documented here. The format follows [Keep a Changelog](h
 
 ### Added
 - **Transfer history** (`<state>/history.db`, SQLite, owner-only file): every transfer the device's owner sends or receives is recorded with sender, each recipient's result, files, sizes and timestamps. A group send is one record with a result per recipient (`partial` when only some received it). Records survive restarts (unfinished transfers become `failed`, reason `app_restart`) and outlive the files they mention. Retention: 1000 records / 180 days. API: `GET /api/history`, `DELETE /api/history/<id>`, `POST /api/history/clear`.
+- **One transfer lifecycle with reasons and deadlines** (`lifecycle.py`): every state change is checked (a final state can't be overwritten); every unhappy ending has a `reason_code`, `reason` and `action`; accepted transfers with no first byte fail after 90 s and stalled ones after 60 s on both sides; a new `partial` state when only some files arrived.
+
+- **Group sends are one transfer with a result per device**: the live view and history give every recipient its own state, reason, delivered/failed files and timestamps, plus a `summary` ("delivered to 2 of 3", declined, failed, disconnected…). The sender sees one card per send ("Sending photo to 3 devices" → "Delivered to 2 of 3") with expandable per-device results, and a toast whenever only some devices got it.
+
+- **Secure pairing (SRP) with confirmation** — see [docs/trust-model.md](docs/trust-model.md): the 6-digit code is the password of an SRP-6a exchange, so watching the network reveals nothing about it; the code only works while *Add device* is open; the device showing it asks its owner "Pair with …?"; QR codes hold only the code and device id (no PIN).
+- **Paired devices prove who they are**: answers to signed requests are signed too, and a paired device's address only changes after it proves the key at the new address; multicast `bye`/announce can no longer redirect or knock out a paired device.
+- **Pairing without multicast**: a device reachable over HTTP can be paired by code alone (or chosen from a list); errors say what's really wrong (`discovery_unavailable`, `pairing_not_open`, `pairing_code_invalid`, `pairing_expired`, `trust_rejected`, `rate_limited` …) with a suggested action.
+- **Unpairing is mutual**, and a device that missed it learns on next contact. Reinstalled devices show the old entry as "(old device)", same-name devices get a short id, and offline or old devices can be removed. Offline paired devices keep their type and show "last seen".
+
+### Changed
+- Pairing protocol v2 (`/pair/begin`, `/pair/prove`, `/pair/status`) replaces v1 (`/pair`, `/pair/confirm`); request signatures carry a nonce. Devices on an older 3.0 pre-release must be updated to pair.
+
+### Fixed
+- Code-only pairing failed with "No device on this network is showing that code" whenever multicast didn't reach (seen on a real Wi-Fi network), even though the device was visible.
+- The multicast pairing lookup leaked a hash of the code (instantly reversible), and an observed pairing could be brute-forced offline.
+- An unsigned hello or announce could re-point a paired device's address or rename it.
+- Canceling one recipient in the middle of a group upload no longer holds up the others' upload for up to 2 minutes.
+- A sender no longer records a failure when the receiver actually got the file (the reply was lost, or a cancel raced the last byte): it asks the receiver first.
+- A multi-file transfer where one file failed no longer marks the whole recipient `failed` (it is `partial`), and no longer leaves the receiver "receiving" forever.
+- Accepting without enough space now declines with the reason instead of leaving the offer waiting until it expires.
+- A sender whose offer watcher never ran still expires the offer (deadline checked by housekeeping), instead of waiting forever.
+- Closing the app during a transfer records `failed`/`app_closed` (not "canceled") and tells the other side.
 
 ## [3.0.0] — unreleased
 

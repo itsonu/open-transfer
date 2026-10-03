@@ -55,7 +55,7 @@ PKG = "io.github.itsonu.opentransfer"
 DEVICE_PORT = 5000
 FORWARD_BASE = 5101
 ANDROID_FOLDER = "/sdcard/Download/Open Transfer"
-FINAL = {"done", "declined", "expired", "canceled", "failed"}
+FINAL = {"done", "partial", "declined", "expired", "canceled", "failed"}
 MB = 1024 * 1024
 
 # --------------------------------------------------------------------- output
@@ -963,17 +963,32 @@ class Checker:
             try:
                 job = self.offer(pc, [a], name, size)
                 wait_for("the offer", lambda: self.incoming(a, name), 20)
-                print("  waiting 2 minutes for the offer to expire…", flush=True)
-                wait_for(
-                    "the offer to expire",
-                    lambda: (self.target(pc, job, a) or {}).get("state") in FINAL,
-                    170,
-                    every=5,
+                print(
+                    "  waiting 2 minutes for the offer to expire (don't touch the prompt)…",
+                    flush=True,
                 )
+                seen: set[str] = set()
+
+                def ended() -> bool:
+                    session = self.incoming(a, name)
+                    if session:
+                        seen.add(session["state"])
+                    return (self.target(pc, job, a) or {}).get("state") in FINAL
+
+                wait_for("the offer to expire", ended, 170, every=5)
                 state = (self.target(pc, job, a) or {}).get("state")
-                self.report.add(
-                    "6.2", "No answer for 2 minutes → Didn't answer", state == "expired", f"{state}"
-                )
+                if state != "expired" and seen & {"accepted", "declined", "receiving"}:
+                    # Answered on the device itself (a tap on its prompt): not an expiry.
+                    self.report.add(
+                        "6.2", "No answer for 2 minutes → Didn't answer", None,
+                        f"the prompt was answered on {a.label} during the wait ({state}); "
+                        "rerun without touching it",
+                    )  # fmt: skip
+                else:
+                    self.report.add(
+                        "6.2", "No answer for 2 minutes → Didn't answer", state == "expired",
+                        f"{state}",
+                    )  # fmt: skip
             except CheckError as exc:
                 self.report.add("6.2", "No answer for 2 minutes → expired", False, str(exc))
 
@@ -1040,12 +1055,31 @@ class Checker:
         except CheckError as exc:
             self.report.add("6.4", "Too big → refused up front", False, str(exc))
 
+    def open_code(self, shows: Node) -> str:
+        """What a person does first: open Add device on ``shows`` (its code works only then)."""
+        return str(expect(shows.base, "POST", "/api/pair/open")["code"])
+
     def pair(self, enters: Node, shows: Node, *, address: bool) -> tuple[bool, str]:
-        code = shows.state()["pairing"]["code"]
-        body: dict[str, Any] = {"code": code}
+        """Type ``shows``'s code on ``enters``, then press Allow on ``shows``."""
+        body: dict[str, Any] = {"code": self.open_code(shows)}
         if address:
             body["address"] = shows.address
-        status, data = request(enters.base, "POST", "/api/pair", body, timeout=30)
+        result: dict[str, tuple[int, Any]] = {}
+        worker = threading.Thread(
+            target=lambda: result.update(
+                r=request(enters.base, "POST", "/api/pair", body, timeout=90)
+            )
+        )
+        worker.start()
+        allowed = False
+        deadline = time.monotonic() + 30
+        while worker.is_alive() and time.monotonic() < deadline and not allowed:
+            for req in shows.state().get("pair_requests") or []:
+                request(shows.base, "POST", f"/api/pair/requests/{req['id']}/allow")
+                allowed = True
+            time.sleep(0.3)
+        worker.join(90)
+        status, data = result.get("r", (0, "no answer"))
         if status != 200:
             return False, f"{status} {data}"
         try:
@@ -1065,8 +1099,7 @@ class Checker:
     def pairing(self) -> None:
         step("2. Pairing (code, both directions; the request a QR scan makes)")
         pc = self.computer
-        state = pc.state()
-        code = state["pairing"]["code"]
+        code = self.open_code(pc)
         status, svg = request(pc.base, "GET", "/api/pair/qr.svg")
         self.report.add(
             "2.1",
@@ -1074,6 +1107,7 @@ class Checker:
             bool(re.fullmatch(r"\d{6}", code)) and status == 200 and "<svg" in str(svg),
         )
         for a in self.androids:
+            code = self.open_code(pc)
             wrong = f"{(int(code) + 1) % 1_000_000:06d}"
             body = {"code": wrong, "address": pc.address}
             status, _ = request(a.base, "POST", "/api/pair", body, timeout=30)
@@ -1116,7 +1150,8 @@ class Checker:
 
     def rate_limit(self) -> None:
         pc, a = self.computer, self.androids[0]
-        code = pc.state()["pairing"]["code"]
+        self.unpair(a, pc)  # paired devices are told "already paired" before any code check
+        code = self.open_code(pc)
         wrong = f"{(int(code) + 7) % 1_000_000:06d}"
         statuses = [
             request(

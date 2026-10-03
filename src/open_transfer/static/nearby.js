@@ -7,7 +7,7 @@ import { $, ApiError, api, copyText, formatBytes, formatDuration, guessKind, h, 
 
 const PLATFORM = { windows: "Windows", macos: "Mac", linux: "Linux", android: "Android", ios: "iOS", chromeos: "ChromeOS", unknown: "" };
 const ACTIVE = new Set(["offering", "waiting", "accepted", "sending"]);
-const FINAL = new Set(["done", "declined", "expired", "canceled", "failed"]);
+const FINAL = new Set(["done", "partial", "declined", "expired", "canceled", "failed"]);
 
 export const mesh = {
   data: null,
@@ -115,6 +115,7 @@ function apply() {
   }
   mesh.paired = paired;
   if ($("#connect-dialog").open && data.pairing) fillPairing();
+  handlePairRequests(data.pair_requests || []);
   renderMe();
   renderDevices();
   handleIncoming();
@@ -216,8 +217,17 @@ function activityFor(deviceId) {
   return null;
 }
 
+function lastSeen(at) {
+  if (!at) return "Not nearby";
+  const minutes = Math.round((Date.now() / 1000 - at) / 60);
+  if (minutes < 2) return "Just left";
+  if (minutes < 60) return `Last seen ${minutes} min ago`;
+  if (minutes < 48 * 60) return `Last seen ${Math.round(minutes / 60)} h ago`;
+  return `Last seen ${Math.round(minutes / 1440)} days ago`;
+}
+
 function tileStatus(d) {
-  if (!d.online) return { text: "Not nearby", tone: "muted" };
+  if (!d.online) return { text: d.stale ? "Old device · not nearby" : lastSeen(d.last_seen), tone: "muted" };
   const activity = activityFor(d.id);
   if (activity) {
     const { view, job } = activity;
@@ -238,8 +248,9 @@ function tileStatus(d) {
         if (Date.now() - (job.finishedAt || Date.now()) < 8000) return { text: "Declined", tone: "danger" };
         break;
       case "failed":
+      case "partial":
       case "expired":
-        if (Date.now() - (job.finishedAt || Date.now()) < 8000) return { text: target.state === "expired" ? "No answer" : "Failed", tone: "danger" };
+        if (Date.now() - (job.finishedAt || Date.now()) < 8000) return { text: { expired: "No answer", partial: "Partly sent" }[target.state] || "Failed", tone: "danger" };
         break;
       default:
         break;
@@ -265,6 +276,7 @@ function buildTile(d) {
       h("span", { class: "device-sub" }),
     ),
     h("span", { class: "device-badge", title: "Paired", "aria-label": "Paired" }, icon("link")),
+    h("button", { class: "device-remove icon-btn", type: "button", hidden: true, onclick: () => removeDevice(el.dataset.id) }, icon("x")),
   );
   const button = el.querySelector(".device-button");
   button.addEventListener("click", () => toggle(d.id));
@@ -303,10 +315,16 @@ function updateTile(el, d) {
   button.setAttribute("aria-pressed", String(selected));
   button.setAttribute("aria-label", `${d.name}, ${status.text}${d.paired ? ", paired" : ""}${selected ? ", selected" : ""}`);
   button.title = d.address ? `${d.name} · ${d.address}` : d.name;
+  const label = d.stale ? `${d.name} (old device)` : d.name;
   const name = el.querySelector(".device-name");
-  if (name.textContent !== d.name) name.textContent = d.name;
+  if (name.textContent !== label) name.textContent = label;
+  const subText = d.short_id && d.online ? `${status.text} · ${d.short_id}` : status.text;
   const sub = el.querySelector(".device-sub");
-  if (sub.textContent !== status.text) sub.textContent = status.text;
+  if (sub.textContent !== subText) sub.textContent = subText;
+  const remove = el.querySelector(".device-remove");
+  remove.hidden = !(mesh.data?.me?.kind === "owner" && d.kind === "app" && (d.stale || (d.paired && !d.online)));
+  remove.setAttribute("aria-label", `Remove ${label}`);
+  remove.title = `Remove ${label}`;
   sub.dataset.tone = status.tone;
   const ring = el.querySelector(".device-ring");
   ring.dataset.mode = status.ring === "spin" ? "spin" : status.ring == null ? "off" : "value";
@@ -585,7 +603,10 @@ function finishJob(job, outcome) {
   const declined = targets.filter((t) => t.state === "declined");
   const failed = targets.filter((t) => ["failed", "expired", "canceled"].includes(t.state));
   const done = targets.filter((t) => t.state === "done");
-  if (outcome === "nobody") {
+  const s = view?.summary;
+  if (targets.length > 1 && s && s.delivered < s.total && (s.delivered || s.partial)) {
+    toast(`${groupOutcome(s)}. ${plural(s.total - s.delivered, "device")} didn’t get everything.`, { tone: "error", icon: "alert", duration: 6000 });
+  } else if (outcome === "nobody") {
     if (declined.length === targets.length && targets.length) toast(targets.length === 1 ? `${targets[0].name} declined` : "Everyone declined", { tone: "error", icon: "x" });
     else if (failed.length) toast(failed[0].reason || `Couldn’t send to ${failed[0].name}`, { tone: "error", icon: "alert" });
   } else if (done.length && !failed.length && !declined.length) {
@@ -691,7 +712,7 @@ async function skipWaiting(job) {
 function retryJob(job) {
   const view = serverJob(job.id);
   const online = new Set(onlineDevices().map((d) => d.id));
-  const ids = (view?.targets || []).filter((t) => ["failed", "expired", "canceled"].includes(t.state) && online.has(t.id)).map((t) => t.id);
+  const ids = (view?.targets || []).filter((t) => ["failed", "partial", "expired", "canceled"].includes(t.state) && online.has(t.id)).map((t) => t.id);
   if (!ids.length) {
     toast("Those devices aren’t nearby right now.", { tone: "error", icon: "alert" });
     return;
@@ -710,6 +731,42 @@ function scheduleJobRender() {
   });
 }
 
+// Reasons the state label already says ("Declined", "Didn't answer", "Canceled").
+const SELF_EXPLAINED = new Set(["receiver_declined", "expired", "sender_cancelled"]);
+
+// "Delivered to 2 of 3", from the server's summary of a group send.
+function groupOutcome(s) {
+  if (s.delivered === s.total) return `Delivered to all ${s.total}`;
+  if (!s.delivered && !s.partial) return { declined: "Everyone declined", expired: "Nobody answered", cancelled: "Canceled" }[s.state] || "Not delivered";
+  return `Delivered to ${s.delivered} of ${s.total}`;
+}
+
+function groupCounts(s) {
+  const parts = [
+    s.partial && `${s.partial} partly`,
+    s.failed && `${s.failed} failed`,
+    s.declined && `${s.declined} declined`,
+    s.expired && `${s.expired} didn’t answer`,
+    s.cancelled && `${s.cancelled} canceled`,
+  ];
+  return parts.filter(Boolean).join(" · ");
+}
+
+// One card per send; a group's recipients fold away unless someone needs a look.
+function recipientList(job, view, group, row) {
+  const list = h("ul", { class: "job-targets" }, view.targets.map(row));
+  if (!group) return list;
+  const attention = view.targets.some((t) => ["failed", "partial", "declined", "expired", "canceled"].includes(t.state));
+  const open = job.expanded ?? (attention || view.targets.length <= 3);
+  const s = view.summary || {};
+  const label = jobActive(job) ? `${plural(view.targets.length, "device")} · ${s.delivered || 0} delivered` : plural(view.targets.length, "device");
+  const details = h("details", { class: "job-details", open }, h("summary", {}, label), list);
+  details.addEventListener("toggle", () => {
+    job.expanded = details.open;
+  });
+  return details;
+}
+
 const TARGET_TEXT = {
   offering: "Asking…",
   waiting: "Waiting for them to accept…",
@@ -720,6 +777,7 @@ const TARGET_TEXT = {
   expired: "Didn’t answer",
   canceled: "Canceled",
   failed: "Failed",
+  partial: "Partly delivered",
 };
 
 function renderJobs() {
@@ -736,6 +794,10 @@ function renderJobs() {
     }
     const total = view.total || 1;
     const title = job.files.length === 1 ? job.files[0].name : plural(job.files.length, "file");
+    const group = view.targets.length > 1;
+    const summary = view.summary || {};
+    const settled = !jobActive(job) && view.finished;
+    const heading = !group ? title : settled ? groupOutcome(summary) : `Sending ${title} to ${view.targets.length} devices`;
     const own = Math.min(total, job.uploaded + (job.fileLoaded || 0));
     let headline;
     if (job.state === "waiting") headline = `${formatBytes(view.total)} · waiting for ${plural(view.targets.filter((t) => t.state === "waiting" || t.state === "offering").length, "answer")}`;
@@ -744,16 +806,17 @@ function renderJobs() {
       headline = [`${formatBytes(own)} of ${formatBytes(view.total)}`, job.speed > 0 && `${formatBytes(job.speed)}/s`, eta].filter(Boolean).join(" · ");
     } else if (job.state === "running") headline = `${formatBytes(view.total)} · sending directly`;
     else headline = formatBytes(view.total);
+    if (group && settled) headline = [title, groupCounts(summary)].filter(Boolean).join(" · ");
     const anyWaiting = view.targets.some((t) => t.state === "waiting" || t.state === "offering");
     const anyAccepted = view.targets.some((t) => t.state === "accepted");
-    const retryable = view.targets.some((t) => ["failed", "expired"].includes(t.state));
+    const retryable = view.targets.some((t) => ["failed", "partial", "expired"].includes(t.state));
     const active = jobActive(job);
     row.replaceChildren(
       h(
         "div",
         { class: "job-head" },
         h("span", { class: "thumb", "aria-hidden": "true" }, icon("send")),
-        h("div", { class: "row-main" }, h("span", { class: "row-title", title }, title), h("span", { class: "row-sub" }, headline)),
+        h("div", { class: "row-main" }, h("span", { class: "row-title", title: heading }, heading), h("span", { class: "row-sub" }, headline)),
         h(
           "div",
           { class: "row-actions is-visible" },
@@ -772,13 +835,14 @@ function renderJobs() {
           ),
         ),
       ),
-      h(
-        "ul",
-        { class: "job-targets" },
-        view.targets.map((original) => {
+      recipientList(job, view, group, (original) => {
           const t = effectiveTarget(job, original);
           const pct = t.state === "done" ? 100 : Math.min(100, (t.sent / total) * 100);
-          let text = t.state === "sending" ? `${Math.floor(pct)}%` : t.reason && FINAL.has(t.state) && t.state !== "done" ? t.reason : TARGET_TEXT[t.state] || t.state;
+          let text = t.state === "sending" ? `${Math.floor(pct)}%` : TARGET_TEXT[t.state] || t.state;
+          if (FINAL.has(t.state) && t.state !== "done" && !SELF_EXPLAINED.has(t.reason_code)) {
+            const why = t.disconnected ? "Disconnected" : t.reason;
+            if (why && why !== text) text = `${text} — ${why}`;
+          }
           if (t.direct === "trying") text = "Connecting directly…";
           else if (t.direct === "sending") text = `Directly · ${Math.floor(pct)}%`;
           else if (t.direct === "done") text = "Delivered directly";
@@ -787,11 +851,10 @@ function renderJobs() {
             { class: "job-target", dataset: { state: t.state } },
             h("span", { class: "mini-avatar", "aria-hidden": "true" }, icon(deviceIcon(t))),
             h("span", { class: "job-target-name" }, t.name),
-            h("span", { class: "job-target-state" }, text),
+            h("span", { class: "job-target-state", title: text }, text),
             h("span", { class: "progress", role: "progressbar", "aria-label": `${t.name}: ${text}`, "aria-valuemin": "0", "aria-valuemax": "100", "aria-valuenow": String(Math.round(pct)) }, h("span", { class: "progress-bar", style: { transform: `scaleX(${pct / 100})` } })),
           );
         }),
-      ),
     );
   }
   for (const row of [...list.children]) if (!keep.has(row.dataset.job)) row.remove();
@@ -831,8 +894,12 @@ function handleIncoming() {
           action: !owner && s.files.length === 1 ? { label: "Save", run: () => saveInboxFile(s.files[0].saved_name || s.files[0].name) } : undefined,
         });
         ctx.libraryChanged(null);
-      } else if (s.state === "canceled" && before !== "pending") toast(`${from} stopped sending`, { tone: "error", icon: "x" });
-      else if (s.state === "failed") toast(`Couldn’t receive files from ${from}`, { tone: "error", icon: "alert" });
+      } else if (s.state === "canceled" && before !== "pending" && s.reason_code !== "receiver_cancelled") toast(`${from} stopped sending`, { tone: "error", icon: "x" });
+      else if (s.state === "failed" || s.state === "partial") {
+        const what = s.state === "partial" ? `Some files from ${from} didn’t arrive.` : `Couldn’t receive files from ${from}.`;
+        toast(`${what} ${s.reason || ""}`.trim(), { tone: "error", icon: "alert" });
+        if (s.state === "partial") ctx.libraryChanged(null);
+      }
     }
     mesh.seen.set(s.id, s.state);
   }
@@ -972,6 +1039,24 @@ async function stopIncoming(id) {
 
 // ------------------------------------------------------------------ dialogs
 
+async function removeDevice(id) {
+  const d = mesh.data?.devices.find((x) => x.id === id);
+  if (!d) return;
+  const ok = await confirmDialog({
+    title: `Remove ${d.name}${d.stale ? " (old device)" : ""}?`,
+    text: d.paired ? "It will be unpaired: it has to ask before sending again, and its old pairing stops working. Your transfer history is kept." : "It disappears from the list until it shows up again.",
+    confirm: "Remove",
+  });
+  if (!ok) return;
+  try {
+    await api(`/api/devices/${encodeURIComponent(id)}`, { method: "DELETE" });
+  } catch (err) {
+    toast(err.message, { tone: "error", icon: "alert" });
+  }
+  mesh.etag = null;
+  ctx.requestPoll();
+}
+
 export function confirmDialog({ title, text, items = [], confirm = "OK" }) {
   const dialog = $("#confirm-dialog");
   $("#confirm-title").textContent = title;
@@ -1011,6 +1096,36 @@ function setupRename() {
 
 // ----------------------------------------------------------------- pairing
 
+// Someone entered our code: our owner decides (docs/trust-model.md).
+function handlePairRequests(requests) {
+  const dialog = $("#pair-request-dialog");
+  if (mesh.pairRequest && !requests.some((r) => r.id === mesh.pairRequest)) {
+    mesh.pairRequest = null;
+    if (dialog.open) dialog.close();
+  }
+  if (mesh.pairRequest || !requests.length) return;
+  const r = requests[0];
+  mesh.pairRequest = r.id;
+  const kind = `${PLATFORM[r.device.platform] || ""} ${r.device.form === "computer" ? "computer" : r.device.form}`.trim();
+  $("#pair-request-title").textContent = `Pair with ${r.device.name}?`;
+  $("#pair-request-sub").textContent = `“${r.device.name}” (${kind}) entered this device’s code. Paired devices send files to each other without asking. Allow only if you just did this yourself.`;
+  if (!dialog.open) dialog.showModal();
+}
+
+async function answerPairRequest(allow) {
+  const id = mesh.pairRequest;
+  $("#pair-request-dialog").close();
+  if (!id) return;
+  try {
+    await api(`/api/pair/requests/${encodeURIComponent(id)}/${allow ? "allow" : "deny"}`, { method: "POST" });
+  } catch (err) {
+    toast(err.message, { tone: "error", icon: "alert" });
+  }
+  mesh.pairRequest = null;
+  mesh.etag = null;
+  ctx.requestPoll();
+}
+
 function setTab(name) {
   for (const tab of document.querySelectorAll("#connect-dialog [role=tab]")) {
     const on = tab.dataset.tab === name;
@@ -1018,8 +1133,10 @@ function setTab(name) {
     tab.tabIndex = on ? 0 : -1;
   }
   for (const panel of document.querySelectorAll("#connect-dialog [data-panel]")) panel.hidden = panel.dataset.panel !== name;
-  if (name === "enter") requestAnimationFrame(() => $("#pair-input").focus());
-  else stopScanner();
+  if (name === "enter") {
+    fillTargets();
+    requestAnimationFrame(() => $("#pair-input").focus());
+  } else stopScanner();
 }
 
 function formatCode(code) {
@@ -1029,8 +1146,13 @@ function formatCode(code) {
 function fillPairing() {
   const pairing = mesh.data?.pairing;
   if (!pairing) return;
-  $("#pair-code").textContent = formatCode(pairing.code);
-  $("#pair-code").setAttribute("aria-label", `Pairing code ${pairing.code.split("").join(" ")}`);
+  $("#pair-own-address").hidden = !pairing.address;
+  $("#pair-own-address-value").textContent = pairing.address || "";
+  // Only a code that works right now (the pairing window is open) is shown.
+  const code = $("#pair-code");
+  code.dataset.open = pairing.open ? "1" : "";
+  code.textContent = pairing.open ? formatCode(pairing.code) : "––– –––";
+  code.setAttribute("aria-label", pairing.open ? `Pairing code ${pairing.code.split("").join(" ")}` : "Getting a pairing code");
   const qr = $("#qr-image");
   const src = `/api/pair/qr.svg?c=${pairing.code}`;
   if (qr.getAttribute("src") !== src) qr.src = src;
@@ -1059,8 +1181,41 @@ export function openAddDevice({ tab = "show" } = {}) {
   $("#other-url-list").replaceChildren(...others.map((u) => h("li", {}, u)));
   $("#scan-button").hidden = !canScan();
   $("#pair-error").textContent = "";
+  $("#pair-status").textContent = "";
   setTab(owner ? tab : "show");
   if (!dialog.open) dialog.showModal();
+  if (owner) keepPairingOpen();
+}
+
+// The code only works while this screen is open (docs/trust-model.md): open
+// the pairing window now and renew it every 20 s until the sheet closes.
+function keepPairingOpen() {
+  const renew = () =>
+    api("/api/pair/open", { method: "POST" })
+      .then(({ data }) => {
+        if (mesh.data) mesh.data.pairing = data;
+        fillPairing();
+      })
+      .catch(() => {});
+  renew();
+  clearInterval(mesh.pairTimer);
+  mesh.pairTimer = setInterval(() => ($("#connect-dialog").open ? renew() : clearInterval(mesh.pairTimer)), 20000);
+}
+
+function closePairing() {
+  clearInterval(mesh.pairTimer);
+  if (state.info?.owner) api("/api/pair/close", { method: "POST" }).catch(() => {});
+}
+
+function fillTargets() {
+  const select = $("#pair-target");
+  const keep = select.value;
+  const candidates = (mesh.data?.devices || []).filter((d) => d.kind === "app" && d.online && !d.paired);
+  select.replaceChildren(
+    h("option", { value: "" }, "Whichever nearby device shows this code"),
+    ...candidates.map((d) => h("option", { value: d.id }, `${d.name} · ${PLATFORM[d.platform] || "App"}${d.short_id ? ` (${d.short_id})` : ""}`)),
+  );
+  if (candidates.some((d) => d.id === keep)) select.value = keep;
 }
 
 function canScan() {
@@ -1068,14 +1223,16 @@ function canScan() {
   return "BarcodeDetector" in window && Boolean(navigator.mediaDevices?.getUserMedia) && window.isSecureContext;
 }
 
-async function pair(code, address) {
+async function pair(code, address, deviceId) {
   const submit = $("#pair-submit");
   const error = $("#pair-error");
+  const status = $("#pair-status");
   error.textContent = "";
+  status.textContent = "Checking the code… then the other device asks its owner to allow this.";
   submit.classList.add("is-busy");
   submit.disabled = true;
   try {
-    const { data } = await api("/api/pair", { method: "POST", json: { code, address: address || undefined } });
+    const { data } = await api("/api/pair", { method: "POST", json: { code, address: address || undefined, device_id: deviceId || undefined } });
     mesh.paired?.add(data.device.id); // already announced; don't toast twice
     toast(`Paired with ${data.device.name}`, { tone: "success", icon: "link" });
     $("#connect-dialog").close();
@@ -1083,9 +1240,12 @@ async function pair(code, address) {
     mesh.etag = null;
     ctx.requestPoll();
   } catch (err) {
-    error.textContent = err.message;
-    if (err.code === "code_not_found") $("#pair-address-wrap").open = true;
+    // What happened (the message), then what to do about it (the action).
+    const action = err.detail?.action;
+    error.textContent = action && !err.message.includes(action) ? `${err.message} ${action}` : err.message;
+    if (["discovery_unavailable", "device_unreachable"].includes(err.code)) $("#pair-address-wrap").open = true;
   } finally {
+    status.textContent = "";
     submit.classList.remove("is-busy");
     submit.disabled = false;
   }
@@ -1109,7 +1269,7 @@ function handleScan(text) {
   setTab("enter");
   $("#pair-input").value = formatCode(code);
   $("#pair-address").value = url.host;
-  pair(code, url.host);
+  pair(code, url.host, url.searchParams.get("id"));
 }
 
 let scanner = null;
@@ -1161,7 +1321,13 @@ function setupConnectSheet() {
   dialog.addEventListener("click", (event) => {
     if (event.target === dialog) dialog.close();
   });
-  dialog.addEventListener("close", stopScanner);
+  dialog.addEventListener("close", () => {
+    stopScanner();
+    closePairing();
+  });
+  $("#pair-request-allow").addEventListener("click", () => answerPairRequest(true));
+  $("#pair-request-deny").addEventListener("click", () => answerPairRequest(false));
+  $("#pair-request-dialog").addEventListener("cancel", (event) => event.preventDefault());
   for (const tab of document.querySelectorAll("#connect-dialog [role=tab]")) {
     tab.addEventListener("click", () => setTab(tab.dataset.tab));
     tab.addEventListener("keydown", (event) => {
@@ -1193,7 +1359,7 @@ function setupConnectSheet() {
       $("#pair-error").textContent = "Enter all 6 digits.";
       return;
     }
-    pair(code, $("#pair-address").value.trim());
+    pair(code, $("#pair-address").value.trim(), $("#pair-target").value);
   });
   $("#scan-button").addEventListener("click", startScan);
   $("#scan-cancel").addEventListener("click", stopScanner);

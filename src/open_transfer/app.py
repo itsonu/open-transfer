@@ -324,19 +324,19 @@ def create_app(config: Config | None = None) -> Flask:
         supplied = request.args.get("pin")
         pair = request.args.get("pair")
         if supplied is not None or pair is not None:
-            # QR codes embed the PIN (and the owner's pairing code) so scanning
+            # Share-link QR codes embed the PIN, pairing QR codes the owner's code, so scanning
             # is enough to get in. Strip them from the URL straight away so
             # they don't linger in history. Both are rate-limited.
             if supplied is not None and config.pin and not is_authenticated():
                 check_pin(supplied)
-            if (
-                pair
-                and not is_owner()
-                and is_authenticated()
-                and mesh.check_visitor_code(pair, client_id()) is True
-            ):
+            if pair and not is_owner() and mesh.check_visitor_code(pair, client_id()) is True:
+                # The owner is showing this code right now (Add device is open), and
+                # it's single-use and rate-limited: it admits this browser like the
+                # PIN would, so the PIN never has to be in a QR code.
                 session.permanent = True
                 session["wtrust"] = mesh.id
+                if config.pin:
+                    session["pin"] = pin_digest
             return redirect(url_for("index"))
         return render_template("index.html", info=server_info(), version=__version__)
 

@@ -145,7 +145,7 @@ sides, the file opens correctly afterwards, and it's in **Downloads/Open Transfe
 1. Same Wi‑Fi? Guest networks and many routers isolate devices.
 2. Firewall: Windows → allow *Open Transfer* on **Private** networks; macOS →
    System Settings → Privacy & Security → **Local Network**.
-3. Pair with **Add device → Enter a code → Not found? Enter its address** using
+3. Pair with **Add device → Enter a code → Can’t find it? Enter its address** using
    the address shown on the other device — this bypasses discovery.
 4. Collect logs: desktop `…/Open Transfer/.open-transfer/open-transfer.log`;
    Android `adb logcat -d | grep -iE "python|open_transfer|AndroidRuntime"`.

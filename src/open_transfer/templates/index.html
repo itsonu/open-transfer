@@ -271,6 +271,7 @@
       <div class="pair-code-block" id="pair-code-block" hidden>
         <div class="pair-code" id="pair-code">––– –––</div>
         <p class="pair-expiry"><span id="pair-expiry-text"></span> · <button class="link-button" id="new-code" type="button">New code</button></p>
+        <p class="muted pair-own-address" id="pair-own-address" hidden>If the other device can’t find this one, enter this address there: <code id="pair-own-address-value"></code></p>
       </div>
       <div class="url-field">
         <code id="share-url" class="url-text"></code>
@@ -278,7 +279,7 @@
           <svg class="icon" aria-hidden="true"><use href="#i-copy"/></svg><span>Copy</span>
         </button>
       </div>
-      <p class="pin-note" id="pin-note" hidden>PIN <strong id="pin-note-value"></strong> — the QR code includes it.</p>
+      <p class="pin-note" id="pin-note" hidden>PIN <strong id="pin-note-value"></strong> — a browser that scans the QR code above gets in without it.</p>
       <button class="btn btn-plain btn-block" type="button" id="share-url-button" hidden>
         <svg class="icon" aria-hidden="true"><use href="#i-share"/></svg><span>Share link…</span>
       </button>
@@ -293,11 +294,16 @@
         <label class="visually-hidden" for="pair-input">Pairing code</label>
         <input class="pin-input pair-input" id="pair-input" inputmode="numeric" autocomplete="one-time-code"
                maxlength="7" placeholder="000 000" spellcheck="false">
+        <label class="pair-target-label" for="pair-target">Pair with</label>
+        <select class="text-input" id="pair-target">
+          <option value="">Whichever nearby device shows this code</option>
+        </select>
         <details class="pair-address" id="pair-address-wrap">
-          <summary>Not found? Enter its address</summary>
+          <summary>Can’t find it? Enter its address</summary>
           <label class="visually-hidden" for="pair-address">Address</label>
-          <input class="text-input" id="pair-address" placeholder="192.168.1.20:5000" autocomplete="off" spellcheck="false">
+          <input class="text-input" id="pair-address" placeholder="The address shown under its code" autocomplete="off" spellcheck="false">
         </details>
+        <p class="muted" id="pair-status" role="status"></p>
         <p class="field-error" id="pair-error" role="alert"></p>
         <button class="btn btn-primary btn-large" type="submit" id="pair-submit">
           <svg class="icon" aria-hidden="true"><use href="#i-link"/></svg><span>Pair</span>
@@ -310,6 +316,15 @@
         <video id="scan-video" playsinline muted></video>
         <button class="btn btn-plain btn-small" type="button" id="scan-cancel">Cancel</button>
       </div>
+    </div>
+  </dialog>
+
+  <dialog class="sheet" id="pair-request-dialog" aria-labelledby="pair-request-title" aria-describedby="pair-request-sub">
+    <h2 id="pair-request-title">Pair with this device?</h2>
+    <p class="muted" id="pair-request-sub"></p>
+    <div class="sheet-actions">
+      <button class="btn btn-tinted btn-large" type="button" id="pair-request-deny">Don’t allow</button>
+      <button class="btn btn-primary btn-large" type="button" id="pair-request-allow">Allow</button>
     </div>
   </dialog>
 

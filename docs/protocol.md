@@ -91,15 +91,53 @@ POST /api/p2p/v1/offers
 * Names are sanitised by the receiver; sizes are checked against free space
   and `--max-size` up front (`state: "declined"` with a reason if they don't fit).
 
-**States:** `pending` → `accepted` → `receiving` → `done`, or `declined`,
-`expired` (no answer in 120 s), `canceled`, `failed`. Offers to an owner from
-a paired app (and with `--auto-accept`) start as `accepted`. With
-`--paired-only`, offers from unpaired apps are refused (`403`).
+**States** (wire names; history and `lifecycle.py` call them offered →
+accepted → transferring → completed): `pending` → `accepted` → `receiving` →
+`done`, or `partial` (some files arrived), `failed`, `declined`, `expired`,
+`canceled`. Offers to an owner from a paired app (and with `--auto-accept`)
+start as `accepted`. With `--paired-only`, offers from unpaired apps are
+refused (`403`). A final state never changes; late or repeated messages are
+refused (`409`/`410`) or ignored.
 
-The sender polls `GET /offers/<id>` until it leaves `pending`, then uploads
-each file with `PUT`. The receiver streams it to a `.part` file and publishes
-it atomically; the byte count must equal the offered size. If the receiver
-cancels, further reads fail and the upload gets `410`.
+Every unhappy ending carries a `reason_code` (see `REASONS` in
+`src/open_transfer/lifecycle.py`: `receiver_declined`, `insufficient_storage`,
+`file_too_large`, `permission_denied`, `sender_cancelled`, `receiver_cancelled`,
+`sender_disconnected`, `receiver_disconnected`, `receiver_unreachable`,
+`network_timeout`, `transfer_stalled`, `expired`, `app_closed`, `app_restart`,
+`destination_unavailable`, `invalid_request`, `unknown_failure`), plus a human
+`reason` and a suggested `action`.
+
+**Deadlines** (checked every 2 s on both sides):
+
+| State | Deadline | Ends as |
+|---|---|---|
+| `pending` | 120 s without an answer (sender: 135 s) | `expired` / `expired` |
+| `accepted` | 90 s without a first byte | `failed` / `sender_disconnected` |
+| `receiving` / sending | 60 s without any data | remaining files `failed` / `transfer_stalled` → `partial` or `failed` |
+| anything active at start-up | immediately | `failed` / `app_restart` |
+
+**Who decides.** The receiver is authoritative for *accepted*, *a file
+arrived* and the final state of what it received. The sender polls
+`GET /offers/<id>` until the offer leaves `pending`, then uploads each file with
+`PUT`. Before it records a failure it can't prove on its own (a lost reply, a
+deadline, a cancel racing the last byte) it asks `GET /offers/<id>` (answered
+for 10 min after the end, with each file's `state` and `reason_code`) and
+adopts the receiver's answer; only if the receiver can't be reached does it
+record `receiver_disconnected`. So a file that arrived is never recorded as
+failed by the sender.
+
+**Recovery.** v3 never resumes: a transfer that breaks ends `failed` or
+`partial` with a reason, and *retry* sends the missing files again from the
+start. Sender or receiver disconnect, Wi-Fi drop, a phone suspending the app
+and a device restart all end through the deadlines above (or sooner when a
+connection error is certain); short hiccups that don't stop the data for 60 s
+are ridden out by TCP. **Closing the app** during a transfer is a failure, not
+a cancel: `failed`/`app_closed` on that device, and the other side is told
+(`DELETE /offers/<id>` with `X-OT-Reason: app_closed` → `failed`/
+`sender_disconnected`). A crash ends as `app_restart` on the next start.
+
+The receiver streams each file to a `.part` file and publishes it atomically;
+the byte count must equal the offered size, and a partial file is deleted.
 
 ### One-to-many
 
@@ -108,6 +146,30 @@ The sender's own browser uploads each file **once** to its app
 accepting receiver at the same time — each receiver has its own thread and a
 bounded queue; a receiver that takes no data for 60 s is dropped without
 stalling the others. Nothing is staged on the sender's disk.
+
+**Group accounting.** A send to several devices is one transfer (one
+`transfer_id`, one history record) with an independent result per recipient:
+its own state, `reason_code`, `files_done`, `files_failed` (`{"<index>": code}`),
+`started_at`/`finished_at` and `disconnected` (the reason is a drop-out, not a
+choice). A recipient's state only changes through its own delivery, so one
+receiver declining, failing or being canceled never changes another's. The
+parent's state is `aggregate_state()` over the recipients
+(`src/open_transfer/history.py`):
+
+* someone still active → the least advanced state among those who have
+  engaged (accepted/transferring), else `offered`;
+* everyone `completed` → `completed`;
+* at least one `completed`/`partial`, not all `completed` → `partial`;
+* nobody received anything → their shared ending; when they differ, the first
+  of `failed` > `cancelled` > `expired` > `declined`.
+
+`GET /api/state` (`outgoing[]`) and `GET /api/history` both carry
+`summary: {state, total, delivered, pending, accepted, transferring, completed,
+partial, failed, declined, expired, cancelled, disconnected}`, so a UI can say
+"Delivered to 2 of 3" without combining endpoints. Canceling one recipient
+(`DELETE /api/send/<job>/targets/<id>`, also "Send now") stops only that
+stream; canceling the job (`DELETE /api/send/<job>`) reaches every active
+recipient.
 
 ### Browser to browser (WebRTC)
 
@@ -141,41 +203,54 @@ receiver page → its app      POST /api/signal {session, kind: "answer", sdp}
 
 ## 3. Pairing
 
-Pairing proves both apps know the same short-lived 6-digit code **without
-sending it**, and leaves them with a shared 32-byte key. A is the app showing
-the code, B the one entering it.
+The full model (identities, keys, what each message proves, limitations) is in
+[trust-model.md](trust-model.md). In short: A shows a 6-digit code while its
+*Add device* screen is open; B enters or scans it; they run **SRP-6a** (RFC
+5054, 2048-bit group, SHA-256) with the code as the password; A's owner presses
+*Allow*; both store a pair key derived from the SRP session key.
 
 ```
-B → A  POST /pair          {device: B-info, nonce: nb}
-A → B                       {nonce: na, device: A-info}
-B → A  POST /pair/confirm  {id: B, proof: HMAC(code, "b"|na|nb|A|B)}
-A → B                       {proof: HMAC(code, "a"|na|nb|A|B)}
-key = HMAC(code, "key"|na|nb|A|B)
+A (owner)  POST /api/pair/open                       → opens the window (30 s, renewed by the page)
+B → A      POST /pair/begin  {device: B-info}        → {session, salt, b: B_pub, device: A-info}
+B → A      POST /pair/prove  {session, a: A_pub, m1} → {m2}        (wrong code: 403 pairing_code_invalid)
+A (owner)  "Pair with B?"  POST /api/pair/requests/<session>/allow|deny
+B → A      POST /pair/status {session, mac}          → {status: confirming|allowed|denied|expired, mac}
+pair key   HMAC-SHA256(K, "open-transfer-pair-key/2|idA|idB")
 ```
 
-(Each HMAC is SHA-256 over `"open-transfer-pair/1\n<label>\n<na>\n<nb>\n<idA>\n<idB>"`.)
-A rate-limits confirmations (5 per minute per address) and shows a new code
-after 10 wrong guesses, after every successful pairing, and every 10 minutes.
-B verifies A's proof too, so both sides authenticate. Keys are stored in
-`<state>/trusted.json` (mode 0600).
+* SRP identity: `idA|idB`. `mac` values are HMAC(K, …) so only the two
+  participants can poll or answer. The code is accepted only while the window
+  is open; 5 wrong attempts per minute per address, a new code after 10 wrong
+  guesses, after each pairing and every 10 minutes; a session is single-use.
+* **Finding A without multicast:** B asks only the chosen device (`device_id`),
+  the device at `address`, or every reachable device whose hello/info says
+  `pairing: true`, plus devices answering a multicast `find` (which carries no
+  code data; answers are also sent back by unicast). Errors:
+  `discovery_unavailable`, `pairing_not_open`, `pairing_code_invalid`,
+  `pairing_expired`, `trust_rejected`, `device_unreachable`, `rate_limited`
+  (with `retry_after`), `already_paired`, `identity_mismatch`.
+* **QR code:** `http://<ip>:<port>/?pair=<code>&id=<device id>` — temporary only,
+  never the PIN. The app scans it and pairs with that device; a phone camera
+  opens it, which (while the window is open) admits that browser like the PIN
+  would and marks it a **trusted visitor**.
+* **Unpair:** `DELETE /pair`, signed, removes the key on both sides; a device
+  that was offline learns it from `X-OT-Unpaired` on its next signed request.
 
-The QR code in "Add a device" is `http://<ip>:<port>/?pair=<code>` (+ `&pin=`).
-The Android app scans it and pairs as above; a phone camera simply opens it,
-which signs that browser in as a **trusted visitor** (its sends to the owner
-are accepted automatically).
-
-## 4. Signed requests
+## 4. Signed requests and answers
 
 Requests from a paired app carry:
 
 ```
 X-OT-From: d-sender…
-X-OT-Auth: <unix time>:<hex HMAC-SHA256(key, "open-transfer/1\n<time>\n<METHOD>\n<path>\n<sender>\n<sha256(body)>")>
+X-OT-Auth: <unix time>.<16-hex nonce>:<hex HMAC-SHA256(key, "open-transfer/2\n<time.nonce>\n<METHOD>\n<path>\n<sender>\n<sha256(body)>")>
 ```
 
-Receivers accept signatures within ±120 s and refuse a signature they have
-already seen. A valid signature makes an offer from that app's owner
-auto-accepted; anything else is treated as a stranger (asked first).
+Receivers accept signatures within ±120 s and refuse one they have already
+seen. Their **answer** carries `X-OT-Auth: HMAC(key, "open-transfer/1\nresponse\n<request X-OT-Auth>\n<status>\n<sha256(body)>")`;
+a paired app treats an answer without a valid one as coming from someone else.
+A valid signature makes an offer from that app's owner auto-accepted; anything
+else is treated as a stranger (asked first). A paired device's address only
+changes after it has answered a signed hello at the new address (or sent one).
 
 ## Security notes and limits
 
