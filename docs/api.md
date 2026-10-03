@@ -119,6 +119,8 @@ These power the device grid. "Owner" means a request from the device itself
 | `POST /api/pair` `{code, address?}` | owner | Pair with the app showing `code` (found by multicast, or at `address`) |
 | `POST /api/devices` `{address}` | owner | Add an app by `host:port` |
 | `DELETE /api/pairs/<id>` · `POST /api/pair/new-code` · `GET /api/pair/qr.svg` | owner | Unpair · new code · QR with the code |
+| `GET /api/history?direction=sent\|received&failed=1&device=<id>&q=<text>&limit=<n>&before=<created_at>,<row_id>` | owner | Transfer history, newest first (≤200 per page). Each record: `transfer_id`, `direction`, `sender`, `recipients[]` (per-recipient `state`, `reason`, `bytes_done`, `files_done`), `files[]` (with `exists` for received files), `state`, timestamps |
+| `DELETE /api/history/<row_id>` · `POST /api/history/clear` `{completed_only}` | owner | Forget one finished record · forget finished (or only completed) records. **Files are never deleted.** |
 
 Sending from a script, end to end:
 

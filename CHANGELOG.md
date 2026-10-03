@@ -4,6 +4,9 @@ All notable changes are documented here. The format follows [Keep a Changelog](h
 
 ## [Unreleased]
 
+### Added
+- **Transfer history** (`<state>/history.db`, SQLite, owner-only file): every transfer the device's owner sends or receives is recorded with sender, each recipient's result, files, sizes and timestamps. A group send is one record with a result per recipient (`partial` when only some received it). Records survive restarts (unfinished transfers become `failed`, reason `app_restart`) and outlive the files they mention. Retention: 1000 records / 180 days. API: `GET /api/history`, `DELETE /api/history/<id>`, `POST /api/history/clear`.
+
 ## [3.0.0] — unreleased
 
 Open Transfer becomes AirDrop-like across platforms: every device runs the app, devices find each other, and files go **directly to the devices you pick** instead of into one shared folder.

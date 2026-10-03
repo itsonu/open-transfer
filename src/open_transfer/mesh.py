@@ -58,6 +58,15 @@ from open_transfer.devices import (
     valid_id,
 )
 from open_transfer.discovery import Discovery
+from open_transfer.history import (
+    COMPLETED,
+    PARTIAL,
+    FileRecord,
+    History,
+    RecipientRecord,
+    TransferRecord,
+    lifecycle_state,
+)
 from open_transfer.security import RateLimiter, log_safe
 from open_transfer.storage import (
     FileInfo,
@@ -78,6 +87,7 @@ VISITOR_STALE = 25.0  # browsers poll every 1.5 s, hidden tabs every 10 s
 VISITOR_FORGET = 24 * 3600.0
 HELLO_EVERY = 6.0
 FINISHED_KEEP = 90.0  # finished transfers stay in the UI this long
+HISTORY_PRUNE_EVERY = 3600.0
 PAIR_CODE_TTL = 600.0
 STALL_TIMEOUT = 60.0  # a receiver that takes no data for this long is dropped
 CHUNK = 256 * 1024
@@ -189,6 +199,8 @@ class IncomingSession:
     state: str = PENDING
     reason: str = ""
     finished: float = 0.0
+    created_at: float = field(default_factory=time.time)  # wall clock, for history
+    started_at: float | None = None
     local: bool = False  # offered by our own owner/visitor (no HTTP involved)
     source: str = ""  # address the offer came from (rate limiting)
     job: str = ""  # the sender's job id (to route direct-transfer signals back)
@@ -238,6 +250,8 @@ class Job:
     created: float = field(default_factory=time.monotonic)
     canceled: bool = False
     finished: float = 0.0
+    created_at: float = field(default_factory=time.time)  # wall clock, for history
+    started_at: float | None = None
 
 
 # ====================================================================== mesh
@@ -256,6 +270,10 @@ class Mesh:
             platform=config.device_platform,
         )
         self.trust = TrustStore(state)
+        self.history = History(state / "history.db")
+        self.history.interrupt_unfinished()
+        self.history.prune()
+        self._recorded: dict[str, tuple[Any, ...]] = {}  # last snapshot saved, per live transfer
         self._inbox_root = state / "inbox"
         self._lock = threading.RLock()
         self._peers: dict[str, Peer] = {}
@@ -309,6 +327,10 @@ class Mesh:
             if not job.finished:
                 self.cancel_job(job.id, job.owner, quiet=True)
         self._executor.shutdown(wait=False, cancel_futures=True)
+        if self._thread:
+            self._thread.join(timeout=5)
+        self._record_all()
+        self.history.close()
 
     def add_listener(self, listener: Listener) -> None:
         """Get told about ``"offer"`` and ``"received"`` events (desktop/Android notifications)."""
@@ -731,6 +753,7 @@ class Mesh:
             self._accept(session)
         with self._lock:
             self._incoming[session.id] = session
+        self._record_session(session)
         if session.state == PENDING:
             log.info(
                 "%s wants to send %s file(s) (%s bytes)",
@@ -774,6 +797,7 @@ class Mesh:
             else:
                 session.state, session.finished = DECLINED, time.monotonic()
                 session.reason = "Declined"
+        self._record_session(session)
         return session
 
     def cancel_incoming(self, session_id: str, viewer: Viewer | None, *, secret: str = "") -> None:
@@ -787,6 +811,7 @@ class Mesh:
                 return
             session.state, session.finished = CANCELED, time.monotonic()
             session.reason = "Canceled by the sender" if viewer is None else "Canceled"
+        self._record_session(session)
 
     def offer_status(self, session_id: str, secret: str) -> dict[str, Any]:
         session = self._session_by_secret(session_id, secret)
@@ -840,6 +865,8 @@ class Mesh:
                 raise MeshError(400, "size_mismatch", "The file size doesn’t match the offer.")
             item.state, item.received, item.error = RECEIVING, 0, ""
             session.state = RECEIVING
+            session.started_at = session.started_at or time.time()
+        self._record_session(session)
         store = self.storage if session.target == self.id else self.inbox(session.target)
 
         def count(n: int) -> None:
@@ -855,6 +882,7 @@ class Mesh:
                 item.state = FAILED
                 item.error = str(exc) if isinstance(exc, StorageError) else "Interrupted"
                 self._maybe_finish(session)
+            self._record_session(session)
             if session.state == CANCELED:
                 raise MeshError(410, CANCELED, session.reason) from exc
             if isinstance(exc, StorageError):
@@ -863,6 +891,7 @@ class Mesh:
         with self._lock:
             item.state, item.saved_name, item.received = DONE, saved.name, item.size
             self._maybe_finish(session)
+        self._record_session(session)
         log.info(
             "Received %s (%s bytes) from %s", log_safe(saved.name), saved.size,
             log_safe(session.origin.get("name")),
@@ -908,8 +937,15 @@ class Mesh:
             if delivery.peer is None:
                 self._offer_local(job, target_id, delivery, viewer)
             else:
-                self._executor.submit(self._offer_remote, job, target_id, delivery)
+                self._executor.submit(self._offer_remote_and_record, job, target_id, delivery)
+        self._record_job(job)
         return job
+
+    def _offer_remote_and_record(self, job: Job, target_id: str, delivery: Delivery) -> None:
+        try:
+            self._offer_remote(job, target_id, delivery)
+        finally:
+            self._record_job(job)
 
     def _origin(self, viewer: Viewer) -> dict[str, Any]:
         origin = {
@@ -1077,6 +1113,7 @@ class Mesh:
             if any(d.view_state() in {"offering", "waiting"} for d in job.deliveries.values()):
                 raise MeshError(409, "waiting", "Still waiting for the receivers to accept.")
             raise MeshError(409, "no_receivers", "Nobody accepted this transfer.")
+        job.started_at = job.started_at or time.time()
         for sink in sinks:
             sink.start()
         received = 0
@@ -1125,6 +1162,7 @@ class Mesh:
             results[sink.target_id] = {"ok": ok, "error": sink.error}
         if all(d.view_state() in FINAL for d in job.deliveries.values()):
             job.finished = time.monotonic()
+        self._record_job(job)
         return {"targets": results}
 
     def cancel_job(self, job_id: str, viewer_id: str, *, quiet: bool = False) -> None:
@@ -1138,6 +1176,7 @@ class Mesh:
         job.finished = job.finished or time.monotonic()
         for delivery in job.deliveries.values():
             self._cancel_delivery(delivery)
+        self._record_job(job)
 
     def cancel_target(self, job_id: str, viewer: Viewer, target_id: str) -> None:
         job = self.job_for(job_id, viewer)
@@ -1147,6 +1186,7 @@ class Mesh:
         self._cancel_delivery(delivery)
         if all(d.view_state() in FINAL for d in job.deliveries.values()):
             job.finished = time.monotonic()
+        self._record_job(job)
 
     def _cancel_delivery(self, delivery: Delivery) -> None:
         if delivery.view_state() in {DONE, DECLINED, EXPIRED, FAILED, CANCELED}:
@@ -1273,6 +1313,7 @@ class Mesh:
             if delivery.view_state() not in {ACCEPTED, "sending"}:
                 raise MeshError(409, "not_accepted", "That device hasn’t accepted this transfer.")
             delivery.direct = True
+            job.started_at = job.started_at or time.time()
         elif state == "failed":
             delivery.direct = False  # the files go the usual way instead
         elif state == "progress":
@@ -1286,6 +1327,7 @@ class Mesh:
             raise MeshError(400, "bad_request", "Unknown state.")
         if all(d.view_state() in FINAL for d in job.deliveries.values()):
             job.finished = time.monotonic()
+        self._record_job(job)
 
     def direct_received(
         self, session_id: str, viewer: Viewer, index: int, received: int, done: bool
@@ -1302,18 +1344,159 @@ class Mesh:
                 return
             item.received = max(0, min(item.size, int(received)))
             session.state = RECEIVING
+            session.started_at = session.started_at or time.time()
             if done:
                 item.state, item.received, item.direct = DONE, item.size, True
                 item.saved_name = item.name
                 self._maybe_finish(session)
+        self._record_session(session)
+
+    # ------------------------------------------------------------- history
+    #
+    # The owner's transfers are recorded in ``History``. Each live session/job is
+    # turned into a full snapshot (from the same views the UI shows) and saved
+    # when it differs from the last one saved: right away at the transitions
+    # that matter, and by housekeeping every couple of seconds for the rest.
+
+    def _record_session(self, session: IncomingSession) -> None:
+        """Save what the owner is receiving (visitors' inboxes aren't recorded)."""
+        if session.target != self.id:
+            return
+        view = self._incoming_view(session)
+        state = _with_failures(lifecycle_state(session.state), session.files)
+        ident = self.identity
+        record = TransferRecord(
+            transfer_id=session.job or session.id,
+            direction="received",
+            peer_node=session.sender_node,
+            sender=view["from"],
+            files=[
+                FileRecord(
+                    name=f.name,
+                    size=f.size,
+                    mime=f.mime,
+                    saved_name="" if f.direct else (f.saved_name or ""),
+                    state=lifecycle_state(f.state),
+                    error=f.error,
+                )
+                for f in session.files
+            ],
+            recipients=[
+                RecipientRecord(
+                    device_id=ident.id,
+                    device={"name": ident.name, "form": ident.form, "platform": ident.platform},
+                    state=state,
+                    reason=session.reason,
+                    session_id=session.id,
+                    bytes_done=session.received,
+                    files_done=[i for i, f in enumerate(session.files) if f.state == DONE],
+                )
+            ],
+            created_at=session.created_at,
+            started_at=session.started_at,
+            reason=session.reason,
+        )
+        self._save_record(f"s:{session.id}", record)
+
+    def _record_job(self, job: Job) -> None:
+        """Save what the owner is sending (a group send is one record)."""
+        if job.owner != self.id:
+            return
+        view = self._job_view(job)
+        recipients = []
+        for target in view["targets"]:
+            delivery = job.deliveries[target["id"]]
+            files = delivery.session.files if delivery.session is not None else None
+            done = (
+                {i for i, f in enumerate(files) if f.state == DONE}
+                if files is not None
+                else delivery.files_done
+            )
+            state = lifecycle_state(target["state"])
+            if files is not None:
+                state = _with_failures(state, files)
+            recipients.append(
+                RecipientRecord(
+                    device_id=target["id"],
+                    device={
+                        k: target.get(k) for k in ("name", "form", "platform", "kind", "via_name")
+                    },
+                    state=state,
+                    reason=target["reason"],
+                    session_id=delivery.session.id if delivery.session else delivery.remote_id,
+                    bytes_done=target["sent"],
+                    files_done=sorted(done),
+                )
+            )
+        record = TransferRecord(
+            transfer_id=job.id,
+            direction="sent",
+            sender=dict(job.origin),
+            files=[
+                FileRecord(name=str(f["name"]), size=int(f["size"]), mime=str(f.get("mime", "")))
+                for f in job.files
+            ],
+            recipients=recipients,
+            created_at=job.created_at,
+            started_at=job.started_at,
+        )
+        self._save_record(f"j:{job.id}", record)
+
+    def _save_record(self, key: str, record: TransferRecord) -> None:
+        snapshot = (
+            record.state,
+            tuple(
+                (r.state, r.reason, r.bytes_done, tuple(r.files_done)) for r in record.recipients
+            ),
+            tuple((f.state, f.saved_name) for f in record.files),
+        )
+        with self._lock:
+            if self._recorded.get(key) == snapshot:
+                return
+            self._recorded[key] = snapshot
+        try:
+            self.history.save(record)
+        except Exception:  # history must never break a transfer
+            log.warning("Couldn't save transfer history", exc_info=True)
+            with self._lock:
+                self._recorded.pop(key, None)
+
+    def _record_all(self) -> None:
+        with self._lock:
+            sessions = list(self._incoming.values())
+            jobs = list(self._jobs.values())
+        for session in sessions:
+            self._record_session(session)
+        for job in jobs:
+            self._record_job(job)
+
+    def history_for(self, **filters: Any) -> list[dict[str, Any]]:
+        """History records, newest first, each file marked with whether it still exists."""
+        items = self.history.find(**filters)
+        for item in items:
+            for f in item["files"]:
+                f["exists"] = None
+                if item["direction"] == "received" and f["saved_name"]:
+                    try:
+                        self.storage.resolve(f["saved_name"])
+                        f["exists"] = True
+                    except StorageError:
+                        f["exists"] = False
+        return items
 
     # -------------------------------------------------------- housekeeping
 
     def _housekeeping(self) -> None:
         last_hello = 0.0
+        last_prune = time.monotonic()
         manual_known: dict[str, float] = {}
         while not self._stop.wait(2.0):
             now = time.monotonic()
+            self._record_all()  # catches progress and remote/sink/direct transitions
+            if now - last_prune >= HISTORY_PRUNE_EVERY:
+                last_prune = now
+                with contextlib.suppress(Exception):
+                    self.history.prune()
             with self._lock:
                 for session in self._incoming.values():
                     if session.state == PENDING and now - session.created > OFFER_TTL:
@@ -1323,12 +1506,14 @@ class Mesh:
                     if s.state in FINAL and now - s.finished > FINISHED_KEEP
                 ]:  # fmt: skip
                     del self._incoming[key]
+                    self._recorded.pop(f"s:{key}", None)
                 for key in [
                     k
                     for k, j in self._jobs.items()
                     if j.finished and now - j.finished > FINISHED_KEEP
                 ]:
                     del self._jobs[key]
+                    self._recorded.pop(f"j:{key}", None)
                 for key in [
                     k for k, p in self._peers.items()
                     if now - p.last_seen > PEER_FORGET and not self.trust.get(k) and not p.manual
@@ -1690,6 +1875,13 @@ def _describe_error(exc: Exception, delivery: Delivery) -> str:
     if isinstance(exc, (ConnectionError, TimeoutError, OSError)):
         return f"Lost connection to {delivery.target.get('name', 'the receiver')}."
     return "Transfer failed."
+
+
+def _with_failures(state: str, files: list[IncomingFile]) -> str:
+    """A "done" session where some files failed is only a partial success."""
+    if state == COMPLETED and any(f.state == FAILED for f in files):
+        return PARTIAL
+    return state
 
 
 def _target(device_id: str, name: str, form: str, platform: str, kind: str) -> dict[str, Any]:

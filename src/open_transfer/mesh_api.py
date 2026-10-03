@@ -342,6 +342,44 @@ def register(
         )
         return response
 
+    # -------------------------------------------------------- owner: history
+
+    @app.get("/api/history")
+    def ui_history() -> Response:
+        owner_only()
+        args = request.args
+        before = None
+        if args.get("before"):
+            try:
+                at, row = args["before"].split(",", 1)
+                before = (float(at), int(row))
+            except ValueError as exc:
+                raise MeshError(400, "bad_request", "Invalid page marker.") from exc
+        items = mesh.history_for(
+            direction=args.get("direction") or None,
+            failed=args.get("failed") in {"1", "true"},
+            device=args.get("device") or None,
+            text=(args.get("q") or "").strip()[:100] or None,
+            before=before,
+            limit=args.get("limit", 50, type=int),
+        )
+        return jsonify({"items": items})
+
+    @app.delete("/api/history/<int:row_id>")
+    def ui_history_delete(row_id: int) -> Response:
+        owner_only()
+        if not mesh.history.delete(row_id):
+            raise MeshError(
+                404, "not_found", "That transfer isn’t in the history, or is still active."
+            )
+        return jsonify({"ok": True})
+
+    @app.post("/api/history/clear")
+    def ui_history_clear() -> Response:
+        owner_only()
+        removed = mesh.history.clear(completed_only=bool(body_json().get("completed_only")))
+        return jsonify({"removed": removed})
+
     # -------------------------------------------------------- owner: devices
 
     @app.post("/api/devices")
