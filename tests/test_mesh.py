@@ -536,6 +536,30 @@ def test_devices_find_each_other_automatically(make_node: NodeFactory) -> None:
     )
 
 
+def test_goodbye_is_the_last_thing_a_closing_device_says(make_node: NodeFactory) -> None:
+    """A hello still on its way when Charlie closes must not bring it back after its bye."""
+    port = random.randint(40000, 59000)
+    if not multicast_works(port) or not network.lan_ips():
+        pytest.skip("multicast is not available here")
+    a = make_node("Alpha", discovery=True, discovery_port=port)
+    c = make_node("Charlie", discovery=True, discovery_port=port)
+    wait_for(lambda: a.mesh.id in c.mesh._peers and c.mesh._peers[a.mesh.id].online)
+    wait_for(lambda: c.mesh.id in a.mesh._peers and a.mesh._peers[c.mesh.id].online)
+    real = a.mesh.handle_hello
+
+    def slow_hello(*args: Any, **kwargs: Any) -> Any:
+        time.sleep(1)  # a slow network: the hello lands after the bye would have
+        return real(*args, **kwargs)
+
+    a.mesh.handle_hello = slow_hello  # type: ignore[method-assign]
+    c.mesh._executor.submit(c.mesh._hello, c.mesh._peers[a.mesh.id])
+    time.sleep(0.2)
+    c.stop()
+    time.sleep(1.5)
+    gone = a.mesh._peers.get(c.mesh.id)
+    assert gone is None or not gone.online
+
+
 def test_state_supports_etags(make_node: NodeFactory) -> None:
     a = make_node("Alpha")
     request = urllib.request.Request(f"{a.local_url}/api/state")

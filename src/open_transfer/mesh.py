@@ -388,8 +388,6 @@ class Mesh:
         on the next start (History.interrupt_unfinished).
         """
         self._stop.set()
-        if self.discovery:
-            self.discovery.stop()
         with self._lock:
             jobs = list(self._jobs.values())
             sessions = [s for s in self._incoming.values() if s.state not in FINAL]
@@ -402,9 +400,13 @@ class Mesh:
         deadline = time.monotonic() + 3
         for thread in tellers:
             thread.join(max(0.0, deadline - time.monotonic()))
-        self._executor.shutdown(wait=False, cancel_futures=True)
         if self._thread:
             self._thread.join(timeout=5)
+        # Goodbye comes last: a hello still in flight would otherwise land after
+        # it and show us online again. Every task here is a short HTTP call.
+        self._executor.shutdown(wait=True, cancel_futures=True)
+        if self.discovery:
+            self.discovery.stop()
         self._record_all()
         self.history.close()
 
@@ -572,7 +574,7 @@ class Mesh:
         return peer
 
     def _on_packet(self, packet: dict[str, Any], src: str) -> None:
-        if packet.get("id") == self.id:
+        if packet.get("id") == self.id or self._stop.is_set():
             return
         self._multicast_heard = time.monotonic()
         kind = packet["type"]
@@ -657,6 +659,8 @@ class Mesh:
         self, info: dict[str, Any], host: str, *, signed: bool = False
     ) -> dict[str, Any]:
         """Another app says hello. ``signed``: it proved it's the paired device it claims."""
+        if self._stop.is_set():  # closing: answering would show us online after our bye
+            raise MeshError(503, "closing", f"{self.identity.name} is closing.")
         peer = self._upsert_peer(info, host, verified=signed)
         if (
             peer is None
