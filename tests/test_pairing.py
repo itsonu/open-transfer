@@ -511,3 +511,27 @@ def test_a_just_made_pairing_survives_the_moment_before_both_sides_store_the_key
     b.mesh.trust.get(a.mesh.id).paired_at = 0.0  # type: ignore[union-attr]  # an old pairing…
     b.mesh._peer_unpaired(a.mesh.id)
     assert not b.mesh.trust.get(a.mesh.id)  # …is dropped
+
+
+def test_code_alone_finds_the_new_device_not_one_already_paired(make_node: NodeFactory) -> None:
+    """CI found this with 3 devices: a paired device whose Add device screen was
+    still open got picked instead of the one showing the code ("already paired")."""
+    a, b, c = make_node("Alpha"), make_node("Bravo"), make_node("Charlie")
+    connect(a, b)
+    connect(a, c)
+    assert pair_nodes(a, b, address=False)[0] == 200
+    owner(b)("POST", "/api/pair/open")  # Bravo's window is still open…
+    status, data = pair_nodes(a, c, address=False)  # …but Alpha types Charlie's code
+    assert status == 200, data
+    assert data["device"]["name"] == "Charlie"
+
+
+def test_pairing_again_and_again_from_one_address_is_not_rate_limited(
+    make_node: NodeFactory,
+) -> None:
+    """Only wrong codes and attempts in progress count, not finished pairings."""
+    a, b = make_node("Alpha"), make_node("Bravo")
+    for _ in range(7):
+        assert pair_nodes(a, b)[0] == 200
+        owner(a)("DELETE", f"/api/pairs/{b.mesh.id}")
+        wait_for(lambda: not b.mesh.trust.get(a.mesh.id))

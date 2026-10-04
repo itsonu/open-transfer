@@ -826,7 +826,10 @@ class Mesh:
         )
         with self._lock:
             self._prune_pair_sessions()
-            if sum(1 for p in self._pair_sessions.values() if p.client == client) >= 5:
+            active = [
+                p for p in self._pair_sessions.values() if p.state in {"proving", "confirming"}
+            ]
+            if sum(1 for p in active if p.client == client) >= 5:
                 raise MeshError(
                     429,
                     "rate_limited",
@@ -965,7 +968,8 @@ class Mesh:
             candidates = [peer]
         else:
             candidates = self._pairing_candidates()
-        if len(candidates) == 1 and self.trust.get(candidates[0].id) and self._hello(candidates[0]):
+        chosen = bool(address or device_id)  # the user picked it: tell them if it's paired already
+        if chosen and self.trust.get(candidates[0].id) and self._hello(candidates[0]):
             raise MeshError(
                 409, "already_paired", f"You’re already paired with {candidates[0].name}."
             )
@@ -981,23 +985,31 @@ class Mesh:
         raise (wrong[0] if wrong else failures[0])
 
     def _pairing_candidates(self) -> list[Peer]:
-        """Devices that may be showing a code: never just the ones multicast found."""
+        """Devices that may be showing a code: never just the ones multicast found.
+
+        Every reachable device is asked whether its pairing window is open (an
+        earlier answer may be stale), and devices we're already paired with are
+        left out: entering a code is for a new device.
+        """
         if self.discovery and self.discovery.working:
             self.discovery.find()
         with self._lock:
             online = [p for p in self._peers.values() if p.online]
-        # Ask the devices we can already reach whether their pairing window is open.
-        for peer in online:
-            if not peer.pairing:
-                self._executor.submit(self._refresh_info, peer)
-        deadline = time.monotonic() + 1.5
-        while time.monotonic() < deadline:
-            with self._lock:
-                found = [p for p in self._peers.values() if p.online and p.pairing]
-            if found:
-                return found
-            time.sleep(0.1)
-        if not online:
+        askers = [
+            threading.Thread(target=self._refresh_info, args=(p,), daemon=True) for p in online
+        ]
+        for t in askers:
+            t.start()
+        deadline = time.monotonic() + 2.5
+        for t in askers:
+            t.join(max(0.0, deadline - time.monotonic()))
+        time.sleep(max(0.0, min(0.6, deadline - time.monotonic())))  # multicast answers
+        with self._lock:
+            reachable = [p for p in self._peers.values() if p.online]
+            found = [p for p in reachable if p.pairing and not self.trust.get(p.id)]
+        if found:
+            return found
+        if not reachable:
             raise MeshError(
                 404, "discovery_unavailable",
                 "No nearby devices found automatically — this network may block it. "
@@ -1005,7 +1017,8 @@ class Mesh:
             )  # fmt: skip
         raise MeshError(
             404, "pairing_not_open",
-            "None of the nearby devices is showing a pairing code. Open Add device on the other device first.",
+            "None of the nearby devices you aren’t paired with is showing a pairing code. "
+            "Open Add device on the other device first.",
         )  # fmt: skip
 
     def _refresh_info(self, peer: Peer) -> None:
