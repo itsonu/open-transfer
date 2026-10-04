@@ -94,6 +94,7 @@ PEER_FORGET = 120.0  # …and is dropped from the list (paired apps stay, greyed
 VISITOR_STALE = 25.0  # browsers poll every 1.5 s, hidden tabs every 10 s
 VISITOR_FORGET = 24 * 3600.0
 HELLO_EVERY = 6.0
+BYE_QUIET = 10.0  # after a bye, only our own hello brings a device back
 FINISHED_KEEP = 90.0  # finished transfers stay in the UI this long
 HISTORY_PRUNE_EVERY = 3600.0
 PAIR_CODE_TTL = 600.0
@@ -338,6 +339,7 @@ class Mesh:
         self._inbox_root = state / "inbox"
         self._lock = threading.RLock()
         self._peers: dict[str, Peer] = {}
+        self._byes: dict[str, float] = {}  # device id -> when it said goodbye
         self._visitors: dict[str, Visitor] = {}
         self._inboxes: dict[str, Storage] = {}
         self._incoming: dict[str, IncomingSession] = {}
@@ -545,6 +547,12 @@ class Mesh:
         trusted = self.trust.get(peer_id) is not None
         with self._lock:
             peer = self._peers.get(peer_id)
+            if not verified and time.monotonic() - self._byes.get(peer_id, -BYE_QUIET) < BYE_QUIET:
+                if not self._stop.is_set():  # back already? ask it
+                    probe = peer or Peer(peer_id, "", "computer", "unknown", host, port)
+                    self._executor.submit(self._hello, probe)
+                return peer
+            self._byes.pop(peer_id, None)
             if trusted and not verified:
                 if peer is not None and (peer.host, peer.port) == (host, port):
                     peer.last_seen = time.monotonic()  # alive where we know it is
@@ -590,8 +598,7 @@ class Mesh:
                 peer = self._peers.get(packet["id"])
                 here = peer is not None and peer.host == src
                 if peer and here:  # from where we know it is
-                    peer.last_seen = 0.0
-                    peer.visitors = []
+                    self._gone(peer)
             if peer and not here:
                 # Another of its addresses (two network interfaces), or someone
                 # else's packet: ask it where we know it is.
@@ -632,8 +639,15 @@ class Mesh:
     def _check_gone(self, peer: Peer) -> None:
         if not self._hello(peer):
             with self._lock:
-                peer.last_seen = 0.0
-                peer.visitors = []
+                self._gone(peer)
+
+    def _gone(self, peer: Peer) -> None:
+        """It said goodbye. Packets it sent just before (UDP can reorder) or a
+        hello still being handled must not bring it back: for a few seconds
+        only our own hello to it does (see _upsert_peer)."""
+        peer.last_seen = 0.0
+        peer.visitors = []
+        self._byes[peer.id] = time.monotonic()
 
     def _hello(self, peer: Peer) -> bool:
         """Say hello over HTTP. For a paired device, a valid (signed) answer also

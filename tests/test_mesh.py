@@ -574,6 +574,30 @@ def test_goodbye_from_another_address_is_checked(make_node: NodeFactory) -> None
     wait_for(lambda: not a.mesh._peers[c.mesh.id].online, timeout=5)
 
 
+def test_a_late_packet_after_goodbye_does_not_bring_a_device_back(
+    make_node: NodeFactory,
+) -> None:
+    """UDP can reorder: an announce sent just before the bye may arrive after it."""
+    a, c = make_node("Alpha"), make_node("Charlie")
+    connect(a, c)
+    late = {"type": "announce", **c.mesh._describe()}
+    c.stop()
+    a.mesh._on_packet({"type": "bye", "id": c.mesh.id}, "127.0.0.1")
+    a.mesh._on_packet(late, "127.0.0.1")
+    a.mesh.handle_hello(c.mesh.self_info(), "127.0.0.1")  # a hello it sent before leaving
+    time.sleep(1)
+    peer = a.mesh._peers.get(c.mesh.id)
+    assert peer is None or not peer.online
+
+
+def test_a_device_that_restarts_right_after_goodbye_comes_back(make_node: NodeFactory) -> None:
+    a, c = make_node("Alpha"), make_node("Charlie")
+    connect(a, c)
+    a.mesh._on_packet({"type": "bye", "id": c.mesh.id}, "127.0.0.1")
+    a.mesh._on_packet({"type": "announce", **c.mesh._describe()}, "127.0.0.1")  # it's back
+    wait_for(lambda: a.mesh._peers[c.mesh.id].online, timeout=5)
+
+
 def test_state_supports_etags(make_node: NodeFactory) -> None:
     a = make_node("Alpha")
     request = urllib.request.Request(f"{a.local_url}/api/state")
