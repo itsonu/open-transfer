@@ -560,6 +560,20 @@ def test_goodbye_is_the_last_thing_a_closing_device_says(make_node: NodeFactory)
     assert gone is None or not gone.online
 
 
+def test_goodbye_from_another_address_is_checked(make_node: NodeFactory) -> None:
+    """A computer with two network interfaces says bye from both; only one is the
+    address we know. A bye from elsewhere counts only if the device has really gone."""
+    a, c = make_node("Alpha"), make_node("Charlie")
+    connect(a, c)
+    bye = {"type": "bye", "id": c.mesh.id}
+    a.mesh._on_packet(bye, "203.0.113.9")  # spoofed: Charlie is still there
+    time.sleep(1)
+    assert a.mesh._peers[c.mesh.id].online
+    c.stop()
+    a.mesh._on_packet(bye, "203.0.113.9")  # its other interface
+    wait_for(lambda: not a.mesh._peers[c.mesh.id].online, timeout=5)
+
+
 def test_state_supports_etags(make_node: NodeFactory) -> None:
     a = make_node("Alpha")
     request = urllib.request.Request(f"{a.local_url}/api/state")

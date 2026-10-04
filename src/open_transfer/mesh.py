@@ -588,9 +588,15 @@ class Mesh:
         if kind == "bye":
             with self._lock:
                 peer = self._peers.get(packet["id"])
-                if peer and peer.host == src:  # only from where we know it is
+                here = peer is not None and peer.host == src
+                if peer and here:  # from where we know it is
                     peer.last_seen = 0.0
                     peer.visitors = []
+            if peer and not here:
+                # Another of its addresses (two network interfaces), or someone
+                # else's packet: ask it where we know it is.
+                log.info("bye from %s for %s at %s; checking", src, log_safe(peer.name), peer.host)
+                self._executor.submit(self._check_gone, peer)
             return
         peer_id = str(packet["id"])
         port = packet.get("port")
@@ -622,6 +628,12 @@ class Mesh:
             self._executor.submit(self._hello, peer)
         elif changed:
             self._executor.submit(self._hello, peer)
+
+    def _check_gone(self, peer: Peer) -> None:
+        if not self._hello(peer):
+            with self._lock:
+                peer.last_seen = 0.0
+                peer.visitors = []
 
     def _hello(self, peer: Peer) -> bool:
         """Say hello over HTTP. For a paired device, a valid (signed) answer also

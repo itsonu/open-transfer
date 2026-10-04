@@ -120,8 +120,10 @@ verified:  the answer carries a valid response MAC ──► address updated
 otherwise: the old address stays; the attempt is logged (address_verification_failed)
 ```
 
-A signed hello from the new address is itself the proof. Multicast `bye` only
-counts when it comes from the device's current address. So an attacker who
+A signed hello from the new address is itself the proof. Multicast `bye` counts
+at once only when it comes from the device's current address; from any other
+address (a computer with two network interfaces says bye on both) we first ask
+the device at its current address, and only if it doesn't answer is it offline. So an attacker who
 copies a paired device's id into their own announcements cannot redirect the
 files meant for it, and cannot rename it.
 
