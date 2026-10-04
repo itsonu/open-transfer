@@ -854,6 +854,7 @@ class Mesh:
             raise MeshError(409, "pairing_expired", "That pairing attempt has ended. Start again.")
         wait = self._pair_limiter.attempt(f"pair:{client}")
         if wait:
+            session.state = "failed"  # else it counts as in progress in pair_begin for 3 min
             raise MeshError(
                 429, "rate_limited", f"Too many wrong codes. Try again in {round(wait)} s.",
                 retry_after=round(wait),

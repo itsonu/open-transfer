@@ -178,6 +178,19 @@ def test_wrong_codes_are_refused_then_rate_limited(make_node: NodeFactory) -> No
     assert not b.mesh.trust.ids()
 
 
+def test_retrying_while_rate_limited_does_not_extend_the_block(make_node: NodeFactory) -> None:
+    """Attempts refused by the limiter end there; once it lapses, the right code works."""
+    a, b = make_node("Alpha"), make_node("Bravo")
+    real = owner(b)("POST", "/api/pair/open")[1]["code"]
+    wrong = f"{(int(real) + 1) % 10**6:06d}"
+    for _ in range(5):
+        pair_nodes(a, b, code=wrong)
+    for _ in range(6):  # an impatient user keeps trying during the minute
+        assert error(pair_nodes(a, b, code=wrong))[0] == 429
+    b.mesh._pair_limiter.reset("pair:127.0.0.1")  # the minute has passed
+    assert pair_nodes(a, b)[0] == 200
+
+
 def test_the_window_closing_mid_attempt_expires_it(make_node: NodeFactory) -> None:
     b = make_node("Bravo")
     b.mesh.open_pairing()
