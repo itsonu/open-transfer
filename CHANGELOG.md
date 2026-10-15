@@ -2,7 +2,7 @@
 
 All notable changes are documented here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [3.1.0] — 2026-10-15
 
 ### Added
 - **Retry after decline**: declined/failed/expired transfers show a Retry button (per job and per device) backed by `POST /api/send/<job>/retry`, so the receiver gets a fresh Accept? prompt.
