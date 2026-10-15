@@ -2,30 +2,35 @@
 (() => {
   const ua = navigator.userAgent;
   const platform = (navigator.userAgentData && navigator.userAgentData.platform) || navigator.platform || "";
-  const os = /win/i.test(platform) || /Windows/.test(ua)
-    ? "windows"
-    : /mac/i.test(platform) || /Mac OS X/.test(ua)
-      ? "mac"
-      : /linux/i.test(platform) && !/Android/.test(ua)
-        ? "linux"
-        : null;
-  const names = { windows: "Windows", mac: "macOS", linux: "Linux" };
+  const android = /Android/.test(ua);
+  const ios = /iPhone|iPad|iPod/.test(ua) || (/Macintosh/.test(ua) && navigator.maxTouchPoints > 1);
+  const os = android
+    ? "android"
+    : ios
+      ? null
+      : /win/i.test(platform) || /Windows/.test(ua)
+        ? "windows"
+        : /mac/i.test(platform) || /Mac OS X/.test(ua)
+          ? "mac"
+          : /linux/i.test(platform)
+            ? "linux"
+            : null;
+  const names = { windows: "Windows", mac: "macOS", linux: "Linux", android: "Android" };
   const card = os && document.querySelector(`.dl[data-os="${os}"]`);
-  const isPhone = /Android|iPhone|iPad/.test(ua);
 
-  if (card && !isPhone) {
+  if (card) {
     card.classList.add("is-yours");
     const button = document.getElementById("primary-download");
     button.href = card.href;
     document.getElementById("primary-download-label").textContent = `Download for ${names[os]}`;
     document.getElementById("primary-download-note").textContent =
-      "Free · ~13 MB · no Python needed · other platforms below";
-  } else if (isPhone) {
-    // Phones are the *other* device: they only need a browser.
-    document.getElementById("primary-download-label").textContent = "Get it for your computer";
+      os === "mac" ? "Free · Apple silicon (Intel version below) · other platforms below" : "Free · no account · other platforms below";
+  } else if (ios) {
+    // No iOS app yet: iPhones and iPads join from Safari.
+    document.getElementById("primary-download-label").textContent = "Get it for your other devices";
     document.getElementById("primary-download").href = "#download";
     document.getElementById("primary-download-note").textContent =
-      "Your phone doesn’t need anything — just scan the QR code the computer shows.";
+      "On iPhone and iPad nothing to install — scan the QR code another device shows.";
   }
 
   for (const button of document.querySelectorAll(".copy")) {

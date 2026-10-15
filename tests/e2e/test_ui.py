@@ -28,13 +28,19 @@ class Server:
         self.url, self.root, self.proc = url, root, proc
 
 
-def _start(tmp_path: Path, *args: str) -> Iterator[Server]:
-    port = find_free_port("127.0.0.1", 18000)
-    root = tmp_path / "share"
-    env = {**os.environ, "NO_COLOR": "1"}
+def _start(
+    tmp_path: Path, *args: str, name: str = "share", owner: bool = False, host: str = "127.0.0.1"
+) -> Iterator[Server]:
+    """Start the CLI. By default the browser is a *visitor* in shared-folder mode
+    (the classic experience); ``owner=True`` makes 127.0.0.1 the device's owner."""
+    port = find_free_port(host, 18000)
+    root = tmp_path / name
+    env = {**os.environ, "NO_COLOR": "1", "OPEN_TRANSFER_OWNER_LOOPBACK": "1" if owner else "0"}
+    mode = [] if owner else ["--share-folder"]
     proc = subprocess.Popen(
-        [sys.executable, "-m", "open_transfer", str(root), "--host", "127.0.0.1",
-         "--port", str(port), "--no-browser", "--no-qr", *args],
+        [sys.executable, "-m", "open_transfer", str(root), "--host", host,
+         "--port", str(port), "--no-browser", "--no-qr", "--no-discovery", "--name", name,
+         *mode, *args],
         env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
     )  # fmt: skip
     url = f"http://127.0.0.1:{port}"
@@ -59,38 +65,6 @@ def _start(tmp_path: Path, *args: str) -> Iterator[Server]:
 @pytest.fixture
 def server(tmp_path: Path) -> Iterator[Server]:
     yield from _start(tmp_path)
-
-
-@pytest.fixture(scope="session")
-def browser() -> Iterator[object]:
-    with sync_api.sync_playwright() as p:
-        try:
-            b = p.chromium.launch()
-        except Exception as exc:  # pragma: no cover - depends on the machine
-            pytest.skip(f"Chromium not available: {exc}")
-            return
-        yield b
-        b.close()
-
-
-@pytest.fixture
-def page(browser):  # type: ignore[no-untyped-def]
-    context = browser.new_context(accept_downloads=True)
-    pg = context.new_page()
-    errors: list[str] = []
-    pg.on("pageerror", lambda exc: errors.append(str(exc)))
-    # Expected HTTP errors (e.g. a wrong PIN) are logged by Chromium as "Failed to load resource".
-    pg.on(
-        "console",
-        lambda msg: (
-            msg.type == "error"
-            and "Failed to load resource" not in msg.text
-            and errors.append(msg.text)
-        ),
-    )
-    yield pg
-    context.close()
-    assert errors == [], f"browser errors: {errors}"
 
 
 def test_send_download_delete_undo(server: Server, page, tmp_path: Path) -> None:  # type: ignore[no-untyped-def]
@@ -140,7 +114,7 @@ def test_files_from_other_devices_appear(server: Server, page) -> None:  # type:
 
 def test_connect_sheet(server: Server, page) -> None:  # type: ignore[no-untyped-def]
     page.goto(server.url)
-    page.get_by_role("button", name="Add a device").click()
+    page.locator("#connect-button").click()
     dialog = page.locator("#connect-dialog")
     sync_api.expect(dialog).to_be_visible()
     sync_api.expect(page.locator("#share-url")).to_contain_text("http://")

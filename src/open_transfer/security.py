@@ -147,5 +147,5 @@ def apply_security_headers(response: Response) -> Response:
     headers.setdefault("Referrer-Policy", "no-referrer")
     headers.setdefault("Cross-Origin-Opener-Policy", "same-origin")
     headers.setdefault("Cross-Origin-Resource-Policy", "same-origin")
-    headers.setdefault("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
+    headers.setdefault("Permissions-Policy", "camera=(self), microphone=(), geolocation=()")
     return response

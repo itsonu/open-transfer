@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Open Transfer</string>
+    <string name="starting">Starting Open Transfer…</string>
+    <string name="start_failed">Open Transfer couldn’t start.</string>
+    <string name="stopped">Open Transfer is stopped. Nearby devices can’t see this device.</string>
+    <string name="start_again">Start</string>
+    <string name="retry">Try again</string>
+
+    <string name="channel_service">Visible to nearby devices</string>
+    <string name="channel_service_description">Shown while this device can send and receive files.</string>
+    <string name="channel_offers">Incoming files</string>
+    <string name="channel_offers_description">Someone nearby wants to send you files.</string>
+
+    <string name="service_title">Open Transfer — visible to nearby devices</string>
+    <string name="service_text">Received files are saved to Download/Open Transfer.</string>
+    <string name="action_stop">Stop</string>
+
+    <string name="offer_title">%1$s wants to send you files</string>
+    <plurals name="offer_text">
+        <item quantity="one">%1$d file · %2$s. Tap to answer.</item>
+        <item quantity="other">%1$d files · %2$s. Tap to answer.</item>
+    </plurals>
+    <string name="someone">Someone nearby</string>
+
+    <string name="file_missing">That file isn’t in Download/Open Transfer anymore.</string>
+    <string name="no_app_for_file">No app on this device can open that file.</string>
+    <string name="download_started">Downloading to Download…</string>
+    <string name="download_failed">Couldn’t download that file.</string>
+    <string name="no_file_picker">No file picker is available.</string>
+</resources>

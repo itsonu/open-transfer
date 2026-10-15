@@ -26,10 +26,11 @@ import unicodedata
 from collections.abc import Iterator
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import IO, Any
+from typing import Any, Protocol
 
 CHUNK_SIZE = 1024 * 1024
 STATE_DIR = ".open-transfer"
+DELETE_ATTEMPTS = 20  # x 0.1 s: how long a delete waits for a file that is still open
 MAX_NAME_BYTES = 240  # leave headroom below the common 255-byte limit for " (12)"
 
 _WINDOWS_RESERVED = {
@@ -52,6 +53,13 @@ _KINDS = {
     "code": {"py", "js", "ts", "json", "html", "css", "sh", "c", "cpp", "go", "rs", "java"},
     "app": {"apk", "exe", "msi", "pkg", "deb", "rpm", "appimage"},
 }
+
+
+class Readable(Protocol):
+    """Anything with ``read(size) -> bytes``: a request body, a file, a pipe."""
+
+    def read(self, size: int = -1, /) -> bytes:
+        """Up to ``size`` bytes (all that's left when negative); ``b""`` at the end."""
 
 
 class StorageError(Exception):
@@ -82,6 +90,11 @@ class InsufficientStorage(StorageError):
 
 class IncompleteUpload(StorageError):
     code = "incomplete_upload"
+
+
+class FileBusy(StorageError):
+    status = 409
+    code = "file_busy"
 
 
 def safe_filename(name: str) -> str:
@@ -219,7 +232,7 @@ class Storage:
     def save_stream(
         self,
         name: str,
-        stream: IO[bytes],
+        stream: Readable,
         *,
         length: int | None = None,
         max_size: int = 0,
@@ -291,8 +304,16 @@ class Storage:
         token = secrets.token_urlsafe(12)
         holder = self._trash / token
         holder.mkdir()
-        os.replace(path, holder / path.name)
-        return token
+        # Windows won't move a file that is still open: a download or preview that
+        # just finished can hold it for a moment longer, so try again briefly.
+        for _ in range(DELETE_ATTEMPTS):
+            try:
+                os.replace(path, holder / path.name)
+                return token
+            except PermissionError:
+                time.sleep(0.1)
+        holder.rmdir()
+        raise FileBusy("This file can’t be deleted right now — it may be open. Try again shortly.")
 
     def restore(self, token: str) -> FileInfo:
         if not re.fullmatch(r"[A-Za-z0-9_-]{8,64}", token or ""):
@@ -324,7 +345,7 @@ class Storage:
             part.unlink(missing_ok=True)
 
 
-def _iter_chunks(stream: IO[bytes]) -> Iterator[bytes]:
+def _iter_chunks(stream: Readable) -> Iterator[bytes]:
     while True:
         chunk = stream.read(CHUNK_SIZE)
         if not chunk:

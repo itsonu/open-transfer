@@ -56,6 +56,15 @@
     <symbol id="i-slides" viewBox="0 0 24 24"><path d="M3 4h18v12H3zM12 16v4M8 20h8"/></symbol>
     <symbol id="i-code" viewBox="0 0 24 24"><path d="m8 7-5 5 5 5M16 7l5 5-5 5M14 4l-4 16"/></symbol>
     <symbol id="i-app" viewBox="0 0 24 24"><path d="M4 4h7v7H4zM13 4h7v7h-7zM4 13h7v7H4zM13 13h7v7h-7z"/></symbol>
+    <symbol id="i-phone" viewBox="0 0 24 24"><rect x="6.5" y="2.5" width="11" height="19" rx="2.5"/><path d="M10.5 18.5h3"/></symbol>
+    <symbol id="i-tablet" viewBox="0 0 24 24"><rect x="3.5" y="3" width="17" height="18" rx="2.5"/><path d="M10.5 18h3"/></symbol>
+    <symbol id="i-laptop" viewBox="0 0 24 24"><rect x="4.5" y="5" width="15" height="10.5" rx="1.5"/><path d="M2.5 19h19"/></symbol>
+    <symbol id="i-desktop" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="12" rx="1.5"/><path d="M9 20h6M12 16v4"/></symbol>
+    <symbol id="i-globe" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c2.5 2.6 3.8 5.6 3.8 9s-1.3 6.4-3.8 9c-2.5-2.6-3.8-5.6-3.8-9S9.5 5.6 12 3Z"/></symbol>
+    <symbol id="i-link" viewBox="0 0 24 24"><path d="M10 14a4.5 4.5 0 0 0 6.4 0l3-3a4.5 4.5 0 0 0-6.4-6.4l-1 1M14 10a4.5 4.5 0 0 0-6.4 0l-3 3a4.5 4.5 0 0 0 6.4 6.4l1-1"/></symbol>
+    <symbol id="i-send" viewBox="0 0 24 24"><path d="m21 3-9.5 9.5M21 3l-6.5 18-3-8.5L3 9.5 21 3Z"/></symbol>
+    <symbol id="i-edit" viewBox="0 0 24 24"><path d="M4 20h4L19 9l-4-4L4 16v4ZM13.5 6.5l4 4"/></symbol>
+    <symbol id="i-scan" viewBox="0 0 24 24"><path d="M4 8V5.5A1.5 1.5 0 0 1 5.5 4H8M16 4h2.5A1.5 1.5 0 0 1 20 5.5V8M20 16v2.5a1.5 1.5 0 0 1-1.5 1.5H16M8 20H5.5A1.5 1.5 0 0 1 4 18.5V16M4 12h16"/></symbol>
   </svg>
 
   <div class="app" id="app">
@@ -70,7 +79,7 @@
       </div>
       <button class="btn btn-tinted" id="connect-button" type="button" hidden>
         <svg class="icon" aria-hidden="true"><use href="#i-qr"/></svg>
-        <span>Add a device</span>
+        <span>Add device</span>
       </button>
     </header>
 
@@ -93,12 +102,42 @@
 
       <!-- Main view -->
       <div class="view" id="main-view" hidden>
+        <section class="nearby" id="nearby" aria-labelledby="nearby-title">
+          <div class="me-line">
+            <span class="me-icon" id="me-icon" aria-hidden="true"></span>
+            <div class="me-text">
+              <button class="me-name" id="me-name" type="button" title="Rename this device">
+                <span id="me-name-text">This device</span>
+                <svg class="icon" aria-hidden="true"><use href="#i-edit"/></svg>
+              </button>
+              <span class="me-status" id="me-status"></span>
+            </div>
+          </div>
+          <div class="section-head">
+            <h2 id="nearby-title">Nearby devices</h2>
+            <span class="section-meta" id="nearby-meta"></span>
+            <div class="section-tools">
+              <button class="btn btn-plain btn-small" id="select-all" type="button" hidden>Select all</button>
+            </div>
+          </div>
+          <ul class="device-grid" id="device-grid" aria-label="Nearby devices" hidden></ul>
+          <div class="nearby-empty card" id="nearby-empty">
+            <div class="radar" aria-hidden="true"><span></span><span></span><span></span>
+              <svg class="icon"><use href="#i-wifi"/></svg></div>
+            <h3>Looking for devices…</h3>
+            <p class="muted" id="nearby-empty-text">Open Open Transfer on your other devices — they’ll appear here.</p>
+            <button class="btn btn-tinted js-add-device" type="button">
+              <svg class="icon" aria-hidden="true"><use href="#i-qr"/></svg><span>Add a device</span>
+            </button>
+          </div>
+        </section>
+
         <section class="send" id="send-section" aria-labelledby="drop-title">
           <div class="dropzone" id="dropzone" role="button" tabindex="0" aria-describedby="drop-hint">
             <div class="drop-icon" aria-hidden="true"><svg class="icon"><use href="#i-upload"/></svg></div>
             <h1 class="drop-title" id="drop-title">
-              <span class="only-pointer">Drop files to share</span>
-              <span class="only-touch">Share files</span>
+              <span class="only-pointer" id="drop-title-pointer">Drop files to send</span>
+              <span class="only-touch" id="drop-title-touch">Send files</span>
             </h1>
             <p class="drop-sub">
               <span class="only-pointer">or <span class="link-like">choose from your computer</span></span>
@@ -109,7 +148,13 @@
           </div>
         </section>
 
-        <section class="transfers" id="transfers" aria-label="Transfers" hidden>
+        <section class="transfers" id="activity" aria-label="Transfers" hidden>
+          <div class="section-head"><h2>Transfers</h2></div>
+          <ul class="list card jobs" id="job-list"></ul>
+          <ul class="list card jobs" id="incoming-list"></ul>
+        </section>
+
+        <section class="transfers" id="transfers" aria-label="Uploads" hidden>
           <div class="section-head">
             <h2>Sending</h2>
             <span class="section-meta" id="transfers-meta"></span>
@@ -143,7 +188,7 @@
 
           <div class="empty card" id="empty" hidden>
             <div class="empty-icon" aria-hidden="true"><svg class="icon"><use href="#i-inbox"/></svg></div>
-            <h3>No files yet</h3>
+            <h3 id="empty-title">No files yet</h3>
             <p class="muted" id="empty-text">Files you send — or that others send to <span class="device-name">this computer</span> — will show up here.</p>
             <button class="btn btn-tinted" type="button" id="empty-connect">
               <svg class="icon" aria-hidden="true"><use href="#i-qr"/></svg>
@@ -187,7 +232,25 @@
   <div class="drop-overlay" id="drop-overlay" aria-hidden="true">
     <div class="drop-overlay-inner">
       <svg class="icon" aria-hidden="true"><use href="#i-upload"/></svg>
-      <p>Drop to share with <span class="device-name">everyone</span></p>
+      <p id="overlay-text">Drop to share with everyone</p>
+    </div>
+  </div>
+
+  <div class="send-bar" id="send-bar" role="region" aria-label="Send files" hidden>
+    <div class="send-bar-inner">
+      <div class="send-bar-info">
+        <span class="send-bar-files" id="send-bar-files"></span>
+        <span class="send-bar-to" id="send-bar-to"></span>
+      </div>
+      <div class="send-bar-actions">
+        <button class="btn btn-plain btn-small" id="send-clear" type="button">Clear</button>
+        <button class="btn btn-tinted" id="send-pick" type="button">
+          <svg class="icon" aria-hidden="true"><use href="#i-upload"/></svg><span>Add files</span>
+        </button>
+        <button class="btn btn-primary" id="send-go" type="button" disabled>
+          <svg class="icon" aria-hidden="true"><use href="#i-send"/></svg><span>Send</span>
+        </button>
+      </div>
     </div>
   </div>
 
@@ -198,22 +261,96 @@
       </button>
     </form>
     <h2 id="connect-title">Add a device</h2>
-    <p class="muted">Scan with a phone camera, or open the link on any device on the same Wi-Fi.</p>
-    <div class="qr-frame"><img id="qr-image" alt="QR code for the sharing link" width="200" height="200"></div>
-    <div class="url-field">
-      <code id="share-url" class="url-text"></code>
-      <button class="btn btn-tinted btn-small" type="button" id="copy-url">
-        <svg class="icon" aria-hidden="true"><use href="#i-copy"/></svg><span>Copy</span>
-      </button>
+    <div class="segmented" id="connect-tabs" role="tablist" aria-label="How to connect" hidden>
+      <button type="button" role="tab" data-tab="show" aria-selected="true" aria-controls="panel-show">Show code</button>
+      <button type="button" role="tab" data-tab="enter" aria-selected="false" aria-controls="panel-enter" tabindex="-1">Enter a code</button>
     </div>
-    <p class="pin-note" id="pin-note" hidden>PIN <strong id="pin-note-value"></strong> — the QR code includes it.</p>
-    <button class="btn btn-plain btn-block" type="button" id="share-url-button" hidden>
-      <svg class="icon" aria-hidden="true"><use href="#i-share"/></svg><span>Share link…</span>
-    </button>
-    <details class="other-urls" id="other-urls" hidden>
-      <summary>Other addresses</summary>
-      <ul id="other-url-list"></ul>
-    </details>
+    <div data-panel="show" id="panel-show" role="tabpanel">
+      <p class="muted" id="connect-lead">Scan with a phone camera, or open the link on any device on the same Wi-Fi.</p>
+      <div class="qr-frame"><img id="qr-image" alt="QR code to connect to this device" width="200" height="200"></div>
+      <div class="pair-code-block" id="pair-code-block" hidden>
+        <div class="pair-code" id="pair-code">––– –––</div>
+        <p class="pair-expiry"><span id="pair-expiry-text"></span> · <button class="link-button" id="new-code" type="button">New code</button></p>
+      </div>
+      <div class="url-field">
+        <code id="share-url" class="url-text"></code>
+        <button class="btn btn-tinted btn-small" type="button" id="copy-url">
+          <svg class="icon" aria-hidden="true"><use href="#i-copy"/></svg><span>Copy</span>
+        </button>
+      </div>
+      <p class="pin-note" id="pin-note" hidden>PIN <strong id="pin-note-value"></strong> — the QR code includes it.</p>
+      <button class="btn btn-plain btn-block" type="button" id="share-url-button" hidden>
+        <svg class="icon" aria-hidden="true"><use href="#i-share"/></svg><span>Share link…</span>
+      </button>
+      <details class="other-urls" id="other-urls" hidden>
+        <summary>Other addresses</summary>
+        <ul id="other-url-list"></ul>
+      </details>
+    </div>
+    <div data-panel="enter" id="panel-enter" role="tabpanel" hidden>
+      <p class="muted">Enter the code shown in Open Transfer on the other device. Paired devices can send to each other without asking.</p>
+      <form class="pair-form" id="pair-form" novalidate>
+        <label class="visually-hidden" for="pair-input">Pairing code</label>
+        <input class="pin-input pair-input" id="pair-input" inputmode="numeric" autocomplete="one-time-code"
+               maxlength="7" placeholder="000 000" spellcheck="false">
+        <details class="pair-address" id="pair-address-wrap">
+          <summary>Not found? Enter its address</summary>
+          <label class="visually-hidden" for="pair-address">Address</label>
+          <input class="text-input" id="pair-address" placeholder="192.168.1.20:5000" autocomplete="off" spellcheck="false">
+        </details>
+        <p class="field-error" id="pair-error" role="alert"></p>
+        <button class="btn btn-primary btn-large" type="submit" id="pair-submit">
+          <svg class="icon" aria-hidden="true"><use href="#i-link"/></svg><span>Pair</span>
+        </button>
+      </form>
+      <button class="btn btn-tinted btn-block" type="button" id="scan-button" hidden>
+        <svg class="icon" aria-hidden="true"><use href="#i-scan"/></svg><span>Scan its QR code</span>
+      </button>
+      <div class="scan-view" id="scan-view" hidden>
+        <video id="scan-video" playsinline muted></video>
+        <button class="btn btn-plain btn-small" type="button" id="scan-cancel">Cancel</button>
+      </div>
+    </div>
+  </dialog>
+
+  <dialog class="sheet incoming" id="incoming-dialog" aria-labelledby="incoming-title" aria-describedby="incoming-sub">
+    <div class="incoming-avatar" id="incoming-avatar" aria-hidden="true"></div>
+    <h2 id="incoming-title" tabindex="-1" autofocus>Someone wants to send you files</h2>
+    <p class="muted" id="incoming-sub"></p>
+    <ul class="incoming-files" id="incoming-files"></ul>
+    <p class="incoming-expiry" id="incoming-expiry"></p>
+    <div class="sheet-actions">
+      <button class="btn btn-tinted btn-large" type="button" id="incoming-decline">Decline</button>
+      <button class="btn btn-primary btn-large" type="button" id="incoming-accept">Accept</button>
+    </div>
+  </dialog>
+
+  <dialog class="sheet" id="confirm-dialog" aria-labelledby="confirm-title">
+    <form method="dialog">
+      <h2 id="confirm-title">Are you sure?</h2>
+      <p class="muted" id="confirm-text"></p>
+      <ul class="confirm-items" id="confirm-items"></ul>
+      <div class="sheet-actions">
+        <button class="btn btn-tinted btn-large" value="cancel">Cancel</button>
+        <button class="btn btn-primary btn-large" value="ok" id="confirm-ok">OK</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog class="sheet" id="rename-dialog" aria-labelledby="rename-title">
+    <form method="dialog" class="sheet-close-form">
+      <button class="icon-btn sheet-close" aria-label="Close" value="close">
+        <svg class="icon" aria-hidden="true"><use href="#i-x"/></svg>
+      </button>
+    </form>
+    <h2 id="rename-title">Device name</h2>
+    <p class="muted" id="rename-hint">Nearby devices see this name.</p>
+    <form class="rename-form" id="rename-form" novalidate>
+      <label class="visually-hidden" for="rename-input">Name</label>
+      <input class="text-input" id="rename-input" maxlength="40" autocomplete="off" required>
+      <p class="field-error" id="rename-error" role="alert"></p>
+      <button class="btn btn-primary btn-large" type="submit">Save</button>
+    </form>
   </dialog>
 
   <div class="toasts" id="toasts" aria-live="polite" aria-atomic="false"></div>

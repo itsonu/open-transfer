@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 from open_transfer.storage import (
+    FileBusy,
     IncompleteUpload,
     InsufficientStorage,
     InvalidName,
@@ -129,6 +130,43 @@ def test_delete_and_restore(storage: Storage) -> None:
     assert (storage.root / "a.txt").read_bytes() == b"abc"
     with pytest.raises(NotFound):
         storage.restore(token)
+
+
+def _busy_for(times: int, monkeypatch: pytest.MonkeyPatch) -> list[int]:
+    """Make moving a file fail like Windows does while it's still open elsewhere."""
+    real, calls = os.replace, [0]
+
+    def replace(src: str | os.PathLike[str], dst: str | os.PathLike[str]) -> None:
+        calls[0] += 1
+        if calls[0] <= times:
+            raise PermissionError(32, "The process cannot access the file")
+        real(src, dst)
+
+    monkeypatch.setattr("open_transfer.storage.os.replace", replace)
+    return calls
+
+
+def test_delete_waits_for_a_file_that_is_briefly_in_use(
+    storage: Storage, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    storage.save_stream("a.txt", io.BytesIO(b"abc"))
+    calls = _busy_for(2, monkeypatch)  # e.g. a download that just finished
+    token = storage.delete("a.txt")
+    assert calls[0] == 3
+    assert storage.files() == []
+    assert storage.restore(token).name == "a.txt"
+
+
+def test_delete_of_a_file_kept_open_is_a_clean_error(
+    storage: Storage, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    storage.save_stream("a.txt", io.BytesIO(b"abc"))
+    _busy_for(1000, monkeypatch)
+    with pytest.raises(FileBusy) as info:
+        storage.delete("a.txt")
+    assert info.value.status == 409
+    assert [f.name for f in storage.files()] == ["a.txt"]
+    assert not any(storage._trash.iterdir())
 
 
 def test_restore_after_name_reused(storage: Storage) -> None:

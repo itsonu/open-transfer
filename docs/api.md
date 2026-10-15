@@ -24,14 +24,14 @@ curl -b jar http://HOST:5000/api/files
 ## Endpoints
 
 ### `GET /api/health`
-`{"status": "ok", "version": "2.0.0"}` — for monitoring. Never requires a PIN.
+`{"status": "ok", "version": "3.0.0"}` — for monitoring. Never requires a PIN.
 
 ### `GET /api/info`
 Server name, version, auth state and — once authenticated — share URLs, permissions and limits.
 
 ```json
 {
-  "app": "Open Transfer", "version": "2.0.0", "device": "studio-mac",
+  "app": "Open Transfer", "version": "3.0.0", "device": "studio-mac",
   "auth": {"required": false, "authenticated": true, "numeric": false},
   "share_url": "http://192.168.1.24:5000",
   "urls": ["http://192.168.1.24:5000"],
@@ -100,3 +100,33 @@ QR code (SVG) for the share URL; includes the PIN when one is set.
 
 ### `POST /api/logout`
 Clears the session.
+
+## Nearby devices (web UI endpoints)
+
+These power the device grid. "Owner" means a request from the device itself
+(`127.0.0.1`); everyone else is a visitor. App-to-app endpoints
+(`/api/p2p/v1/*`) are documented in [protocol.md](protocol.md).
+
+| Endpoint | Who | What |
+| -------- | --- | ---- |
+| `GET /api/state` | anyone | `{me, host, devices, incoming, outgoing, discovery, pairing?, inbox?}` with an `ETag` (poll with `If-None-Match`) |
+| `POST /api/me` `{name, form?, platform?}` | anyone | Rename this device (owner) or how this browser appears (visitor) |
+| `POST /api/send` `{to: [ids], files: [{name, size, mime}]}` | anyone | Offer files to devices → `201 {job}` |
+| `PUT /api/send/<job>/files/<n>` | job creator | The file's bytes (`Content-Length` required), streamed to every receiver that accepted |
+| `DELETE /api/send/<job>` · `DELETE /api/send/<job>/targets/<id>` | job creator | Cancel everything / one receiver |
+| `POST /api/incoming/<id>/accept` · `/decline` · `DELETE /api/incoming/<id>` | the recipient | Answer or stop an incoming transfer |
+| `GET /api/inbox/files/<name>` · `DELETE …` · `GET /api/inbox/archive` | visitor | Files sent to this browser |
+| `POST /api/pair` `{code, address?}` | owner | Pair with the app showing `code` (found by multicast, or at `address`) |
+| `POST /api/devices` `{address}` | owner | Add an app by `host:port` |
+| `DELETE /api/pairs/<id>` · `POST /api/pair/new-code` · `GET /api/pair/qr.svg` | owner | Unpair · new code · QR with the code |
+
+Sending from a script, end to end:
+
+```bash
+APP=http://127.0.0.1:5000                      # your own app (owner)
+TO=$(curl -s $APP/api/state | jq -r '.devices[] | select(.name=="Gaming PC") | .id')
+JOB=$(curl -s -X POST $APP/api/send -H 'Content-Type: application/json' \
+  -d "{\"to\":[\"$TO\"],\"files\":[{\"name\":\"report.pdf\",\"size\":$(stat -c%s report.pdf)}]}" | jq -r .job.id)
+# …wait until .outgoing[].targets[].state is "accepted", then:
+curl -X PUT --data-binary @report.pdf $APP/api/send/$JOB/files/0
+```

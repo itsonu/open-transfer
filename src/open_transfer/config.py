@@ -74,11 +74,47 @@ class Config:
     reserve_disk_bytes: int = 256 * 1024**2
     #: Seconds a deleted file stays restorable ("Undo").
     trash_ttl: float = 30.0
-    #: Parallel connections the server accepts.
-    threads: int = 16
+    #: Parallel connections the server accepts (each transfer holds one).
+    threads: int = 32
+
+    # ---------------------------------------------------------- nearby devices
+    #: Name other devices see. Defaults to this computer's host name.
+    device_name: str | None = None
+    #: "computer", "phone" or "tablet" — picks the icon other devices show.
+    device_form: str = "computer"
+    #: "windows", "macos", "linux", "android"… Detected when left empty.
+    device_platform: str | None = None
+    #: Where the device identity and paired devices are kept.
+    #: Defaults to ``<storage_dir>/.open-transfer``.
+    state_dir: Path | None = None
+    #: Announce this device and find others on the local network (UDP multicast).
+    discovery: bool = True
+    discovery_port: int = 47823
+    #: Devices to connect to directly, as ``host:port`` (for networks that block multicast).
+    peers: tuple[str, ...] = ()
+    #: Accept incoming files without asking (for headless servers and NAS boxes).
+    auto_accept: bool = False
+    #: Only accept files from paired devices (AirDrop's "Contacts only").
+    paired_only: bool = False
+    #: Let browsers that connect to this device see and download its folder
+    #: (the classic shared-folder mode). Off by default: files are sent to
+    #: chosen devices instead.
+    share_folder: bool = False
+    #: Treat requests from this machine (127.0.0.1) as the device's owner, who
+    #: sees everything, needs no PIN and accepts incoming files.
+    owner_loopback: bool = True
 
     def __post_init__(self) -> None:
         self.storage_dir = Path(self.storage_dir).expanduser().resolve()
+        if self.state_dir is not None:
+            self.state_dir = Path(self.state_dir).expanduser().resolve()
+        if self.device_form not in {"computer", "phone", "tablet"}:
+            raise ValueError("device form must be computer, phone or tablet")
+        if not 1 <= self.discovery_port <= 65535:
+            raise ValueError("discovery port must be between 1 and 65535")
+        self.peers = tuple(p.strip() for p in self.peers if p.strip())
+        if self.device_name is not None:
+            self.device_name = self.device_name.strip() or None
         if self.pin is not None:
             self.pin = self.pin.strip() or None
         if self.pin is not None and not re.fullmatch(r"[0-9A-Za-z]{4,32}", self.pin):
@@ -90,3 +126,8 @@ class Config:
         self.allowed_hosts = tuple(h.strip().lower() for h in self.allowed_hosts if h.strip())
         if self.public_url:
             self.public_url = self.public_url.rstrip("/")
+
+    @property
+    def state_path(self) -> Path:
+        """Folder for the device identity, paired devices and session key."""
+        return self.state_dir or self.storage_dir / ".open-transfer"

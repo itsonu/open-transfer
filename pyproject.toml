@@ -56,6 +56,8 @@ dev = [
   "pip-audit>=2.7",
 ]
 e2e = ["playwright>=1.45"]
+# The desktop app's native window (WebView2 on Windows, WKWebView on macOS).
+desktop = ["pywebview>=5.3"]
 
 [project.scripts]
 open-transfer = "open_transfer.cli:main"
@@ -86,10 +88,11 @@ select = ["E", "W", "F", "I", "B", "UP", "S", "SIM", "C4", "RUF", "PT", "RET"]
 ignore = [
   "E501", # line length is handled by the formatter
   "S104", # binding to 0.0.0.0 is the whole point of a LAN server
+  "RUF001", # typographic apostrophes in user-facing messages are deliberate
 ]
 
 [tool.ruff.lint.per-file-ignores]
-"tests/**" = ["S101", "S105", "S106", "S108", "S310", "S603"]
+"tests/**" = ["S101", "S105", "S106", "S108", "S310", "S311", "S603"]
 
 [tool.mypy]
 python_version = "3.10"
