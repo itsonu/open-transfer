@@ -247,6 +247,9 @@
         <button class="btn btn-tinted" id="send-pick" type="button">
           <svg class="icon" aria-hidden="true"><use href="#i-upload"/></svg><span>Add files</span>
         </button>
+        <button class="btn btn-tinted" id="send-text" type="button">
+          <svg class="icon" aria-hidden="true"><use href="#i-edit"/></svg><span>Text</span>
+        </button>
         <button class="btn btn-primary" id="send-go" type="button" disabled>
           <svg class="icon" aria-hidden="true"><use href="#i-send"/></svg><span>Send</span>
         </button>
@@ -334,6 +337,25 @@
         <button class="btn btn-tinted btn-large" value="cancel">Cancel</button>
         <button class="btn btn-primary btn-large" value="ok" id="confirm-ok">OK</button>
       </div>
+    </form>
+  </dialog>
+
+  <dialog class="sheet" id="text-dialog" aria-labelledby="text-title">
+    <form method="dialog" class="sheet-close-form">
+      <button class="icon-btn sheet-close" aria-label="Close" value="close">
+        <svg class="icon" aria-hidden="true"><use href="#i-x"/></svg>
+      </button>
+    </form>
+    <h2 id="text-title">Share text</h2>
+    <p class="muted">Type or paste text — it’s sent as a <code>.txt</code> file, so any device can receive it, with or without the app.</p>
+    <form id="text-form" novalidate>
+      <label class="visually-hidden" for="text-input">Text to share</label>
+      <textarea class="text-input" id="text-input" rows="6" maxlength="200000" placeholder="Paste a link, an address, a code…" required></textarea>
+      <label class="visually-hidden" for="text-filename">File name (optional)</label>
+      <input class="text-input" id="text-filename" maxlength="80" autocomplete="off" spellcheck="false" placeholder="note.txt (optional)">
+      <p class="field-error" id="text-error" role="alert"></p>
+      <p class="muted" id="text-count"></p>
+      <button class="btn btn-primary btn-large" type="submit" id="text-submit">Add text</button>
     </form>
   </dialog>
 

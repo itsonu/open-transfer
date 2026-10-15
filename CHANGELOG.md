@@ -4,6 +4,16 @@ All notable changes are documented here. The format follows [Keep a Changelog](h
 
 ## [Unreleased]
 
+### Added
+- **Retry after decline**: declined/failed/expired transfers show a Retry button (per job and per device) backed by `POST /api/send/<job>/retry`, so the receiver gets a fresh Accept? prompt.
+- **Share text**: the send bar has a Text button that sends typed text as a `.txt` file; received text files get a Copy button.
+
+### Fixed
+- `/api/info` no longer leaks the PIN to authenticated visitors (owner-only); proxy-spoofed owner bypass closed when `--behind-proxy` is used.
+- P2P client no longer throws `UnboundLocalError` on connection errors; `ACCEPTED`/`RECEIVING` sessions expire instead of leaking; visitor/incoming/signal stores are bounded.
+- Windows: long deduped Unicode names no longer fail deletes (`\\?\` extended paths); owner-only 403s drain the request body (no more connection resets).
+- Web UI: API timeouts, safe WebRTC message parsing, receiver-side direct-transfer size caps, upload timeouts, QR encoding, dialog focus handling.
+
 ## [3.0.0] — 2026-10-15
 
 Open Transfer becomes AirDrop-like across platforms: every device runs the app, devices find each other, and files go **directly to the devices you pick** instead of into one shared folder.

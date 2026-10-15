@@ -45,7 +45,7 @@ def zip_stream(paths: Iterable[Path]) -> Iterator[bytes]:
                 # are clamped instead of aborting a half-sent download.
                 info = zipfile.ZipInfo.from_file(path, arcname=path.name, strict_timestamps=False)
                 src = path.open("rb")
-            except FileNotFoundError:  # deleted while the archive was streaming
+            except OSError:  # deleted / replaced while the archive was streaming
                 continue
             info.compress_type = zipfile.ZIP_STORED
             with src, archive.open(info, "w", force_zip64=True) as dst:

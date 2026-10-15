@@ -2,8 +2,16 @@
 
 export const $ = (selector, root = document) => root.querySelector(selector);
 
+function readBoot() {
+  try {
+    return JSON.parse(document.getElementById("boot").textContent);
+  } catch {
+    return { app: "Open Transfer", version: "", device: "", owner: false, auth: { required: false, authenticated: true } };
+  }
+}
+
 export const state = {
-  info: JSON.parse(document.getElementById("boot").textContent),
+  info: readBoot(),
 };
 
 export const can = (perm) => Boolean(state.info.permissions?.[perm]);
@@ -104,17 +112,26 @@ export class ApiError extends Error {
   }
 }
 
-export async function api(path, { method = "GET", json, headers = {} } = {}) {
+const API_TIMEOUT_MS = 20000;
+
+export async function api(path, { method = "GET", json, headers = {}, timeout = API_TIMEOUT_MS, signal } = {}) {
   const init = { method, credentials: "same-origin", headers: { Accept: "application/json", ...headers } };
   if (json !== undefined) {
     init.body = JSON.stringify(json);
     init.headers["Content-Type"] = "application/json";
   }
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), timeout);
+  if (signal) signal.addEventListener("abort", () => ctrl.abort(), { once: true });
+  init.signal = ctrl.signal;
   let res;
   try {
     res = await fetch(path, init);
-  } catch {
+  } catch (err) {
+    if (err?.name === "AbortError") throw new ApiError(0, "timeout", "The sharing computer is taking too long to answer.");
     throw new ApiError(0, "network", "Can’t reach the sharing computer.");
+  } finally {
+    clearTimeout(timer);
   }
   if (res.status === 304) return { notModified: true, res };
   const body = (res.headers.get("Content-Type") || "").includes("json") ? await res.json().catch(() => null) : null;
@@ -131,8 +148,11 @@ export async function api(path, { method = "GET", json, headers = {} } = {}) {
 export function toast(message, { tone = "info", icon: iconName, action, duration = 3200 } = {}) {
   const host = $("#toasts");
   while (host.children.length >= 3) host.firstElementChild.remove();
-  let timer;
+  let timer = 0;
+  let gone = false;
   const close = () => {
+    if (gone) return;
+    gone = true;
     clearTimeout(timer);
     el.classList.add("is-leaving");
     setTimeout(() => el.remove(), 260);

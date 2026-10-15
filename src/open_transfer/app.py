@@ -152,8 +152,18 @@ def create_app(config: Config | None = None) -> Flask:
         """The person using this device: requests from the machine itself."""
         if not config.owner_loopback:
             return False
+        # When behind a reverse proxy, ProxyFix rewrites remote_addr from
+        # X-Forwarded-For (spoofable). Use the real socket peer instead.
+        addr = request.remote_addr or ""
+        if config.trust_proxy:
+            orig = request.environ.get("werkzeug.proxy_fix.orig")
+            if isinstance(orig, dict) and orig.get("remote_addr"):
+                addr = str(orig["remote_addr"])
+            else:
+                # No trustworthy peer info: fail closed.
+                return False
         try:
-            return ipaddress.ip_address(request.remote_addr or "").is_loopback
+            return ipaddress.ip_address(addr).is_loopback
         except ValueError:
             return False
 
@@ -260,7 +270,10 @@ def create_app(config: Config | None = None) -> Flask:
                 shared_folder=config.share_folder,
                 limits={"max_upload_size": config.max_upload_size},
                 storage={"free": storage.usage()["free"]},
-                pin=config.pin,
+                # Only the owner (loopback) may see the PIN, e.g. to show it
+                # next to the QR code. Authenticated visitors must not learn
+                # it from /api/info (XSS / shoulder-surfing would leak it).
+                pin=config.pin if owner else None,
             )
         return info
 
@@ -473,6 +486,8 @@ def create_app(config: Config | None = None) -> Flask:
     @app.post("/api/trash/<token>/restore")
     def restore_file(token: str) -> Response:
         require_browse()
+        if not can_delete():
+            return error(403, "delete_disabled", "Deleting is turned off on this computer.")
         restored = storage.restore(token)
         log.info("Restored %s (by %s)", log_safe(restored.name), client_id())
         return jsonify({"file": restored.to_dict()})

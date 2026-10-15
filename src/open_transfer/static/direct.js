@@ -45,6 +45,14 @@ function withTimeout(promise, ms, what) {
 }
 
 /** Route connection messages that arrived for this page. */
+function safeParse(text) {
+  try {
+    return JSON.parse(text);
+  } catch {
+    return null;
+  }
+}
+
 export function handleSignals(signals, ctx) {
   for (const s of signals) {
     if (s.job && s.kind === "answer") {
@@ -54,7 +62,15 @@ export function handleSignals(signals, ctx) {
         /* the sender will time out and fall back */
       });
     } else if (s.session && s.kind === "bye") {
-      receivers.get(s.session)?.pc.close();
+      const entry = receivers.get(s.session);
+      if (entry) {
+        try {
+          entry.pc.close();
+        } catch {
+          /* already closed */
+        }
+        receivers.delete(s.session);
+      }
     }
   }
 }
@@ -78,12 +94,17 @@ export async function sendDirect({ job, target, files, onProgress, signal }) {
     let closed = false;
     channel.addEventListener("message", (event) => {
       if (typeof event.data !== "string") return;
-      const msg = JSON.parse(event.data);
-      if (msg.t === "done") acks.get(msg.i)?.();
+      const msg = safeParse(event.data);
+      if (msg?.t === "done" && acks.has(msg.i)) {
+        const done = acks.get(msg.i);
+        acks.delete(msg.i);
+        done?.();
+      }
     });
     channel.addEventListener("close", () => {
       closed = true;
       for (const ack of acks.values()) ack(new Error("closed"));
+      acks.clear();
     });
 
     await pc.setLocalDescription(await pc.createOffer());
@@ -91,7 +112,9 @@ export async function sendDirect({ job, target, files, onProgress, signal }) {
     const answered = new Promise((resolve) => answers.set(key, resolve));
     await api("/api/signal", { method: "POST", json: { job, target, kind: "offer", sdp: JSON.stringify(pc.localDescription) } });
     const answer = await withTimeout(answered, CONNECT_TIMEOUT, "answer");
-    await pc.setRemoteDescription(JSON.parse(answer.sdp));
+    const remote = safeParse(answer.sdp);
+    if (!remote) throw new Error("bad answer");
+    await pc.setRemoteDescription(remote);
     await withTimeout(
       new Promise((resolve, reject) => {
         if (channel.readyState === "open") return resolve();
@@ -104,6 +127,7 @@ export async function sendDirect({ job, target, files, onProgress, signal }) {
 
     let sent = 0;
     for (const [index, file] of files.entries()) {
+      if (file.size > DIRECT_MAX_BYTES) throw new Error("file too large for direct transfer");
       const acked = new Promise((resolve, reject) => acks.set(index, (err) => (err ? reject(err) : resolve())));
       channel.send(JSON.stringify({ t: "file", i: index, name: file.name, size: file.size, mime: file.type || "application/octet-stream" }));
       for (let offset = 0; offset < file.size; offset += CHUNK) {
@@ -135,11 +159,21 @@ export async function sendDirect({ job, target, files, onProgress, signal }) {
 async function receive(offer, ctx) {
   const session = ctx.session(offer.session);
   if (!session || !["accepted", "receiving"].includes(session.state)) return;
-  receivers.get(offer.session)?.pc.close();
+  const prev = receivers.get(offer.session);
+  if (prev) {
+    try {
+      prev.pc.close();
+    } catch {
+      /* already closed */
+    }
+    receivers.delete(offer.session);
+  }
   const pc = new RTCPeerConnection({ iceServers: [] });
   receivers.set(offer.session, { pc });
   pc.addEventListener("datachannel", (event) => attach(event.channel, offer.session, pc, ctx));
-  await pc.setRemoteDescription(JSON.parse(offer.sdp));
+  const remote = safeParse(offer.sdp);
+  if (!remote) return;
+  await pc.setRemoteDescription(remote);
   await pc.setLocalDescription(await pc.createAnswer());
   await gathered(pc);
   await api("/api/signal", { method: "POST", json: { session: offer.session, kind: "answer", sdp: JSON.stringify(pc.localDescription) } });
@@ -155,22 +189,37 @@ function attach(channel, sessionId, pc, ctx) {
     });
 
   channel.addEventListener("message", async (event) => {
-    if (typeof event.data !== "string") {
-      if (!current) return;
-      current.chunks.push(event.data);
-      current.received += event.data.byteLength;
-      ctx.progress?.(sessionId, current.index, current.received);
-      const now = Date.now();
-      if (now - lastReport > 1000) {
-        lastReport = now;
-        report(current.index, current.received);
+    try {
+      if (typeof event.data !== "string") {
+        if (!current) return;
+        // Enforce the receiver-side cap: a malicious peer can't OOM us.
+        if (current.received + event.data.byteLength > DIRECT_MAX_BYTES + 1024) {
+          channel.close();
+          return;
+        }
+        current.chunks.push(event.data);
+        current.received += event.data.byteLength;
+        if (current.received > current.size) {
+          channel.close();
+          return;
+        }
+        ctx.progress?.(sessionId, current.index, current.received);
+        const now = Date.now();
+        if (now - lastReport > 1000) {
+          lastReport = now;
+          report(current.index, current.received);
+        }
+        return;
       }
-      return;
-    }
-    const msg = JSON.parse(event.data);
-    if (msg.t === "file") {
-      current = { index: msg.i, name: msg.name, size: msg.size, mime: msg.mime, chunks: [], received: 0 };
-    } else if (msg.t === "end" && current && current.index === msg.i) {
+      const msg = safeParse(event.data);
+      if (!msg || typeof msg.t !== "string") return;
+      if (msg.t === "file") {
+        if (!Number.isInteger(msg.i) || !Number.isInteger(msg.size) || msg.size < 0 || msg.size > DIRECT_MAX_BYTES) {
+          channel.close();
+          return;
+        }
+        current = { index: msg.i, name: String(msg.name || "file").slice(0, 240), size: msg.size, mime: String(msg.mime || "application/octet-stream").slice(0, 100), chunks: [], received: 0 };
+      } else if (msg.t === "end" && current && current.index === msg.i) {
       const file = current;
       current = null;
       if (file.received !== file.size) {
@@ -184,6 +233,9 @@ function attach(channel, sessionId, pc, ctx) {
     } else if (msg.t === "bye") {
       setTimeout(() => pc.close(), 500);
       receivers.delete(sessionId);
+    }
+    } catch {
+      /* malformed message from peer: ignore, sender falls back to relay */
     }
   });
   channel.addEventListener("close", () => receivers.delete(sessionId));

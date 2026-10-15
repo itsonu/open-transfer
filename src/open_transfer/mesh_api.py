@@ -33,7 +33,7 @@ from open_transfer.archive import zip_stream
 from open_transfer.devices import clean_form, clean_name, clean_platform, valid_id
 from open_transfer.mesh import P2P, Mesh, MeshError, Viewer
 from open_transfer.security import log_safe
-from open_transfer.storage import IncompleteUpload
+from open_transfer.storage import IncompleteUpload, StorageError
 
 PUBLIC_P2P_ENDPOINTS = {
     "p2p_info",
@@ -167,7 +167,7 @@ def register(
             )
         except (ClientDisconnected, ConnectionError) as exc:
             raise IncompleteUpload("The transfer was interrupted before it finished.") from exc
-        except MeshError:
+        except (MeshError, StorageError):
             _drain_body()
             raise
         return jsonify({"file": saved.to_dict()}), 201
@@ -242,7 +242,7 @@ def register(
             result = mesh.job_upload(job_id, current, index, request.stream, request.content_length)
         except (ClientDisconnected, ConnectionError) as exc:
             raise IncompleteUpload("The upload was interrupted before it finished.") from exc
-        except MeshError:
+        except (MeshError, StorageError):
             _drain_body()
             raise
         return jsonify(result)
@@ -269,10 +269,30 @@ def register(
     @app.post("/api/send/<job_id>/targets/<target_id>/direct")
     def ui_send_direct(job_id: str, target_id: str) -> Response:
         data = body_json()
-        mesh.set_direct(
-            job_id, viewer(), target_id, str(data.get("state", "")), int(data.get("sent") or 0)
-        )
+        try:
+            sent = int(data.get("sent") or 0)
+        except (TypeError, ValueError) as exc:
+            raise MeshError(400, "bad_request", "Invalid progress.") from exc
+        if sent < 0:
+            raise MeshError(400, "bad_request", "Invalid progress.")
+        mesh.set_direct(job_id, viewer(), target_id, str(data.get("state", "")), sent)
         return jsonify({"ok": True})
+
+    @app.post("/api/send/<job_id>/retry")
+    def ui_send_retry(job_id: str) -> tuple[Response, int]:
+        """Retry a finished job: re-offer its files to declined/failed targets.
+
+        The sender's page re-uploads the file bytes (it still holds the File
+        objects); this endpoint just creates the fresh offers so the receiver
+        is asked again.
+        """
+        current = viewer()
+        data = request.get_json(silent=True) or {}
+        targets = data.get("to") if isinstance(data, dict) else None
+        if targets is not None and not isinstance(targets, list):
+            raise MeshError(400, "bad_request", "Invalid targets.")
+        job = mesh.retry_job(job_id, current, list(targets) if targets is not None else None)
+        return jsonify({"job": mesh._job_view(job)}), 201
 
     @app.post("/api/incoming/<session_id>/direct")
     def ui_incoming_direct(session_id: str) -> Response:
@@ -340,20 +360,25 @@ def register(
             'attachment; filename="open-transfer.zip"; '
             f"filename*=UTF-8''{quote(f'Open Transfer {stamp}.zip')}"
         )
+        response.headers["Cache-Control"] = "no-store"
         return response
 
     # -------------------------------------------------------- owner: devices
 
     @app.post("/api/devices")
     def ui_add_device() -> Response:
+        # Read the body before the owner check so Windows doesn't reset the
+        # connection when we answer 403 without draining the request.
+        data = body_json()
         owner_only()
-        peer = mesh.connect(str(body_json().get("address", "")))
+        peer = mesh.connect(str(data.get("address", "")))
         return jsonify({"device": {"id": peer.id, "name": peer.name}})
 
     @app.post("/api/pair")
     def ui_pair() -> Response:
-        owner_only()
+        # Read the body before the owner check (see above).
         data = body_json()
+        owner_only()
         address = str(data.get("address") or "").strip() or None
         peer = mesh.pair_with(str(data.get("code", "")), address)
         return jsonify({"device": {"id": peer.id, "name": peer.name}})

@@ -3,7 +3,7 @@
 // file list · shared-folder uploads · drag/drop/paste · PIN · boot.
 // lib.js has the helpers, nearby.js the devices, sending and pairing.
 
-import { $, api, can, formatBytes, formatDuration, guessKind, h, icon, plural, relativeTime, setLockHandler, state, toast } from "./lib.js";
+import { $, api, can, copyText, formatBytes, formatDuration, guessKind, h, icon, plural, relativeTime, setLockHandler, state, toast } from "./lib.js";
 import { announceSelf, busy, fetchState, forgetDirectFile, initNearby, isDeviceMode, mesh, openAddDevice, stageFiles } from "./nearby.js";
 
 const POLL_MS = 1500;
@@ -212,9 +212,35 @@ function buildFileRow(file) {
   const sub = h("span", { class: "row-sub" });
   if (file.direct) sub.dataset.direct = "1";
   const openNative = nativeApp()?.openFile && libraryMode() === "owner";
+  const copyable = file.mime === "text/plain" && file.size <= 200000 && file.name.toLowerCase().endsWith(".txt");
   const actions = h(
     "div",
     { class: "row-actions" },
+    copyable &&
+      h(
+        "button",
+        {
+          class: "icon-btn",
+          type: "button",
+          "aria-label": `Copy ${file.name}`,
+          title: "Copy text",
+          onclick: async (event) => {
+            const btn = event.currentTarget;
+            btn.disabled = true;
+            try {
+              const res = await fetch(file.url || fileUrl(file.name));
+              const text = await res.text();
+              const ok = await copyText(text.slice(0, 200000));
+              toast(ok ? "Copied to clipboard" : "Couldn’t copy — open the file and copy manually", { icon: "copy" });
+            } catch {
+              toast("Couldn’t copy — open the file and copy manually", { tone: "error", icon: "alert" });
+            } finally {
+              btn.disabled = false;
+            }
+          },
+        },
+        icon("copy"),
+      ),
     openNative
       ? h("button", { class: "icon-btn is-accent", type: "button", "aria-label": `Open ${file.name}`, title: "Open", onclick: () => nativeApp().openFile(file.name) }, icon("download"))
       : h("a", { class: "icon-btn is-accent", href, download: file.name, "aria-label": `Download ${file.name}`, title: "Download" }, icon("download")),

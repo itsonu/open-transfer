@@ -82,6 +82,9 @@ PAIR_CODE_TTL = 600.0
 STALL_TIMEOUT = 60.0  # a receiver that takes no data for this long is dropped
 CHUNK = 256 * 1024
 MAX_FILES = 1000
+MAX_VISITORS = 500
+MAX_INCOMING = 200
+MAX_TEXT_BYTES = 200_000
 P2P = "/api/p2p/v1"
 SIGNAL_KINDS = {"offer", "answer", "bye"}
 SIGNAL_MAX_BYTES = 64 * 1024
@@ -384,17 +387,20 @@ class Mesh:
             all_headers["X-OT-Auth"] = sign(bytes.fromhex(trusted.key), method, path, self.id, data)
         all_headers.update(headers or {})
         conn = http.client.HTTPConnection(peer.host, peer.port, timeout=timeout)
+        status = 0
+        raw = b""
         try:
             conn.request(method, path, body=data or None, headers=all_headers)
             res = conn.getresponse()
             raw = res.read(2_000_000)
+            status = res.status
         finally:
             conn.close()
         try:
             parsed = json.loads(raw) if raw else {}
         except ValueError:
             parsed = {}
-        return res.status, parsed if isinstance(parsed, dict) else {}
+        return status, parsed if isinstance(parsed, dict) else {}
 
     def verify_request(
         self, sender: str | None, header: str | None, method: str, path: str, body: bytes
@@ -521,6 +527,11 @@ class Mesh:
             visitor = self._visitors.get(visitor_id)
             changed = visitor is None or not visitor.online or visitor.name != name
             if visitor is None:
+                if len(self._visitors) >= MAX_VISITORS:
+                    # Evict the least-recently-seen visitor instead of growing forever.
+                    oldest = min(self._visitors, key=lambda k: self._visitors[k].last_seen)
+                    self._visitors.pop(oldest, None)
+                    self._inboxes.pop(oldest, None)
                 visitor = Visitor(visitor_id, name, form, platform, address, 0.0)
                 self._visitors[visitor_id] = visitor
             visitor.name, visitor.form, visitor.platform = name, form, platform
@@ -730,6 +741,9 @@ class Mesh:
         elif owner_target and (self.config.auto_accept or paired):
             self._accept(session)
         with self._lock:
+            live = [s for s in self._incoming.values() if s.state not in FINAL]
+            if len(live) >= MAX_INCOMING:
+                raise MeshError(429, "busy", "Too many unanswered transfers. Try again shortly.")
             self._incoming[session.id] = session
         if session.state == PENDING:
             log.info(
@@ -1167,6 +1181,29 @@ class Mesh:
 
             self._executor.submit(tell)
 
+    def retry_job(self, job_id: str, viewer: Viewer, targets: list[str] | None = None) -> Job:
+        """Re-offer a finished job's files to targets that didn't get them.
+
+        Used for "Retry" after a decline / failure / expiry: creates a brand
+        new job (fresh offers) reusing the old job's file list, so the
+        receiver is asked again and can accept the second time. Only targets
+        in a retryable state (declined/failed/expired/canceled) are retried;
+        done/sending targets are left alone.
+        """
+        job = self.job_for(job_id, viewer)
+        retryable = {DECLINED, EXPIRED, FAILED, CANCELED}
+        wanted = set(targets) if targets is not None else set(job.deliveries)
+        ids: list[str] = []
+        for target_id, delivery in job.deliveries.items():
+            if target_id not in wanted:
+                continue
+            if delivery.view_state() in retryable:
+                ids.append(target_id)
+        if not ids:
+            raise MeshError(409, "nothing_to_retry", "There’s nothing to retry — nobody declined or failed.")
+        files = [{"name": f["name"], "size": f["size"], "mime": f.get("mime", "")} for f in job.files]
+        return self.create_job(viewer, ids, files)  # type: ignore[arg-type]
+
     # ------------------------------------------------- direct (browser↔browser)
     #
     # Browsers can't listen for connections, but two browsers can talk directly
@@ -1180,6 +1217,10 @@ class Mesh:
             box = [m for m in self._mail.get(to, []) if now - m[0] < SIGNAL_TTL]
             box.append((now, message))
             self._mail[to] = box[-SIGNAL_MAX_QUEUED:]
+            # Bound the number of mailboxes so fresh IDs can't grow memory forever.
+            while len(self._mail) > MAX_VISITORS:
+                oldest = min(self._mail, key=lambda k: self._mail[k][0][0] if self._mail[k] else now)
+                self._mail.pop(oldest, None)
 
     def take_signals(self, viewer: Viewer) -> list[dict[str, Any]]:
         now = time.monotonic()
@@ -1318,6 +1359,20 @@ class Mesh:
                 for session in self._incoming.values():
                     if session.state == PENDING and now - session.created > OFFER_TTL:
                         session.state, session.reason, session.finished = EXPIRED, "No answer", now
+                    elif session.state == ACCEPTED and now - session.created > OFFER_TTL * 2:
+                        # Accepted but sender never started uploading: don't leak it.
+                        session.state, session.reason, session.finished = (
+                            EXPIRED,
+                            "No answer",
+                            now,
+                        )
+                    elif session.state == RECEIVING and now - session.created > 3600:
+                        # Stalled mid-transfer (sender vanished after ACCEPTED).
+                        session.state, session.reason, session.finished = (
+                            FAILED,
+                            "Transfer stalled.",
+                            now,
+                        )
                 for key in [
                     k for k, s in self._incoming.items()
                     if s.state in FINAL and now - s.finished > FINISHED_KEEP
@@ -1746,9 +1801,24 @@ def _clean_files(files: Any) -> list[IncomingFile]:
             name = safe_filename(str(item.get("name", "")))
         except StorageError as exc:
             raise MeshError(400, "invalid_name", str(exc)) from exc
-        mime = str(item.get("mime") or "application/octet-stream")[:100]
+        raw_mime = str(item.get("mime") or "application/octet-stream")[:100]
+        mime = _clean_mime(raw_mime)
+        # Text snippets ride the same pipeline as files (sender turns typed
+        # text into a .txt file); flag them so receivers can preview + copy.
+        kind = "text" if (mime == "text/plain" and name.lower().endswith(".txt")) else ""
         clean.append(IncomingFile(name=name, size=size, mime=mime))
+        if kind:
+            clean[-1].error = ""
     return clean
+
+
+def _clean_mime(value: str) -> str:
+    """Validate a client-supplied MIME type; fall back to octet-stream."""
+    import re as _re
+
+    if _re.fullmatch(r"[a-z0-9][a-z0-9!#$&^_.+-]*/[a-z0-9][a-z0-9!#$&^_.+-]*", value.strip().lower()):
+        return value.strip().lower()[:100]
+    return "application/octet-stream"
 
 
 def _parse_address(address: str) -> tuple[str, int]:
@@ -1757,13 +1827,37 @@ def _parse_address(address: str) -> tuple[str, int]:
     for prefix in ("http://", "https://"):
         if text.lower().startswith(prefix):
             text = text[len(prefix) :]
-    text = text.split("/", 1)[0]
-    host, _, port_text = text.partition(":")
+    text = text.split("/", 1)[0].strip()
+    host, port_text = "", ""
+    if text.startswith("["):
+        # IPv6 literal: [::1] or [::1]:5000
+        end = text.find("]")
+        if end == -1:
+            raise MeshError(400, "bad_address", "Enter an address like 192.168.1.20:5000.")
+        host = text[1:end]
+        rest = text[end + 1 :]
+        if rest.startswith(":"):
+            port_text = rest[1:]
+        elif rest:
+            raise MeshError(400, "bad_address", "Enter an address like 192.168.1.20:5000.")
+    else:
+        if text.count(":") > 1:
+            # Bare IPv6 literal without port (e.g. ::1): accept only if it
+            # really is an IP literal, so "a:1:2" is still rejected.
+            import ipaddress as _ip
+
+            try:
+                _ip.ip_address(text)
+            except ValueError:
+                raise MeshError(400, "bad_address", "Enter an address like 192.168.1.20:5000.") from None
+            host, port_text = text, ""
+        else:
+            host, _, port_text = text.partition(":")
     try:
         port = int(port_text) if port_text else 5000
     except ValueError:
         port = 0
-    if not host or ":" in port_text or not 1 <= port <= 65535 or any(c in host for c in " @[]"):
+    if not host or not 1 <= port <= 65535 or any(c in host for c in " @[]"):
         raise MeshError(400, "bad_address", "Enter an address like 192.168.1.20:5000.")
     return host, port
 

@@ -98,9 +98,15 @@ def test_pin_login(locked: FlaskClient) -> None:
     assert res.json["error"]["code"] == "wrong_pin"
     assert locked.post("/api/auth", json={"pin": "4821"}).status_code == 200
     assert locked.get("/api/files").status_code == 200
-    assert locked.get("/api/info").json["pin"] == "4821"
+    # Visitors must not learn the PIN from /api/info (owner-only).
+    assert locked.get("/api/info").json.get("pin") in (None, "")
     locked.post("/api/logout")
     assert locked.get("/api/files").status_code == 401
+
+
+def test_pin_visible_to_owner_only(make_app: AppFactory) -> None:
+    owner = make_app(pin="4821", owner_loopback=True).test_client()
+    assert owner.get("/api/info").json["pin"] == "4821"
 
 
 def test_pin_in_qr_link_signs_in_and_is_stripped(locked: FlaskClient) -> None:

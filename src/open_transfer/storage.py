@@ -119,6 +119,11 @@ def safe_filename(name: str) -> str:
         keep = MAX_NAME_BYTES - len(ext_bytes)
         base = base.encode("utf-8")[:keep].decode("utf-8", "ignore").rstrip(" .")
         name = base + ext_bytes.decode("utf-8", "ignore")
+    # Re-validate after truncation: a crafted long name could otherwise become
+    # empty or hidden (".ext") — an invisible, undeletable orphan.
+    name = name.strip(" .")
+    if not name or name.startswith(".") or not is_listable_name(name):
+        raise InvalidName("File name is empty or not allowed.")
     return name
 
 
@@ -306,10 +311,27 @@ class Storage:
         holder.mkdir()
         # Windows won't move a file that is still open: a download or preview that
         # just finished can hold it for a moment longer, so try again briefly.
+        def _move(src: Path, dst: Path) -> None:
+            # Windows MAX_PATH (~260 chars): deep temp dirs + a 122-char
+            # deduped Unicode name exceed it, so use extended-length paths.
+            if os.name == "nt":
+                os.replace(_extended(src), _extended(dst))
+            else:
+                os.replace(src, dst)
+
+        # Windows won't move a file that is still open: a download or preview that
+        # just finished can hold it for a moment longer, so try again briefly.
         for _ in range(DELETE_ATTEMPTS):
             try:
-                os.replace(path, holder / path.name)
+                _move(path, holder / path.name)
                 return token
+            except FileNotFoundError:
+                if not path.is_file():
+                    holder.rmdir()
+                    raise NotFound("That file is no longer here.") from None
+                # Source exists but the move failed (e.g. long dest path that
+                # even extended prefixes can't fix): wait briefly, then report busy.
+                time.sleep(0.1)
             except PermissionError:
                 time.sleep(0.1)
         holder.rmdir()
@@ -351,6 +373,16 @@ def _iter_chunks(stream: Readable) -> Iterator[bytes]:
         if not chunk:
             return
         yield chunk
+
+
+def _extended(path: Path) -> str:
+    """Extended-length path (``\\\\?\\C:\\...``) so Windows bypasses MAX_PATH."""
+    text = os.path.abspath(os.fspath(path))
+    if text.startswith("\\\\?\\"):
+        return text
+    if text.startswith("\\\\"):
+        return "\\\\?\\UNC\\" + text[2:]
+    return "\\\\?\\" + text
 
 
 def _human(size: int) -> str:

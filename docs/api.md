@@ -114,6 +114,7 @@ These power the device grid. "Owner" means a request from the device itself
 | `POST /api/send` `{to: [ids], files: [{name, size, mime}]}` | anyone | Offer files to devices → `201 {job}` |
 | `PUT /api/send/<job>/files/<n>` | job creator | The file's bytes (`Content-Length` required), streamed to every receiver that accepted |
 | `DELETE /api/send/<job>` · `DELETE /api/send/<job>/targets/<id>` | job creator | Cancel everything / one receiver |
+| `POST /api/send/<job>/retry` `{to?: [ids]}` | job creator | Re-offer the job's files to declined/failed/expired targets → `201 {job}` (receiver is asked again) |
 | `POST /api/incoming/<id>/accept` · `/decline` · `DELETE /api/incoming/<id>` | the recipient | Answer or stop an incoming transfer |
 | `GET /api/inbox/files/<name>` · `DELETE …` · `GET /api/inbox/archive` | visitor | Files sent to this browser |
 | `POST /api/pair` `{code, address?}` | owner | Pair with the app showing `code` (found by multicast, or at `address`) |

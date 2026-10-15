@@ -138,6 +138,7 @@ async function fetchSignals() {
 const directReceiver = {
   session: (id) => mesh.data?.incoming.find((s) => s.id === id),
   file(file) {
+    if (file.size > DIRECT_MAX_BYTES) return;
     const taken = new Set([...mesh.directFiles.map((f) => f.name), ...(mesh.data?.inbox || []).map((f) => f.name)]);
     let name = file.name;
     for (let n = 1; taken.has(name); n += 1) {
@@ -154,6 +155,15 @@ const directReceiver = {
       direct: true,
       saved: false,
     });
+    // Cap in-memory files so a peer can't OOM this page.
+    while (mesh.directFiles.length > 50) {
+      const old = mesh.directFiles.pop();
+      try {
+        URL.revokeObjectURL(old.url);
+      } catch {
+        /* already revoked */
+      }
+    }
     if (!state.info.owner) ctx.libraryChanged(inboxFiles());
   },
 };
@@ -381,6 +391,54 @@ export function stageFiles(files) {
   toast(count ? `${plural(mesh.staged.length, "file")} ready — choose who to send to` : "Files ready — waiting for a device to appear", { icon: "send" });
 }
 
+export function stageText(text, filename = "") {
+  const clean = String(text || "").replace(/\r\n/g, "\n");
+  if (!clean.trim()) return null;
+  if (clean.length > 200000) throw new Error("That text is too long (200,000 characters max).");
+  let name = String(filename || "").trim() || `note-${new Date().toISOString().slice(0, 16).replace("T", "-").replace(":", "")}.txt`;
+  if (!name.toLowerCase().endsWith(".txt")) name += ".txt";
+  const file = new File([clean], name, { type: "text/plain" });
+  stageFiles([file]);
+  return file;
+}
+
+function setupTextDialog() {
+  const dialog = $("#text-dialog");
+  if (!dialog) return;
+  const input = $("#text-input");
+  const nameInput = $("#text-filename");
+  const count = $("#text-count");
+  const update = () => {
+    count.textContent = input.value ? `${input.value.length.toLocaleString()} / 200,000 characters` : "";
+  };
+  input.addEventListener("input", () => {
+    $("#text-error").textContent = "";
+    update();
+  });
+  $("#send-text")?.addEventListener("click", () => {
+    $("#text-error").textContent = "";
+    update();
+    dialog.showModal();
+    requestAnimationFrame(() => input.focus());
+  });
+  $("#text-form")?.addEventListener("submit", (event) => {
+    event.preventDefault();
+    try {
+      const file = stageText(input.value, nameInput.value);
+      if (!file) {
+        $("#text-error").textContent = "Type something first.";
+        return;
+      }
+      input.value = "";
+      nameInput.value = "";
+      update();
+      dialog.close();
+    } catch (err) {
+      $("#text-error").textContent = err.message;
+    }
+  });
+}
+
 function renderSendBar() {
   const bar = $("#send-bar");
   const files = mesh.staged;
@@ -586,10 +644,30 @@ function finishJob(job, outcome) {
   const failed = targets.filter((t) => ["failed", "expired", "canceled"].includes(t.state));
   const done = targets.filter((t) => t.state === "done");
   if (outcome === "nobody") {
-    if (declined.length === targets.length && targets.length) toast(targets.length === 1 ? `${targets[0].name} declined` : "Everyone declined", { tone: "error", icon: "x" });
-    else if (failed.length) toast(failed[0].reason || `Couldn’t send to ${failed[0].name}`, { tone: "error", icon: "alert" });
+    if (declined.length === targets.length && targets.length) {
+      toast(targets.length === 1 ? `${targets[0].name} declined — you can ask again` : "Everyone declined — you can ask again", {
+        tone: "error",
+        icon: "x",
+        action: { label: "Retry", run: () => retryJob(job) },
+        duration: 6000,
+      });
+    } else if (failed.length) toast(failed[0].reason || `Couldn’t send to ${failed[0].name}`, { tone: "error", icon: "alert" });
   } else if (done.length && !failed.length && !declined.length) {
     toast(done.length === 1 ? `Sent to ${done[0].name}` : `Sent to ${plural(done.length, "device")}`, { tone: "success", icon: "check" });
+  } else if (declined.length) {
+    toast(declined.length === 1 ? `${declined[0].name} declined — retry to ask again` : `${declined.length} declined — retry to ask again`, {
+      tone: "error",
+      icon: "x",
+      action: { label: "Retry", run: () => retryJob(job) },
+      duration: 6000,
+    });
+  }
+  // Bound retained jobs (each holds File blobs): keep retryable ones for the
+  // user to dismiss, evict the oldest finished beyond 20.
+  const finished = [...mesh.jobs.values()].filter((j) => j.state === "finished");
+  if (finished.length > 20) {
+    finished.sort((a, b) => a.finishedAt - b.finishedAt);
+    for (const old of finished.slice(0, finished.length - 20)) mesh.jobs.delete(old.id);
   }
   renderJobs();
   setTimeout(() => {
@@ -617,6 +695,7 @@ function uploadNext(job) {
   job.fileLoaded = 0;
   xhr.open("PUT", `/api/send/${encodeURIComponent(job.id)}/files/${job.index}`);
   xhr.responseType = "json";
+  xhr.timeout = 120000;
   xhr.setRequestHeader("Accept", "application/json");
   xhr.setRequestHeader("Content-Type", "application/octet-stream");
   xhr.upload.addEventListener("progress", (event) => {
@@ -654,6 +733,11 @@ function uploadNext(job) {
     relayDone(job);
     toast(job.error, { tone: "error", icon: "alert" });
   });
+  xhr.addEventListener("timeout", () => {
+    job.error = "Sending timed out. Check your Wi-Fi and retry.";
+    relayDone(job);
+    toast(job.error, { tone: "error", icon: "alert" });
+  });
   xhr.addEventListener("abort", () => {
     job.xhr = null;
   });
@@ -688,16 +772,40 @@ async function skipWaiting(job) {
   ctx.requestPoll();
 }
 
-function retryJob(job) {
+const RETRYABLE = new Set(["declined", "failed", "expired", "canceled"]);
+
+async function retryJob(job, onlyTarget = null) {
   const view = serverJob(job.id);
   const online = new Set(onlineDevices().map((d) => d.id));
-  const ids = (view?.targets || []).filter((t) => ["failed", "expired", "canceled"].includes(t.state) && online.has(t.id)).map((t) => t.id);
+  let ids = (view?.targets || []).filter((t) => RETRYABLE.has(t.state) && online.has(t.id)).map((t) => t.id);
+  if (onlyTarget) ids = ids.filter((id) => id === onlyTarget);
   if (!ids.length) {
     toast("Those devices aren’t nearby right now.", { tone: "error", icon: "alert" });
     return;
   }
-  mesh.jobs.delete(job.id);
-  startSend(ids, job.files);
+  // Prefer the server-side retry (fresh offers, same file list) so a decline
+  // becomes a new "Accept?" prompt on the other side. Fall back to a brand
+  // new send when the job already expired server-side (e.g. after reload).
+  try {
+    const { data } = await api(`/api/send/${encodeURIComponent(job.id)}/retry`, {
+      method: "POST",
+      json: { to: ids },
+    });
+    const files = job.files;
+    mesh.jobs.delete(job.id);
+    const fresh = { id: data.job.id, files, targets: ids, state: "waiting", index: 0, uploaded: 0, speed: 0, xhr: null, finishedAt: 0, retried: true };
+    mesh.jobs.set(fresh.id, fresh);
+    mesh.data.outgoing.push(data.job);
+    toast(ids.length === 1 ? `Asking ${deviceName(ids[0])} again…` : `Asking ${ids.length} devices again…`, { icon: "retry" });
+  } catch {
+    mesh.jobs.delete(job.id);
+    await startSend(ids, job.files);
+    return;
+  }
+  renderDevices();
+  renderSendBar();
+  renderJobs();
+  ctx.requestPoll();
 }
 
 let jobRenderQueued = false;
@@ -746,7 +854,7 @@ function renderJobs() {
     else headline = formatBytes(view.total);
     const anyWaiting = view.targets.some((t) => t.state === "waiting" || t.state === "offering");
     const anyAccepted = view.targets.some((t) => t.state === "accepted");
-    const retryable = view.targets.some((t) => ["failed", "expired"].includes(t.state));
+    const retryable = view.targets.some((t) => RETRYABLE.has(t.state));
     const active = jobActive(job);
     row.replaceChildren(
       h(
@@ -782,12 +890,25 @@ function renderJobs() {
           if (t.direct === "trying") text = "Connecting directly…";
           else if (t.direct === "sending") text = `Directly · ${Math.floor(pct)}%`;
           else if (t.direct === "done") text = "Delivered directly";
+          const canRetryTarget = RETRYABLE.has(original.state) && onlineDevices().some((d) => d.id === original.id);
           return h(
             "li",
             { class: "job-target", dataset: { state: t.state } },
             h("span", { class: "mini-avatar", "aria-hidden": "true" }, icon(deviceIcon(t))),
             h("span", { class: "job-target-name" }, t.name),
             h("span", { class: "job-target-state" }, text),
+            canRetryTarget &&
+              h(
+                "button",
+                {
+                  class: "icon-btn is-accent",
+                  type: "button",
+                  title: original.state === "declined" ? `Ask ${original.name} again` : `Retry ${original.name}`,
+                  "aria-label": original.state === "declined" ? `Ask ${original.name} again` : `Retry ${original.name}`,
+                  onclick: () => retryJob(job, original.id),
+                },
+                icon("retry"),
+              ),
             h("span", { class: "progress", role: "progressbar", "aria-label": `${t.name}: ${text}`, "aria-valuemin": "0", "aria-valuemax": "100", "aria-valuenow": String(Math.round(pct)) }, h("span", { class: "progress-bar", style: { transform: `scaleX(${pct / 100})` } })),
           );
         }),
@@ -849,6 +970,8 @@ function saveInboxFile(name) {
   a.remove();
 }
 
+let lastFocus = null;
+
 function showNextPrompt() {
   const dialog = $("#incoming-dialog");
   const current = mesh.promptId && mesh.data.incoming.find((s) => s.id === mesh.promptId);
@@ -857,6 +980,8 @@ function showNextPrompt() {
     if (current && current.state === "canceled") toast(`${current.from.name} canceled`, { icon: "x" });
     mesh.promptId = null;
     if (dialog.open) dialog.close();
+    if (lastFocus?.isConnected) lastFocus.focus();
+    lastFocus = null;
   }
   if (mesh.promptId) {
     updatePromptCountdown(current);
@@ -868,7 +993,12 @@ function showNextPrompt() {
     if (!s) continue;
     mesh.promptId = id;
     fillPrompt(s);
-    if (!dialog.open) dialog.showModal();
+    if (!dialog.open) {
+      lastFocus = document.activeElement;
+      dialog.showModal();
+      // Move focus into the dialog for keyboard + screen-reader users.
+      requestAnimationFrame(() => $("#incoming-accept").focus());
+    }
     return;
   }
 }
@@ -1032,7 +1162,7 @@ function fillPairing() {
   $("#pair-code").textContent = formatCode(pairing.code);
   $("#pair-code").setAttribute("aria-label", `Pairing code ${pairing.code.split("").join(" ")}`);
   const qr = $("#qr-image");
-  const src = `/api/pair/qr.svg?c=${pairing.code}`;
+  const src = `/api/pair/qr.svg?c=${encodeURIComponent(pairing.code)}`;
   if (qr.getAttribute("src") !== src) qr.src = src;
   const minutes = Math.max(1, Math.round(pairing.expires_in / 60));
   $("#pair-expiry-text").textContent = `Changes in ${minutes} min`;
@@ -1150,7 +1280,13 @@ async function startScan() {
 function stopScanner() {
   if (!scanner) return;
   scanner.stopped = true;
-  for (const track of scanner.stream.getTracks()) track.stop();
+  try {
+    for (const track of scanner.stream.getTracks()) track.stop();
+  } catch {
+    /* camera already stopped */
+  }
+  const video = $("#scan-video");
+  if (video) video.srcObject = null;
   scanner = null;
   $("#scan-view").hidden = true;
 }
@@ -1228,6 +1364,7 @@ export function initNearby(context) {
   ctx = { ...ctx, ...context };
   setupConnectSheet();
   setupRename();
+  setupTextDialog();
   $("#select-all").addEventListener("click", () => {
     const online = onlineDevices();
     const allSelected = online.every((d) => mesh.selected.has(d.id));
@@ -1250,7 +1387,7 @@ export function initNearby(context) {
     if (!document.hidden && document.title.startsWith("●")) document.title = "Open Transfer";
   });
   setInterval(() => {
-    if (mesh.data) {
+    if (mesh.data && !document.hidden) {
       renderDevices();
       renderIncomingRows();
     }

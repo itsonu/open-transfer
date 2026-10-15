@@ -78,7 +78,13 @@ def same_origin(request: Request) -> bool:
     origin = request.headers.get("Origin")
     if origin and origin != "null":
         return urlsplit(origin).netloc.lower() == request.host.lower()
-    return origin != "null"
+    if origin == "null":
+        return False
+    # Fall back to Referer for older browsers that send neither header.
+    referer = request.headers.get("Referer")
+    if referer:
+        return urlsplit(referer).netloc.lower() == request.host.lower()
+    return True
 
 
 def pin_matches(expected: str, supplied: str) -> bool:
@@ -123,6 +129,16 @@ class RateLimiter:
         """
         now = time.monotonic()
         with self._lock:
+            # Periodically evict stale keys so spoofed-client flooding can't
+            # grow the dict forever (cap at ~10k entries).
+            if len(self._hits) > 10_000:
+                stale = [
+                    k for k, v in self._hits.items() if not v or now - v[-1] > self.window
+                ]
+                for k in stale:
+                    self._hits.pop(k, None)
+                while len(self._hits) > 10_000:
+                    self._hits.pop(next(iter(self._hits)), None)
             hits = self._prune(key, now)
             if len(hits) >= self.attempts:
                 return max(0.001, self.window - (now - hits[0]))
@@ -135,8 +151,12 @@ class RateLimiter:
 
 
 def log_safe(value: object) -> str:
-    """Neutralise line breaks so client-supplied text can't forge log lines."""
-    return str(value).replace("\r", "\\r").replace("\n", "\\n")
+    """Neutralise line breaks and terminal escapes in client-supplied text."""
+    text = str(value).replace("\r", "\\r").replace("\n", "\\n")
+    # Strip ANSI escape sequences and other control characters that could
+    # drive terminal codes in logs.
+    text = text.replace("\x1b", "\\x1b").replace("\x07", "\\a")
+    return "".join(c if c >= " " or c in ("\t",) else f"\\x{ord(c):02x}" for c in text)
 
 
 def apply_security_headers(response: Response) -> Response:
