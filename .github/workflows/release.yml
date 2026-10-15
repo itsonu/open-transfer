@@ -38,6 +38,8 @@ jobs:
               sys.exit(f"Tag {tag} does not match __version__ {version}")
           print(f"Releasing {tag}")
           PY
+      - name: CHANGELOG.md has a dated section for this version
+        run: python scripts/release_notes.py "$TAG"
       - run: pip install build && python -m build
       - uses: actions/upload-artifact@v7
         with:
@@ -149,6 +151,9 @@ jobs:
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@v7
+      - name: Release notes from CHANGELOG.md
+        run: python3 scripts/release_notes.py "$TAG" > "$RUNNER_TEMP/notes.md"
       - uses: actions/download-artifact@v8
         with:
           path: artifacts
@@ -159,4 +164,4 @@ jobs:
           target_commitish: ${{ github.sha }}
           name: Open Transfer ${{ env.TAG }}
           files: artifacts/*
-          generate_release_notes: true
+          body_path: ${{ runner.temp }}/notes.md

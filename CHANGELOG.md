@@ -25,11 +25,14 @@ Open Transfer becomes AirDrop-like across platforms: every device runs the app, 
 - Requests from the device itself (`127.0.0.1`) are its owner: no PIN needed, sees received files and the Accept prompts.
 - The front end is split into ES modules (`lib.js`, `nearby.js`, `app.js`); still no build step.
 - The macOS command-line build is now `open-transfer-macos-arm64-cli.tar.gz`; Windows also ships `open-transfer-windows-x64-cli.exe`.
+- The Docker image runs on Python 3.14 (`python:3.14-slim`, was 3.13).
+- GitHub release notes are now this changelog section (`scripts/release_notes.py`); a release fails if the section is missing or undated.
+- CI and release workflows use the current major versions of their GitHub Actions (Node 24 runtime).
+- README and website footers credit the maintainer with a link to their portfolio.
 
 ### Fixed
 - Windows: deleting a file right after it was downloaded or previewed failed with a server error while the file was still open; it now waits a moment, or says the file is in use.
 - Package `Changelog` URL pointed at a `main` branch that doesn't exist; it now uses `master`.
-- README and website footers credit the maintainer with a link to their portfolio.
 
 ### Known limitations
 - Transfers between devices are plain HTTP on the LAN (not encrypted).
