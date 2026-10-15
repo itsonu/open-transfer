@@ -132,9 +132,7 @@ class RateLimiter:
             # Periodically evict stale keys so spoofed-client flooding can't
             # grow the dict forever (cap at ~10k entries).
             if len(self._hits) > 10_000:
-                stale = [
-                    k for k, v in self._hits.items() if not v or now - v[-1] > self.window
-                ]
+                stale = [k for k, v in self._hits.items() if not v or now - v[-1] > self.window]
                 for k in stale:
                     self._hits.pop(k, None)
                 while len(self._hits) > 10_000:

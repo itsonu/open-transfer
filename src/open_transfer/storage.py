@@ -309,6 +309,7 @@ class Storage:
         token = secrets.token_urlsafe(12)
         holder = self._trash / token
         holder.mkdir()
+
         # Windows won't move a file that is still open: a download or preview that
         # just finished can hold it for a moment longer, so try again briefly.
         def _move(src: Path, dst: Path) -> None:

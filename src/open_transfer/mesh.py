@@ -1200,9 +1200,13 @@ class Mesh:
             if delivery.view_state() in retryable:
                 ids.append(target_id)
         if not ids:
-            raise MeshError(409, "nothing_to_retry", "There’s nothing to retry — nobody declined or failed.")
-        files = [{"name": f["name"], "size": f["size"], "mime": f.get("mime", "")} for f in job.files]
-        return self.create_job(viewer, ids, files)  # type: ignore[arg-type]
+            raise MeshError(
+                409, "nothing_to_retry", "There’s nothing to retry — nobody declined or failed."
+            )
+        files = [
+            {"name": f["name"], "size": f["size"], "mime": f.get("mime", "")} for f in job.files
+        ]
+        return self.create_job(viewer, ids, files)
 
     # ------------------------------------------------- direct (browser↔browser)
     #
@@ -1219,7 +1223,9 @@ class Mesh:
             self._mail[to] = box[-SIGNAL_MAX_QUEUED:]
             # Bound the number of mailboxes so fresh IDs can't grow memory forever.
             while len(self._mail) > MAX_VISITORS:
-                oldest = min(self._mail, key=lambda k: self._mail[k][0][0] if self._mail[k] else now)
+                oldest = min(
+                    self._mail, key=lambda k: self._mail[k][0][0] if self._mail[k] else now
+                )
                 self._mail.pop(oldest, None)
 
     def take_signals(self, viewer: Viewer) -> list[dict[str, Any]]:
@@ -1816,7 +1822,9 @@ def _clean_mime(value: str) -> str:
     """Validate a client-supplied MIME type; fall back to octet-stream."""
     import re as _re
 
-    if _re.fullmatch(r"[a-z0-9][a-z0-9!#$&^_.+-]*/[a-z0-9][a-z0-9!#$&^_.+-]*", value.strip().lower()):
+    if _re.fullmatch(
+        r"[a-z0-9][a-z0-9!#$&^_.+-]*/[a-z0-9][a-z0-9!#$&^_.+-]*", value.strip().lower()
+    ):
         return value.strip().lower()[:100]
     return "application/octet-stream"
 
@@ -1849,7 +1857,9 @@ def _parse_address(address: str) -> tuple[str, int]:
             try:
                 _ip.ip_address(text)
             except ValueError:
-                raise MeshError(400, "bad_address", "Enter an address like 192.168.1.20:5000.") from None
+                raise MeshError(
+                    400, "bad_address", "Enter an address like 192.168.1.20:5000."
+                ) from None
             host, port_text = text, ""
         else:
             host, _, port_text = text.partition(":")
