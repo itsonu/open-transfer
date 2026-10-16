@@ -63,6 +63,10 @@
     <symbol id="i-globe" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c2.5 2.6 3.8 5.6 3.8 9s-1.3 6.4-3.8 9c-2.5-2.6-3.8-5.6-3.8-9S9.5 5.6 12 3Z"/></symbol>
     <symbol id="i-link" viewBox="0 0 24 24"><path d="M10 14a4.5 4.5 0 0 0 6.4 0l3-3a4.5 4.5 0 0 0-6.4-6.4l-1 1M14 10a4.5 4.5 0 0 0-6.4 0l-3 3a4.5 4.5 0 0 0 6.4 6.4l1-1"/></symbol>
     <symbol id="i-send" viewBox="0 0 24 24"><path d="m21 3-9.5 9.5M21 3l-6.5 18-3-8.5L3 9.5 21 3Z"/></symbol>
+    <symbol id="i-pause" viewBox="0 0 24 24"><path d="M9 5v14M15 5v14"/></symbol>
+    <symbol id="i-play" viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></symbol>
+    <symbol id="i-folder" viewBox="0 0 24 24"><path d="M3 6a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></symbol>
+    <symbol id="i-clock" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></symbol>
     <symbol id="i-edit" viewBox="0 0 24 24"><path d="M4 20h4L19 9l-4-4L4 16v4ZM13.5 6.5l4 4"/></symbol>
     <symbol id="i-scan" viewBox="0 0 24 24"><path d="M4 8V5.5A1.5 1.5 0 0 1 5.5 4H8M16 4h2.5A1.5 1.5 0 0 1 20 5.5V8M20 16v2.5a1.5 1.5 0 0 1-1.5 1.5H16M8 20H5.5A1.5 1.5 0 0 1 4 18.5V16M4 12h16"/></symbol>
   </svg>
@@ -145,6 +149,7 @@
             </p>
             <p class="drop-hint" id="drop-hint"></p>
             <input type="file" id="file-input" multiple hidden>
+            <input type="file" id="folder-input" hidden webkitdirectory>
           </div>
         </section>
 
@@ -161,6 +166,17 @@
             <button class="btn btn-plain btn-small" id="clear-transfers" type="button" hidden>Clear</button>
           </div>
           <ul class="list card" id="transfer-list"></ul>
+        </section>
+
+        <section class="transfers" id="history-section" aria-label="Recent transfers" hidden>
+          <div class="section-head">
+            <h2>Recent</h2>
+            <span class="section-meta" id="history-meta"></span>
+            <div class="section-tools">
+              <button class="btn btn-plain btn-small" id="clear-history" type="button">Clear</button>
+            </div>
+          </div>
+          <ul class="list card" id="history-list"></ul>
         </section>
 
         <section class="library" id="library" aria-labelledby="library-title">
@@ -247,6 +263,9 @@
         <button class="btn btn-tinted" id="send-pick" type="button">
           <svg class="icon" aria-hidden="true"><use href="#i-upload"/></svg><span>Add files</span>
         </button>
+        <button class="btn btn-tinted" id="send-folder" type="button" title="Zip a folder and send it">
+          <svg class="icon" aria-hidden="true"><use href="#i-folder"/></svg><span>Folder</span>
+        </button>
         <button class="btn btn-tinted" id="send-text" type="button">
           <svg class="icon" aria-hidden="true"><use href="#i-edit"/></svg><span>Text</span>
         </button>
@@ -289,6 +308,23 @@
         <summary>Other addresses</summary>
         <ul id="other-url-list"></ul>
       </details>
+      <div class="invite-block" id="invite-block" hidden>
+        <div class="invite-head">
+          <svg class="icon" aria-hidden="true"><use href="#i-link"/></svg>
+          <span>Guest link</span>
+          <span class="muted" id="invite-expiry"></span>
+        </div>
+        <p class="muted invite-note">Single use, expires in 10 min — lets one guest in past the PIN, then dies.</p>
+        <div class="url-field" id="invite-field" hidden>
+          <code id="invite-url" class="url-text"></code>
+          <button class="btn btn-tinted btn-small" type="button" id="invite-copy">
+            <svg class="icon" aria-hidden="true"><use href="#i-copy"/></svg><span>Copy</span>
+          </button>
+        </div>
+        <button class="btn btn-tinted btn-block" type="button" id="invite-new">
+          <svg class="icon" aria-hidden="true"><use href="#i-link"/></svg><span>New guest link…</span>
+        </button>
+      </div>
     </div>
     <div data-panel="enter" id="panel-enter" role="tabpanel" hidden>
       <p class="muted">Enter the code shown in Open Transfer on the other device. Paired devices can send to each other without asking.</p>
@@ -340,22 +376,50 @@
     </form>
   </dialog>
 
-  <dialog class="sheet" id="text-dialog" aria-labelledby="text-title">
+  <dialog class="sheet text-sheet" id="text-dialog" aria-labelledby="text-title">
     <form method="dialog" class="sheet-close-form">
       <button class="icon-btn sheet-close" aria-label="Close" value="close">
         <svg class="icon" aria-hidden="true"><use href="#i-x"/></svg>
       </button>
     </form>
-    <h2 id="text-title">Share text</h2>
-    <p class="muted">Type or paste text — it’s sent as a <code>.txt</code> file, so any device can receive it, with or without the app.</p>
+    <div class="text-head">
+      <span class="text-head-icon" aria-hidden="true"><svg class="icon"><use href="#i-edit"/></svg></span>
+      <div class="text-head-text">
+        <h2 id="text-title">Share text</h2>
+        <p class="muted">Sent as a <code>.txt</code> file — any device can receive it, with or without the app.</p>
+      </div>
+    </div>
+    <div class="chip-row" role="group" aria-label="Insert a template">
+      <button class="chip" type="button" data-template="link">🔗 Link</button>
+      <button class="chip" type="button" data-template="wifi">📶 Wi-Fi</button>
+      <button class="chip" type="button" data-template="code">💻 Code</button>
+      <button class="chip" type="button" data-template="note">📝 Note</button>
+    </div>
     <form id="text-form" novalidate>
       <label class="visually-hidden" for="text-input">Text to share</label>
-      <textarea class="text-input" id="text-input" rows="6" maxlength="200000" placeholder="Paste a link, an address, a code…" required></textarea>
+      <div class="text-area-wrap">
+        <textarea class="text-input text-area" id="text-input" rows="7" maxlength="200000" placeholder="Paste a link, an address, a password, a code…" required></textarea>
+        <button class="icon-btn text-clear" type="button" id="text-clear" aria-label="Clear text" title="Clear" hidden>
+          <svg class="icon" aria-hidden="true"><use href="#i-x"/></svg>
+        </button>
+      </div>
+      <div class="text-meter" aria-hidden="true"><span class="text-meter-fill" id="text-meter-fill"></span></div>
+      <div class="text-meta">
+        <p class="muted text-hint" id="text-count">0 / 200,000</p>
+        <p class="muted text-hint" id="text-lines">1 line · 0 words</p>
+      </div>
       <label class="visually-hidden" for="text-filename">File name (optional)</label>
-      <input class="text-input" id="text-filename" maxlength="80" autocomplete="off" spellcheck="false" placeholder="note.txt (optional)">
+      <div class="text-name-row">
+        <svg class="icon text-name-icon" aria-hidden="true"><use href="#i-doc"/></svg>
+        <input class="text-input text-name" id="text-filename" maxlength="80" autocomplete="off" spellcheck="false" placeholder="note.txt (optional)">
+      </div>
       <p class="field-error" id="text-error" role="alert"></p>
-      <p class="muted" id="text-count"></p>
-      <button class="btn btn-primary btn-large" type="submit" id="text-submit">Add text</button>
+      <div class="sheet-actions text-actions">
+        <button class="btn btn-tinted btn-large" type="button" id="text-cancel">Cancel</button>
+        <button class="btn btn-primary btn-large" type="submit" id="text-submit">
+          <svg class="icon" aria-hidden="true"><use href="#i-send"/></svg><span>Add text</span>
+        </button>
+      </div>
     </form>
   </dialog>
 

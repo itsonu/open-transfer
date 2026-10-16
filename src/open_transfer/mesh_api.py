@@ -41,6 +41,7 @@ PUBLIC_P2P_ENDPOINTS = {
     "p2p_offer",
     "p2p_offer_status",
     "p2p_offer_upload",
+    "p2p_offer_file_status",
     "p2p_offer_cancel",
     "p2p_pair",
     "p2p_pair_confirm",
@@ -157,6 +158,35 @@ def register(
 
     @app.put(f"{P2P}/offers/<session_id>/files/<int:index>")
     def p2p_offer_upload(session_id: str, index: int) -> tuple[Response, int]:
+        from open_transfer.chunks import parse_content_range
+
+        # Chunked resume: apps sending big files can split them into
+        # ``Content-Range`` pieces; a lost connection resumes mid-file.
+        content_range = request.headers.get("Content-Range")
+        if content_range:
+            parsed = parse_content_range(content_range)
+            if parsed is None:
+                raise MeshError(400, "bad_range", "Invalid Content-Range header.")
+            start, end, total = parsed
+            try:
+                data = request.get_data(cache=False)
+            except (ClientDisconnected, ConnectionError) as exc:
+                raise IncompleteUpload("The transfer was interrupted before it finished.") from exc
+            if len(data) != end - start + 1:
+                raise MeshError(400, "bad_range", "Chunk size doesn’t match Content-Range.")
+            try:
+                result = mesh.receive_chunk(
+                    session_id,
+                    index,
+                    start,
+                    data,
+                    total,
+                    secret=request.headers.get("X-OT-Secret", ""),
+                )
+            except (MeshError, StorageError):
+                _drain_body()
+                raise
+            return jsonify(result), 201 if result.get("done") else 308
         try:
             saved = mesh.receive_file(
                 session_id,
@@ -171,6 +201,19 @@ def register(
             _drain_body()
             raise
         return jsonify({"file": saved.to_dict()}), 201
+
+    @app.get(f"{P2P}/offers/<session_id>/files/<int:index>/status")
+    def p2p_offer_file_status(session_id: str, index: int) -> Response:
+        """Bytes staged for one incoming file (lets senders resume mid-file)."""
+        try:
+            return jsonify(
+                mesh.incoming_chunk_status(
+                    session_id, index, request.headers.get("X-OT-Secret", "")
+                )
+            )
+        except (MeshError, StorageError):
+            _drain_body()
+            raise
 
     @app.delete(f"{P2P}/offers/<session_id>")
     def p2p_offer_cancel(session_id: str) -> Response:
@@ -237,7 +280,40 @@ def register(
 
     @app.put("/api/send/<job_id>/files/<int:index>")
     def ui_send_file(job_id: str, index: int) -> Response:
+        from open_transfer.chunks import parse_content_range
+
         current = viewer()
+        # Chunked path: big files arrive as 2 MiB pieces with
+        # ``Content-Range: bytes <start>-<end>/<total>`` + ``X-Upload-Id``.
+        # One dropped chunk costs one retry, not the whole file.
+        content_range = request.headers.get("Content-Range")
+        if content_range:
+            parsed = parse_content_range(content_range)
+            if parsed is None:
+                raise MeshError(400, "bad_range", "Invalid Content-Range header.")
+            start, end, _total = parsed
+            upload_id = (request.headers.get("X-Upload-Id") or "").strip()[:64]
+            if not upload_id:
+                raise MeshError(400, "bad_request", "Missing X-Upload-Id header.")
+            try:
+                data = request.get_data(cache=False)
+            except (ClientDisconnected, ConnectionError) as exc:
+                raise IncompleteUpload("The upload was interrupted before it finished.") from exc
+            if len(data) != end - start + 1:
+                raise MeshError(400, "bad_range", "Chunk size doesn’t match Content-Range.")
+            try:
+                result = mesh.relay_append(job_id, current, index, upload_id, start, data)
+            except (MeshError, StorageError):
+                _drain_body()
+                raise
+            status = 201 if result.get("done") else 308
+            response = jsonify(result)
+            response.status_code = status
+            if status == 308:
+                response.headers["Range"] = (
+                    f"bytes=0-{result['received'] - 1}" if result["received"] else "bytes=*/0"
+                )
+            return response
         try:
             result = mesh.job_upload(job_id, current, index, request.stream, request.content_length)
         except (ClientDisconnected, ConnectionError) as exc:
@@ -246,6 +322,15 @@ def register(
             _drain_body()
             raise
         return jsonify(result)
+
+    @app.get("/api/send/<job_id>/files/<int:index>/status")
+    def ui_send_file_status(job_id: str, index: int) -> Response:
+        """How many bytes of a chunked upload already arrived (for resume)."""
+        current = viewer()
+        upload_id = (request.args.get("upload_id") or "").strip()[:64]
+        if not upload_id:
+            raise MeshError(400, "bad_request", "Missing upload_id.")
+        return jsonify(mesh.relay_status(job_id, current, index, upload_id))
 
     @app.delete("/api/send/<job_id>")
     def ui_send_cancel(job_id: str) -> Response:
@@ -409,6 +494,30 @@ def register(
         return Response(
             buffer.getvalue(), mimetype="image/svg+xml", headers={"Cache-Control": "no-store"}
         )
+
+    # ------------------------------------------------- one-time invite links
+    #
+    # A single-use URL (``/?invite=…``) that lets exactly one visitor in —
+    # even past the PIN — then expires. The owner mints them from the
+    # "Add device" sheet; each shows a countdown and dies after one use.
+
+    @app.post("/api/invites")
+    def ui_invite_create() -> Response:
+        data = request.get_json(silent=True) or {}
+        owner_only()
+        try:
+            ttl = float(data.get("ttl", 600))
+        except (TypeError, ValueError):
+            raise MeshError(400, "bad_request", "Invalid expiry.") from None
+        ttl = min(max(ttl, 60), 3600)
+        invite = mesh.create_invite(ttl=ttl, single_use=True)
+        url = f"{share_url()}/?invite={invite['token']}"
+        return jsonify({**invite, "url": url})
+
+    @app.get("/api/invites")
+    def ui_invite_info() -> Response:
+        owner_only()
+        return jsonify(mesh.invite_info())
 
 
 def _clean_origin(origin: dict[str, Any], sender: dict[str, Any]) -> dict[str, Any]:

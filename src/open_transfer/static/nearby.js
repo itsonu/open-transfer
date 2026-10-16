@@ -3,7 +3,8 @@
 // and renaming this device.
 
 import { DIRECT_MAX_BYTES, directSupported, handleSignals, sendDirect } from "./direct.js";
-import { $, ApiError, api, copyText, formatBytes, formatDuration, guessKind, h, icon, plural, state, toast } from "./lib.js";
+import { $, ApiError, addHistory, api, chunkLimits, copyText, formatBytes, formatDuration, guessKind, h, icon, newUploadId, plural, pushSample, shouldChunk, sparklineSVG, state, toast, uploadParallel } from "./lib.js";
+import { collectDropped, zipFiles, zipName } from "./zip.js";
 
 const PLATFORM = { windows: "Windows", macos: "Mac", linux: "Linux", android: "Android", ios: "iOS", chromeos: "ChromeOS", unknown: "" };
 const ACTIVE = new Set(["offering", "waiting", "accepted", "sending"]);
@@ -97,7 +98,7 @@ const jobActive = (job) => job.state === "waiting" || job.state === "running";
 
 export function busy() {
   const receiving = (mesh.data?.incoming || []).some((s) => s.state === "accepted" || s.state === "receiving");
-  return [...mesh.jobs.values()].some(jobActive) || mesh.promptQueue.length > 0 || receiving;
+  return [...mesh.jobs.values()].some((j) => jobActive(j) && !j.paused) || mesh.promptQueue.length > 0 || receiving;
 }
 
 function apply() {
@@ -287,14 +288,27 @@ function buildTile(d) {
     el.classList.add("is-drop-target");
   });
   el.addEventListener("dragleave", () => el.classList.remove("is-drop-target"));
-  el.addEventListener("drop", (event) => {
+  el.addEventListener("drop", async (event) => {
     el.classList.remove("is-drop-target");
     if (!el.dataset.online) return;
     event.preventDefault();
     event.stopPropagation();
     document.dispatchEvent(new CustomEvent("ot-drop-handled"));
-    const files = ctx.droppedFiles(event);
-    if (files.length) startSend([el.dataset.id], files);
+    // Folders dropped onto a device are zipped on the fly, then sent as one file.
+    try {
+      const { files, folders } = await collectDropped(event);
+      if (!files.length) return;
+      if (folders) {
+        toast(`Zipping ${plural(files.length, "file")} from ${plural(folders, "folder")}…`, { icon: "folder" });
+        const blob = await zipFiles(files);
+        startSend([el.dataset.id], [new File([blob], zipName(files), { type: "application/zip" })]);
+        return;
+      }
+      startSend([el.dataset.id], files.map((entry) => entry.file || entry));
+    } catch {
+      const files = ctx.droppedFiles(event);
+      if (files.length) startSend([el.dataset.id], files);
+    }
   });
   return el;
 }
@@ -402,18 +416,71 @@ export function stageText(text, filename = "") {
   return file;
 }
 
+const TEXT_TEMPLATES = {
+  link: { text: "https://", name: "link.txt" },
+  wifi: { text: "Wi-Fi: \nPassword: ", name: "wifi.txt" },
+  code: { text: "// paste your code here\n", name: "snippet.txt" },
+  note: { text: "", name: "note.txt" },
+};
+
 function setupTextDialog() {
   const dialog = $("#text-dialog");
   if (!dialog) return;
   const input = $("#text-input");
   const nameInput = $("#text-filename");
   const count = $("#text-count");
+  const lines = $("#text-lines");
+  const meter = $("#text-meter-fill");
+  const clear = $("#text-clear");
+  const submit = $("#text-submit");
+  const MAX = 200000;
   const update = () => {
-    count.textContent = input.value ? `${input.value.length.toLocaleString()} / 200,000 characters` : "";
+    const len = input.value.length;
+    const words = input.value.trim() ? input.value.trim().split(/\s+/).length : 0;
+    const lineCount = input.value ? input.value.split("\n").length : 1;
+    count.textContent = `${len.toLocaleString()} / 200,000`;
+    if (lines) lines.textContent = `${lineCount} ${lineCount === 1 ? "line" : "lines"} · ${words} ${words === 1 ? "word" : "words"} · ~${formatBytes(new Blob([input.value]).size)}`;
+    if (meter) {
+      const pct = Math.min(100, (len / MAX) * 100);
+      meter.style.width = `${pct}%`;
+      meter.dataset.tone = len > MAX * 0.95 ? "danger" : len > MAX * 0.8 ? "warn" : "";
+    }
+    if (clear) clear.hidden = !len;
+    if (submit) submit.disabled = !len;
   };
   input.addEventListener("input", () => {
     $("#text-error").textContent = "";
+    // Auto-grow a little (capped by CSS max-height via rows + resize).
+    input.style.height = "auto";
     update();
+  });
+  for (const chip of dialog.querySelectorAll(".chip")) {
+    chip.addEventListener("click", () => {
+      const tpl = TEXT_TEMPLATES[chip.dataset.template];
+      if (!tpl) return;
+      if (!input.value) {
+        input.value = tpl.text;
+        if (!nameInput.value && tpl.name !== "note.txt") nameInput.value = tpl.name;
+      } else if (!input.value.endsWith("\n")) {
+        input.value += `\n${tpl.text}`;
+      } else {
+        input.value += tpl.text;
+      }
+      $("#text-error").textContent = "";
+      update();
+      input.focus();
+      // Put the caret at the end (or select the placeholder URL).
+      input.setSelectionRange(input.value.length, input.value.length);
+    });
+  }
+  clear?.addEventListener("click", () => {
+    input.value = "";
+    $("#text-error").textContent = "";
+    update();
+    input.focus();
+  });
+  nameInput.addEventListener("input", () => {
+    $("#text-error").textContent = "";
   });
   $("#send-text")?.addEventListener("click", () => {
     $("#text-error").textContent = "";
@@ -421,6 +488,7 @@ function setupTextDialog() {
     dialog.showModal();
     requestAnimationFrame(() => input.focus());
   });
+  $("#text-cancel")?.addEventListener("click", () => dialog.close());
   $("#text-form")?.addEventListener("submit", (event) => {
     event.preventDefault();
     try {
@@ -431,12 +499,15 @@ function setupTextDialog() {
       }
       input.value = "";
       nameInput.value = "";
+      input.style.height = "";
       update();
       dialog.close();
+      toast(`Text staged as “${file.name}” — choose who to send to`, { icon: "send" });
     } catch (err) {
       $("#text-error").textContent = err.message;
     }
   });
+  update();
 }
 
 function renderSendBar() {
@@ -654,6 +725,11 @@ function finishJob(job, outcome) {
     } else if (failed.length) toast(failed[0].reason || `Couldn’t send to ${failed[0].name}`, { tone: "error", icon: "alert" });
   } else if (done.length && !failed.length && !declined.length) {
     toast(done.length === 1 ? `Sent to ${done[0].name}` : `Sent to ${plural(done.length, "device")}`, { tone: "success", icon: "check" });
+    const secs = Math.max(0.1, (Date.now() - (job.startedAt || Date.now())) / 1000);
+    const bytes = job.files.reduce((n, f) => n + f.size, 0);
+    const title = job.files.length === 1 ? job.files[0].name : plural(job.files.length, "file");
+    addHistory({ name: title, size: bytes, direction: "send", status: "done", speed: bytes / secs, samples: (job.samples || []).slice(-30) });
+    window.dispatchEvent(new CustomEvent("ot-history"));
   } else if (declined.length) {
     toast(declined.length === 1 ? `${declined[0].name} declined — retry to ask again` : `${declined.length} declined — retry to ask again`, {
       tone: "error",
@@ -681,13 +757,19 @@ function finishJob(job, outcome) {
 }
 
 function uploadNext(job) {
-  if (job.state === "finished") return;
+  if (job.state === "finished" || job.paused) return;
   if (job.index >= job.files.length) {
     relayDone(job);
     ctx.requestPoll();
     return;
   }
   const file = job.files[job.index];
+  // Big files go chunk-by-chunk so a Wi-Fi drop loses one 2 MiB piece,
+  // not the whole file. Resume continues from the server's byte count.
+  if (shouldChunk(file.size)) {
+    uploadNextChunked(job);
+    return;
+  }
   const xhr = new XMLHttpRequest();
   job.xhr = xhr;
   job.lastAt = performance.now();
@@ -744,11 +826,97 @@ function uploadNext(job) {
   xhr.send(file);
 }
 
+async function uploadNextChunked(job) {
+  // Parallel chunks (3 in flight) with pause: aborting keeps the upload id,
+  // so resuming reuses the staged bytes instead of starting over.
+  const file = job.files[job.index];
+  const total = file.size;
+  const { size: chunkSize } = chunkLimits();
+  const chunks = Math.max(1, Math.ceil(total / chunkSize));
+  job.chunkIds = job.chunkIds || {};
+  const uploadId = (job.chunkIds[job.index] ||= newUploadId());
+  const url = `/api/send/${encodeURIComponent(job.id)}/files/${job.index}`;
+  const statusUrl = `${url}/status?upload_id=${encodeURIComponent(uploadId)}`;
+  job.abortChunk = new AbortController();
+  job.samples = job.samples || [];
+  job.startedAt = job.startedAt || performance.now();
+  let lastAt = performance.now();
+  let lastSent = 0;
+  try {
+    await uploadParallel(
+      url,
+      {
+        file, total, uploadId, statusUrl, signal: job.abortChunk.signal, concurrency: 3,
+        onProgress: (sent) => {
+          const now = performance.now();
+          const dt = (now - lastAt) / 1000;
+          if (dt >= 0.4 && sent > lastSent) {
+            const instant = (sent - lastSent) / dt;
+            job.speed = job.speed ? job.speed * 0.6 + instant * 0.4 : instant;
+            pushSample(job.samples, job.speed);
+            lastAt = now;
+            lastSent = sent;
+          }
+          job.fileLoaded = sent;
+          job.chunkNote = total > chunkSize ? `${Math.min(chunks, Math.ceil(sent / chunkSize) + 1)}/${chunks} chunks · 3 parallel` : "";
+          scheduleJobRender();
+        },
+      },
+    );
+    if (job.state === "finished") return;
+    job.uploaded += total;
+    job.fileLoaded = 0;
+    job.chunkNote = "";
+    job.index += 1;
+    uploadNext(job);
+  } catch (err) {
+    if (err.paused || job.abortChunk.signal.aborted) {
+      if (job.wantCancel || job.state === "finished") return;
+      job.paused = true;
+      job.chunkNote = `Paused at ${Math.floor((job.fileLoaded / Math.max(1, total)) * 100)}% — resume to continue`;
+      scheduleJobRender();
+      return;
+    }
+    if (job.state === "finished") return;
+    const message = err.message || "Sending failed. Retry to resume where it stopped.";
+    job.error = message;
+    job.chunkNote = "";
+    relayDone(job);
+    if (err.status !== 410) toast(message, { tone: "error", icon: "alert" });
+  }
+  ctx.requestPoll();
+}
+
+function pauseJob(job) {
+  if (!jobActive(job) || job.paused) return;
+  job.paused = true;
+  job.xhr?.abort();
+  job.abortChunk?.abort();
+  scheduleJobRender();
+}
+
+function resumeJob(job) {
+  if (!job.paused) return;
+  job.paused = false;
+  job.chunkNote = "";
+  scheduleJobRender();
+  if (job.relayRunning) {
+    const file = job.files[job.index];
+    if (file && shouldChunk(file.size)) uploadNextChunked(job);
+    else uploadNext(job);
+  } else {
+    queueRelay(job);
+  }
+}
+
 async function cancelJob(job) {
+  job.wantCancel = true;
   job.state = "finished";
   job.finishedAt = Date.now();
+  job.paused = false;
   job.xhr?.abort();
   job.abort?.abort();
+  job.abortChunk?.abort();
   try {
     await api(`/api/send/${encodeURIComponent(job.id)}`, { method: "DELETE" });
   } catch {
@@ -846,35 +1014,48 @@ function renderJobs() {
     const title = job.files.length === 1 ? job.files[0].name : plural(job.files.length, "file");
     const own = Math.min(total, job.uploaded + (job.fileLoaded || 0));
     let headline;
-    if (job.state === "waiting") headline = `${formatBytes(view.total)} · waiting for ${plural(view.targets.filter((t) => t.state === "waiting" || t.state === "offering").length, "answer")}`;
+    if (job.paused) headline = job.chunkNote || `Paused · ${formatBytes(own)} of ${formatBytes(view.total)}`;
+    else if (job.state === "waiting") headline = `${formatBytes(view.total)} · waiting for ${plural(view.targets.filter((t) => t.state === "waiting" || t.state === "offering").length, "answer")}`;
     else if (job.state === "running" && job.relayRunning) {
       const eta = job.speed > 0 ? formatDuration((total - own) / job.speed) : "";
-      headline = [`${formatBytes(own)} of ${formatBytes(view.total)}`, job.speed > 0 && `${formatBytes(job.speed)}/s`, eta].filter(Boolean).join(" · ");
+      headline = [`${formatBytes(own)} of ${formatBytes(view.total)}`, job.speed > 0 && `${formatBytes(job.speed)}/s`, eta, job.chunkNote].filter(Boolean).join(" · ");
     } else if (job.state === "running") headline = `${formatBytes(view.total)} · sending directly`;
     else headline = formatBytes(view.total);
     const anyWaiting = view.targets.some((t) => t.state === "waiting" || t.state === "offering");
     const anyAccepted = view.targets.some((t) => t.state === "accepted");
     const retryable = view.targets.some((t) => RETRYABLE.has(t.state));
-    const active = jobActive(job);
+    const active = jobActive(job) && !job.paused;
+    const pausable = job.state === "running" && job.relayRunning && !job.paused;
+    const mainCol = h("div", { class: "row-main" }, h("span", { class: "row-title", title }, title), h("span", { class: "row-sub" }, headline));
+    if (job.samples?.length >= 2 && job.state === "running") {
+      const spark = sparklineSVG(job.samples);
+      if (spark) {
+        const wrap = h("span", { class: "spark-wrap", title: "Speed over time" });
+        wrap.append(spark);
+        mainCol.append(wrap);
+      }
+    }
     row.replaceChildren(
       h(
         "div",
         { class: "job-head" },
         h("span", { class: "thumb", "aria-hidden": "true" }, icon("send")),
-        h("div", { class: "row-main" }, h("span", { class: "row-title", title }, title), h("span", { class: "row-sub" }, headline)),
+        mainCol,
         h(
           "div",
           { class: "row-actions is-visible" },
           anyWaiting && anyAccepted && job.state === "waiting" && h("button", { class: "btn btn-tinted btn-small", type: "button", onclick: () => skipWaiting(job) }, "Send now"),
           !active && retryable && h("button", { class: "icon-btn is-accent", type: "button", title: "Retry", "aria-label": `Retry sending ${title}`, onclick: () => retryJob(job) }, icon("retry")),
+          job.paused && h("button", { class: "icon-btn is-accent", type: "button", title: "Resume", "aria-label": `Resume sending ${title}`, onclick: () => resumeJob(job) }, icon("retry")),
+          pausable && h("button", { class: "icon-btn", type: "button", title: "Pause", "aria-label": `Pause sending ${title}`, onclick: () => pauseJob(job) }, icon("pause")),
           h(
             "button",
             {
               class: "icon-btn",
               type: "button",
-              title: active ? "Cancel" : "Dismiss",
-              "aria-label": `${active ? "Cancel" : "Dismiss"} ${title}`,
-              onclick: () => (active ? cancelJob(job) : (mesh.jobs.delete(job.id), renderJobs(), renderDevices())),
+              title: active || job.paused ? "Cancel" : "Dismiss",
+              "aria-label": `${active || job.paused ? "Cancel" : "Dismiss"} ${title}`,
+              onclick: () => (active || job.paused ? cancelJob(job) : (mesh.jobs.delete(job.id), renderJobs(), renderDevices())),
             },
             icon("x"),
           ),
@@ -951,6 +1132,9 @@ function handleIncoming() {
           duration: 5000,
           action: !owner && s.files.length === 1 ? { label: "Save", run: () => saveInboxFile(s.files[0].saved_name || s.files[0].name) } : undefined,
         });
+        const title = s.files.length === 1 ? s.files[0].saved_name || s.files[0].name : plural(s.files.length, "file");
+        addHistory({ name: `${title} — from ${from}`, size: s.total, direction: "receive", status: "done", speed: 0 });
+        window.dispatchEvent(new CustomEvent("ot-history"));
         ctx.libraryChanged(null);
       } else if (s.state === "canceled" && before !== "pending") toast(`${from} stopped sending`, { tone: "error", icon: "x" });
       else if (s.state === "failed") toast(`Couldn’t receive files from ${from}`, { tone: "error", icon: "alert" });
@@ -1356,6 +1540,60 @@ function setupConnectSheet() {
       /* the user closed the share sheet */
     }
   });
+  setupInvites();
+}
+
+let inviteCountdown = 0;
+
+function setupInvites() {
+  const block = $("#invite-block");
+  if (!block) return;
+  // Guest links are minted by the owner (this device's own window).
+  const owner = Boolean(state.info.owner);
+  block.hidden = !owner;
+  if (!owner) return;
+  const field = $("#invite-field");
+  const urlEl = $("#invite-url");
+  const expiryEl = $("#invite-expiry");
+  const render = () => {
+    if (!inviteCountdown) {
+      expiryEl.textContent = "";
+      return;
+    }
+    const left = Math.max(0, inviteCountdown - Math.round(performance.now() / 1000));
+    const m = Math.floor(left / 60);
+    const s = String(left % 60).padStart(2, "0");
+    expiryEl.textContent = left ? `expires in ${m}:${s}` : "expired — make a new one";
+  };
+  setInterval(() => {
+    if ($("#connect-dialog").open && inviteCountdown) render();
+  }, 1000);
+  $("#invite-new").addEventListener("click", async () => {
+    const button = $("#invite-new");
+    button.classList.add("is-busy");
+    button.disabled = true;
+    try {
+      const { data } = await api("/api/invites", { method: "POST", json: {} });
+      urlEl.textContent = data.url;
+      field.hidden = false;
+      button.querySelector("span").textContent = "New guest link";
+      inviteCountdown = Math.round(performance.now() / 1000) + (data.expires_in || 600);
+      render();
+      toast("Guest link ready — it works once, then expires", { icon: "link" });
+    } catch (err) {
+      toast(err.message, { tone: "error", icon: "alert" });
+    } finally {
+      button.classList.remove("is-busy");
+      button.disabled = false;
+    }
+  });
+  $("#invite-copy").addEventListener("click", async () => {
+    const ok = await copyText(urlEl.textContent);
+    $("#invite-copy").querySelector("span").textContent = ok ? "Copied" : "Press ⌘C";
+    setTimeout(() => {
+      $("#invite-copy").querySelector("span").textContent = "Copy";
+    }, 1600);
+  });
 }
 
 // -------------------------------------------------------------------- setup
@@ -1380,6 +1618,7 @@ export function initNearby(context) {
     renderSendBar();
   });
   $("#send-pick").addEventListener("click", () => $("#file-input").click());
+  $("#send-folder")?.addEventListener("click", () => $("#folder-input").click());
   $("#incoming-accept").addEventListener("click", () => decide(true));
   $("#incoming-decline").addEventListener("click", () => decide(false));
   $("#incoming-dialog").addEventListener("cancel", (event) => event.preventDefault()); // answer, don't dismiss

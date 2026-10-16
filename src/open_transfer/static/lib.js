@@ -114,6 +114,241 @@ export class ApiError extends Error {
 
 const API_TIMEOUT_MS = 20000;
 
+// ------------------------------------------------------- chunked uploads
+//
+// Files bigger than CHUNK_THRESHOLD are split into CHUNK_SIZE pieces (see
+// chunks.py on the server). One lost connection loses one chunk, not the
+// whole file — each chunk is retried and the upload resumes where it left off.
+
+export const chunkLimits = () => ({
+  size: state.info.limits?.chunk_size || 2 * 1024 * 1024,
+  threshold: state.info.limits?.chunk_threshold || 4 * 1024 * 1024,
+});
+
+export const shouldChunk = (bytes) => bytes > chunkLimits().threshold;
+
+export function newUploadId() {
+  if (window.crypto?.randomUUID) return window.crypto.randomUUID().replace(/-/g, "").slice(0, 22);
+  return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 14)}`;
+}
+
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+/** PUT one chunk with ``Content-Range``. Resolves ``{received, total, done, data}``. */
+export async function putChunk(url, { method = "PUT", chunk, start, end, total, uploadId, name, signal, timeout = 60000 }) {
+  const headers = {
+    "Content-Range": `bytes ${start}-${end}/${total}`,
+    "X-Upload-Id": uploadId,
+    "Content-Type": "application/octet-stream",
+  };
+  if (name) headers["X-Filename"] = encodeURIComponent(name);
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), timeout);
+  if (signal) signal.addEventListener("abort", () => ctrl.abort(), { once: true });
+  let res;
+  try {
+    res = await fetch(url, { method, credentials: "same-origin", headers, body: chunk, signal: ctrl.signal });
+  } catch (err) {
+    if (err?.name === "AbortError") throw new ApiError(0, "timeout", "The connection timed out sending that chunk.");
+    throw new ApiError(0, "network", "Can’t reach the sharing computer.");
+  } finally {
+    clearTimeout(timer);
+  }
+  // 308 = "Resume Incomplete": the chunk landed, more to come.
+  if (res.status === 308 || res.status === 200 || res.status === 201) {
+    const data = (res.headers.get("Content-Type") || "").includes("json") ? await res.json().catch(() => null) : null;
+    const received = data?.received ?? end + 1;
+    return { received, total, done: res.status === 201 || data?.done === true, data };
+  }
+  const body = (res.headers.get("Content-Type") || "").includes("json") ? await res.json().catch(() => null) : null;
+  const err = body?.error || {};
+  throw new ApiError(res.status, err.code || `http_${res.status}`, err.message || `Sending failed (${res.status}).`, err);
+}
+
+/** Send one chunk with retries (3 tries, backoff). */
+export async function putChunkRetry(url, opts, tries = 3) {
+  let last;
+  for (let attempt = 0; attempt < tries; attempt += 1) {
+    try {
+      return await putChunk(url, opts);
+    } catch (err) {
+      last = err;
+      // Don't retry auth / validation errors — only network + 5xx + 408/429.
+      if (err.status && err.status !== 0 && err.status < 500 && ![408, 429].includes(err.status)) throw err;
+      if (opts.signal?.aborted) throw err;
+      await sleep(400 * 2 ** attempt);
+    }
+  }
+  throw last;
+}
+
+/** Ask the server how many bytes of ``uploadId`` already arrived (for resume). */
+export async function fetchChunkStatus(statusUrl, signal) {
+  try {
+    const { data } = await api(statusUrl, { signal, timeout: 8000 });
+    return data?.received || 0;
+  } catch {
+    return 0;
+  }
+}
+
+/** Full chunk state: bytes received plus the covered ranges (for parallel resume). */
+export async function fetchChunkState(statusUrl, signal) {
+  try {
+    const { data } = await api(statusUrl, { signal, timeout: 8000 });
+    return { received: data?.received || 0, total: data?.total || 0, ranges: data?.ranges || [] };
+  } catch {
+    return { received: 0, total: 0, ranges: [] };
+  }
+}
+
+/** Chunk-aligned ``{start, end}`` spans (end exclusive) not yet covered by ``ranges``. */
+export function missingChunks(ranges, total, chunkSize) {
+  const covered = [...(ranges || [])]
+    .map(([s, e]) => [Number(s), Number(e)])
+    .filter(([s, e]) => Number.isFinite(s) && Number.isFinite(e) && e > s)
+    .sort((a, b) => a[0] - b[0]);
+  const out = [];
+  let offset = 0;
+  while (offset < total) {
+    const end = Math.min(offset + chunkSize, total);
+    const done = covered.some(([s, e]) => s <= offset && e >= end);
+    if (!done) out.push({ start: offset, end });
+    offset = end;
+  }
+  return out;
+}
+
+/**
+ * Upload a file in parallel chunks (up to ``concurrency`` in flight).
+ * Resolves with the final chunk's ``data``. ``onProgress(sent, total)`` fires
+ * after every landed chunk. Aborting ``signal`` pauses: already-stored chunks
+ * stay on the server, so calling again resumes where it stopped.
+ */
+export async function uploadParallel(
+  url,
+  { method = "PUT", file, total = file.size, name, uploadId, statusUrl, signal, timeout, concurrency = 3, onProgress },
+) {
+  const { size: chunkSize } = chunkLimits();
+  const state0 = statusUrl ? await fetchChunkState(statusUrl, signal) : { received: 0, ranges: [] };
+  let queue = missingChunks(state0.ranges, total, chunkSize);
+  if (!queue.length && total > 0) {
+    // Server knows nothing yet (or state fetch failed): upload everything.
+    queue = missingChunks([], total, chunkSize);
+  }
+  let sent = total - queue.reduce((n, c) => n + (c.end - c.start), 0);
+  onProgress?.(sent, total);
+  let finalData = null;
+  let failed = null;
+  let cursor = 0;
+  const workers = Array.from({ length: Math.min(concurrency, queue.length) }, async () => {
+    while (cursor < queue.length) {
+      if (signal?.aborted) throw new DOMException("paused", "AbortError");
+      const span = queue[cursor];
+      cursor += 1;
+      const blob = file.slice(span.start, span.end);
+      const { data } = await putChunkRetry(
+        url,
+        {
+          method, chunk: blob, start: span.start, end: span.end - 1, total,
+          uploadId, name, signal, timeout,
+        },
+      );
+      finalData = data;
+      sent += span.end - span.start;
+      onProgress?.(Math.min(sent, total), total);
+    }
+  });
+  try {
+    await Promise.all(workers);
+  } catch (err) {
+    failed = err;
+  }
+  if (signal?.aborted) {
+    const abort = new ApiError(0, "paused", "Paused — resume to continue where it stopped.");
+    abort.paused = true;
+    throw abort;
+  }
+  if (failed) throw failed;
+  // The last chunk's response carries the result (saved file or fan-out report).
+  if (!finalData && total === 0) return { data: null };
+  if (!finalData) {
+    const check = statusUrl ? await fetchChunkState(statusUrl, signal) : null;
+    if (!check || check.received < total) throw new ApiError(0, "network", "Some chunks didn’t arrive. Try again to resume.");
+  }
+  return { data: finalData };
+}
+
+// ------------------------------------------------------- transfer history
+//
+// Kept in this browser only (localStorage): the last 30 finished transfers
+// with their average speed, so repeat sends are one glance away.
+
+const HISTORY_KEY = "ot-history";
+const HISTORY_MAX = 30;
+
+export function loadHistory() {
+  try {
+    const saved = JSON.parse(localStorage.getItem(HISTORY_KEY) || "[]");
+    return Array.isArray(saved) ? saved.filter((e) => e && typeof e.name === "string") : [];
+  } catch {
+    return [];
+  }
+}
+
+export function addHistory(entry) {
+  try {
+    const list = loadHistory();
+    list.unshift({ when: Date.now(), ...entry });
+    localStorage.setItem(HISTORY_KEY, JSON.stringify(list.slice(0, HISTORY_MAX)));
+  } catch {
+    /* storage blocked: history is best effort */
+  }
+  return loadHistory();
+}
+
+export function clearHistory() {
+  try {
+    localStorage.removeItem(HISTORY_KEY);
+  } catch {
+    /* ignore */
+  }
+}
+
+// ------------------------------------------------------------- speed graph
+//
+// Each upload samples its speed; the samples render as a tiny inline SVG
+// sparkline (no canvas, no dependencies) in the transfer row and in history.
+
+export function pushSample(samples, speed) {
+  samples.push(speed);
+  if (samples.length > 40) samples.shift();
+  return samples;
+}
+
+export function sparklineSVG(samples, width = 64, height = 20) {
+  const points = (samples || []).filter((v) => Number.isFinite(v) && v >= 0).slice(-40);
+  if (points.length < 2) return null;
+  const max = Math.max(...points, 1);
+  const step = width / (points.length - 1);
+  const path = points.map((v, i) => `${(i * step).toFixed(1)},${(height - (v / max) * (height - 2) - 1).toFixed(1)}`).join(" ");
+  const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  svg.setAttribute("class", "spark");
+  svg.setAttribute("viewBox", `0 0 ${width} ${height}`);
+  svg.setAttribute("width", String(width));
+  svg.setAttribute("height", String(height));
+  svg.setAttribute("aria-hidden", "true");
+  const line = document.createElementNS("http://www.w3.org/2000/svg", "polyline");
+  line.setAttribute("points", path);
+  line.setAttribute("fill", "none");
+  line.setAttribute("stroke", "currentColor");
+  line.setAttribute("stroke-width", "1.5");
+  line.setAttribute("stroke-linecap", "round");
+  line.setAttribute("stroke-linejoin", "round");
+  svg.append(line);
+  return svg;
+}
+
 export async function api(path, { method = "GET", json, headers = {}, timeout = API_TIMEOUT_MS, signal } = {}) {
   const init = { method, credentials: "same-origin", headers: { Accept: "application/json", ...headers } };
   if (json !== undefined) {

@@ -41,6 +41,8 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from open_transfer import __version__
+from open_transfer.chunks import CHUNK_SIZE as RESUMABLE_CHUNK_SIZE
+from open_transfer.chunks import ChunkSessions
 from open_transfer.config import Config
 from open_transfer.devices import (
     IdentityStore,
@@ -260,6 +262,12 @@ class Mesh:
         )
         self.trust = TrustStore(state)
         self._inbox_root = state / "inbox"
+        # Big outgoing files are staged here chunk-by-chunk (browser → this app)
+        # before being fanned out to the receivers. Crash-safe: a page reload
+        # resumes the same upload id instead of starting over.
+        self._relay_chunks = ChunkSessions(state / "relay-chunks")
+        self._relay_meta: dict[str, dict[str, object]] = {}
+        self._invites: dict[str, dict[str, object]] = {}
         self._lock = threading.RLock()
         self._peers: dict[str, Peer] = {}
         self._visitors: dict[str, Visitor] = {}
@@ -1140,6 +1148,441 @@ class Mesh:
         if all(d.view_state() in FINAL for d in job.deliveries.values()):
             job.finished = time.monotonic()
         return {"targets": results}
+
+    # ------------------------------------------- chunked (resumable) uploads
+    #
+    # Big files are split by the browser into 2 MiB pieces. Each piece is a
+    # plain PUT with ``Content-Range: bytes <start>-<end>/<total>`` and an
+    # ``X-Upload-Id`` the browser picks (so a reload resumes the same id).
+    # This app stages the pieces under ``relay-chunks/``; when the last byte
+    # arrives the assembled file is fanned out to the receivers exactly like
+    # a one-shot upload. One lost chunk costs one retry, not the whole file.
+
+    def _relay_key(self, job_id: str, index: int, upload_id: str) -> str:
+        return f"{job_id}:{index}:{upload_id}"
+
+    def relay_status(
+        self, job_id: str, viewer: Viewer, index: int, upload_id: str
+    ) -> dict[str, Any]:
+        job = self.job_for(job_id, viewer)
+        if not 0 <= index < len(job.files):
+            raise MeshError(404, "not_found", "No such file in this transfer.")
+        info = self._relay_chunks.status(upload_id)
+        if info is None:
+            return {"received": 0, "total": int(job.files[index]["size"]), "ranges": []}
+        if int(info.get("total", 0)) != int(job.files[index]["size"]):
+            return {"received": 0, "total": int(job.files[index]["size"]), "ranges": []}
+        return {
+            "received": int(info.get("received", 0)),
+            "total": int(info.get("total", 0)),
+            "ranges": info.get("ranges", []),
+        }
+
+    def relay_append(
+        self, job_id: str, viewer: Viewer, index: int, upload_id: str, offset: int, data: bytes
+    ) -> dict[str, Any]:
+        """Store one chunk of a big outgoing file. Returns progress; fans out when complete."""
+        from open_transfer.chunks import MAX_CHUNK_BYTES
+
+        job = self.job_for(job_id, viewer)
+        if job.canceled:
+            raise MeshError(410, CANCELED, "This transfer was canceled.")
+        if not 0 <= index < len(job.files):
+            raise MeshError(404, "not_found", "No such file in this transfer.")
+        size = int(job.files[index]["size"])
+        name = str(job.files[index].get("name", "file"))
+        if len(data) > MAX_CHUNK_BYTES:
+            raise MeshError(413, "too_large", "Chunk is too big.")
+        if offset < 0 or offset + len(data) > size:
+            raise MeshError(400, "bad_range", "Chunk is outside the file.")
+        limit = self.config.max_upload_size
+        if limit and size > limit:
+            raise MeshError(413, "too_large", "File is larger than this device accepts.")
+        with self._lock:
+            meta = self._relay_meta.get(upload_id)
+            if meta is None:
+                self._relay_chunks.touch(upload_id, name, size, 0)
+                self._relay_meta[upload_id] = {
+                    "job_id": job_id,
+                    "index": index,
+                    "total": size,
+                    "name": name,
+                }
+            elif meta.get("job_id") != job_id or int(str(meta.get("index", -1))) != index:
+                raise MeshError(400, "bad_request", "Upload id doesn’t belong to this file.")
+        try:
+            received = self._relay_chunks.append(upload_id, offset, data)
+        except KeyError:
+            # First chunk arrived with an id we haven't seen (e.g. after a
+            # restart): create the session and retry once.
+            self._relay_chunks.touch(upload_id, name, size, 0)
+            try:
+                received = self._relay_chunks.append(upload_id, offset, data)
+            except ValueError as exc:
+                raise MeshError(400, "bad_range", "Chunk is outside the file.") from exc
+        except ValueError as exc:
+            raise MeshError(400, "bad_range", "Chunk is outside the file.") from exc
+        info: dict[str, Any] = dict(self._relay_chunks.status(upload_id) or {})
+        if received < size:
+            return {
+                "received": received,
+                "total": size,
+                "done": False,
+                "ranges": info.get("ranges", []),
+            }
+        return self._relay_complete(job, index, upload_id, size)
+
+    def _relay_complete(self, job: Job, index: int, upload_id: str, size: int) -> dict[str, Any]:
+        """The last chunk arrived: stream the assembled file to every receiver.
+
+        Local targets (our owner/visitors) are written straight to disk.
+        Remote apps get the file in 2 MiB ``Content-Range`` pieces when it is
+        big (one failed piece is retried, not the whole file); small files
+        keep the single-PUT fast path.
+        """
+        from open_transfer.chunks import CHUNK_THRESHOLD as _THRESHOLD
+
+        path = self._relay_chunks.path(upload_id)
+        if path is None:
+            raise MeshError(404, "not_found", "Upload is no longer available.")
+        try:
+            eligible = [
+                (target_id, delivery)
+                for target_id, delivery in job.deliveries.items()
+                if delivery.view_state() in {ACCEPTED, "sending"}
+                and index not in delivery.files_done
+                and not delivery.direct
+            ]
+        except Exception:
+            eligible = []
+        if not eligible:
+            self._relay_chunks.discard(upload_id)
+            with self._lock:
+                self._relay_meta.pop(upload_id, None)
+            if any(d.view_state() in {"offering", "waiting"} for d in job.deliveries.values()):
+                raise MeshError(409, "waiting", "Still waiting for the receivers to accept.")
+            raise MeshError(409, "no_receivers", "Nobody accepted this transfer.")
+        local = [(tid, d) for tid, d in eligible if d.session is not None]
+        remote = [(tid, d) for tid, d in eligible if d.session is None]
+        sinks: list[_Sink] = []
+        if local:
+            sinks = [_Sink(self, job, tid, d, index, size) for tid, d in local]
+            for sink in sinks:
+                sink.start()
+            try:
+                with path.open("rb") as src:
+                    while True:
+                        chunk = src.read(RESUMABLE_CHUNK_SIZE)
+                        if not chunk:
+                            break
+                        live = [s for s in sinks if s.alive]
+                        if not live or job.canceled:
+                            break
+                        for sink in live:
+                            sink.feed(chunk)
+            except OSError as exc:
+                for sink in sinks:
+                    sink.abort("Couldn’t read the staged file.")
+                raise MeshError(500, "internal_error", "Couldn’t read the staged file.") from exc
+            if job.canceled:
+                for sink in sinks:
+                    sink.abort("Canceled")
+                for sink in sinks:
+                    sink.join(10)
+                self._relay_chunks.discard(upload_id)
+                with self._lock:
+                    self._relay_meta.pop(upload_id, None)
+                raise MeshError(410, CANCELED, "This transfer was canceled.")
+            for sink in sinks:
+                sink.finish()
+            for sink in sinks:
+                sink.join(STALL_TIMEOUT * 2)
+        # Remote apps: big files go chunk-by-chunk (app-to-app resume), small
+        # ones keep the single streaming PUT.
+        chunked_results: dict[str, dict[str, Any]] = {}
+        if remote and not job.canceled:
+            big = [(tid, d) for tid, d in remote if size > _THRESHOLD and d.peer is not None]
+            small = [
+                (tid, d) for tid, d in remote if not (size > _THRESHOLD and d.peer is not None)
+            ]
+            if small:
+                small_sinks = [_Sink(self, job, tid, d, index, size) for tid, d in small]
+                for sink in small_sinks:
+                    sink.start()
+                try:
+                    with path.open("rb") as src:
+                        while True:
+                            chunk = src.read(RESUMABLE_CHUNK_SIZE)
+                            if not chunk:
+                                break
+                            live = [s for s in small_sinks if s.alive]
+                            if not live or job.canceled:
+                                break
+                            for sink in live:
+                                sink.feed(chunk)
+                except OSError as exc:
+                    for sink in small_sinks:
+                        sink.abort("Couldn’t read the staged file.")
+                    raise MeshError(
+                        500, "internal_error", "Couldn’t read the staged file."
+                    ) from exc
+                if not job.canceled:
+                    for sink in small_sinks:
+                        sink.finish()
+                    for sink in small_sinks:
+                        sink.join(STALL_TIMEOUT * 2)
+                sinks.extend(small_sinks)
+            for tid, delivery in big:
+                if job.canceled or delivery.canceled:
+                    continue
+                assert delivery.peer is not None  # noqa: S101 - filtered above
+                if delivery.session is None and delivery.state not in {"sending", ACCEPTED}:
+                    delivery.state = "sending"
+                ok, error = self._push_chunked(delivery.peer, delivery, path, size, job, index)
+                push_sink = _Sink(self, job, tid, delivery, index, size)
+                push_sink.ok = ok
+                push_sink.error = error or ""
+                sinks.append(push_sink)
+                if ok:
+                    delivery.sent = size
+        if job.canceled:
+            self._relay_chunks.discard(upload_id)
+            with self._lock:
+                self._relay_meta.pop(upload_id, None)
+            raise MeshError(410, CANCELED, "This transfer was canceled.")
+        result = self._upload_result(job, index, sinks)
+        self._relay_chunks.discard(upload_id)
+        with self._lock:
+            self._relay_meta.pop(upload_id, None)
+        result.update({"received": size, "total": size, "done": True})
+        for tid, info in chunked_results.items():
+            result.setdefault("targets", {}).setdefault(tid, info)
+        return result
+
+    def _push_chunked(
+        self, peer: Peer, delivery: Delivery, path: object, size: int, job: Job, index: int
+    ) -> tuple[bool, str]:
+        """Send a staged file to one app in 2 MiB pieces with per-chunk retry."""
+        from pathlib import Path as _Path
+
+        from open_transfer.chunks import CHUNK_SIZE as _CHUNK
+
+        src = _Path(str(path))
+        offset = 0
+        try:
+            with src.open("rb") as fh:
+                while offset < size:
+                    if job.canceled or delivery.canceled or self._stop.is_set():
+                        return False, "Canceled"
+                    end = min(offset + _CHUNK, size)
+                    fh.seek(offset)
+                    data = fh.read(end - offset)
+                    if not data:
+                        return False, "Couldn’t read the staged file."
+                    for attempt in range(4):
+                        conn = http.client.HTTPConnection(
+                            peer.host, peer.port, timeout=STALL_TIMEOUT, blocksize=_CHUNK
+                        )
+                        try:
+                            conn.request(
+                                "PUT",
+                                f"{P2P}/offers/{delivery.remote_id}/files/{index}",
+                                body=data,
+                                headers={
+                                    "Content-Type": "application/octet-stream",
+                                    "Content-Length": str(len(data)),
+                                    "Content-Range": f"bytes {offset}-{offset + len(data) - 1}/{size}",
+                                    "X-OT-Secret": delivery.remote_secret,
+                                },
+                                encode_chunked=False,
+                            )
+                            res = conn.getresponse()
+                            raw = res.read(100_000)
+                        except OSError:
+                            if attempt >= 3:
+                                return (
+                                    False,
+                                    f"Lost connection to {delivery.target.get('name', 'the receiver')}.",
+                                )
+                            time.sleep(0.4 * (2**attempt))
+                            continue
+                        finally:
+                            conn.close()
+                        if res.status in (201, 308):
+                            offset += len(data)
+                            delivery.sent = offset
+                            break
+                        if res.status == 410:
+                            delivery.state = CANCELED
+                            return False, "Canceled by the receiver"
+                        if res.status in (400, 403, 404, 409, 413):
+                            try:
+                                payload = json.loads(raw)
+                            except ValueError:
+                                payload = {}
+                            return False, _remote_message(
+                                payload, "The receiver rejected the file."
+                            )
+                        if attempt >= 3:
+                            return (
+                                False,
+                                f"Lost connection to {delivery.target.get('name', 'the receiver')}.",
+                            )
+                        time.sleep(0.4 * (2**attempt))
+        except OSError:
+            return False, "Couldn’t read the staged file."
+        return True, ""
+
+    def receive_chunk(
+        self,
+        session_id: str,
+        index: int,
+        offset: int,
+        data: bytes,
+        total: int,
+        *,
+        secret: str,
+    ) -> dict[str, Any]:
+        """Store one chunk of an incoming file (app → app resume).
+
+        Chunks are staged in this device's chunk store; when the last byte
+        arrives the file is published exactly like a one-shot upload.
+        """
+        from open_transfer.chunks import MAX_CHUNK_BYTES
+
+        session = self._session_by_secret(session_id, secret or "")
+        with self._lock:
+            if session.state in {DECLINED, EXPIRED, CANCELED}:
+                raise MeshError(410, session.state, session.reason or "This transfer was stopped.")
+            if session.state not in {ACCEPTED, RECEIVING}:
+                raise MeshError(409, "not_accepted", "The receiver hasn’t accepted yet.")
+            if not 0 <= index < len(session.files):
+                raise MeshError(404, "not_found", "No such file in this transfer.")
+            item = session.files[index]
+            if item.state == DONE:
+                return {"received": item.size, "total": item.size, "done": True}
+            if item.state not in {"waiting", RECEIVING, FAILED}:
+                raise MeshError(409, "not_accepted", "The receiver hasn’t accepted yet.")
+            if total != item.size:
+                raise MeshError(400, "size_mismatch", "The file size doesn’t match the offer.")
+            if len(data) > MAX_CHUNK_BYTES:
+                raise MeshError(413, "too_large", "Chunk is too big.")
+            key = f"{session_id}:{index}"
+            item.state = RECEIVING
+            session.state = RECEIVING
+        store = self.storage if session.target == self.id else self.inbox(session.target)
+        if offset < 0 or offset + len(data) > total:
+            raise MeshError(400, "bad_range", "Chunk is outside the file.")
+        try:
+            info = store.chunks.status(key)
+        except ValueError:
+            info = None
+        if info is None:
+            try:
+                store.chunks.touch(key, item.name, total, 0)
+            except ValueError as exc:
+                raise MeshError(400, "bad_request", "Invalid upload.") from exc
+        try:
+            received = store.chunks.append(key, offset, data)
+        except (KeyError, ValueError) as exc:
+            raise MeshError(400, "bad_range", "Chunk is outside the file.") from exc
+        status: dict[str, Any] = dict(store.chunks.status(key) or {})
+        with self._lock:
+            item.received = received
+        if received < total:
+            return {
+                "received": received,
+                "total": total,
+                "done": False,
+                "ranges": status.get("ranges", []),
+            }
+        # Last chunk: publish and mark done (same tail as receive_file).
+        try:
+            saved = store.finish_chunked(key, item.name, max_size=self.config.max_upload_size)
+        except (StorageError, OSError, ValueError) as exc:
+            with self._lock:
+                item.state = FAILED
+                item.error = str(exc) if isinstance(exc, StorageError) else "Interrupted"
+                self._maybe_finish(session)
+            raise
+        with self._lock:
+            item.state, item.saved_name, item.received = DONE, saved.name, item.size
+            self._maybe_finish(session)
+        if session.target == self.id:
+            self._emit("received", {"path": str(store.root / saved.name), "name": saved.name})
+        return {"received": total, "total": total, "done": True, "file": saved.to_dict()}
+
+    def incoming_chunk_status(self, session_id: str, index: int, secret: str) -> dict[str, Any]:
+        """Bytes already staged for one incoming file (app → app resume)."""
+        session = self._session_by_secret(session_id, secret or "")
+        if not 0 <= index < len(session.files):
+            raise MeshError(404, "not_found", "No such file in this transfer.")
+        store = self.storage if session.target == self.id else self.inbox(session.target)
+        info = store.chunks.status(f"{session_id}:{index}")
+        if info is None:
+            return {"received": 0, "total": session.files[index].size, "ranges": []}
+        return {
+            "received": int(info.get("received", 0)),
+            "total": int(info.get("total", session.files[index].size)),
+            "ranges": info.get("ranges", []),
+        }
+
+    # ------------------------------------------------- one-time invite links
+    #
+    # The QR code already carries the pairing code (rotates every 10 min, dies
+    # after one use). Invite links extend that idea to browsers: the owner
+    # mints a single-use URL (``/?invite=…``) that lets exactly one visitor
+    # in — even past the PIN — then expires. Handy for guests: no PIN to read
+    # out loud, no lingering access after they leave.
+
+    def create_invite(self, *, ttl: float = 600.0, single_use: bool = True) -> dict[str, Any]:
+        import secrets as _secrets
+
+        token = _secrets.token_urlsafe(18)
+        now = time.monotonic()
+        with self._lock:
+            # Prune expired/used tokens so the dict can't grow forever.
+            for key, inv in list(self._invites.items()):
+                created = float(str(inv.get("created", 0)))
+                ttl = float(str(inv.get("ttl", 600)))
+                if inv.get("used") or now - created > ttl:
+                    self._invites.pop(key, None)
+            self._invites[token] = {
+                "created": now,
+                "ttl": ttl,
+                "single_use": single_use,
+                "used": False,
+            }
+        return {"token": token, "expires_in": int(ttl), "single_use": single_use}
+
+    def redeem_invite(self, token: str) -> bool:
+        if not token:
+            return False
+        with self._lock:
+            inv = self._invites.get(token)
+            if inv is None:
+                return False
+            if inv.get("used"):
+                return False
+            created = float(str(inv.get("created", 0)))
+            ttl = float(str(inv.get("ttl", 600)))
+            if time.monotonic() - created > ttl:
+                self._invites.pop(token, None)
+                return False
+            if inv.get("single_use"):
+                inv["used"] = True
+            return True
+
+    def invite_info(self) -> dict[str, Any]:
+        with self._lock:
+            now = time.monotonic()
+            live = sum(
+                1
+                for inv in self._invites.values()
+                if not inv.get("used")
+                and now - float(str(inv.get("created", 0))) <= float(str(inv.get("ttl", 600)))
+            )
+        return {"active": live}
 
     def cancel_job(self, job_id: str, viewer_id: str, *, quiet: bool = False) -> None:
         with self._lock:

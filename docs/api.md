@@ -36,7 +36,7 @@ Server name, version, auth state and — once authenticated — share URLs, perm
   "share_url": "http://192.168.1.24:5000",
   "urls": ["http://192.168.1.24:5000"],
   "permissions": {"upload": true, "browse": true, "delete": true},
-  "limits": {"max_upload_size": 0},
+  "limits": {"max_upload_size": 0, "chunk_size": 2097152, "chunk_threshold": 4194304},
   "storage": {"free": 182736451584},
   "pin": null
 }
@@ -83,6 +83,22 @@ curl -F file=@photo.jpg -F file=@notes.txt http://HOST:5000/api/files
 
 Errors: `400 invalid_name`, `400 incomplete_upload`, `403 upload_disabled`, `413 too_large`, `507 insufficient_storage`.
 
+**Chunked upload (files over ~4 MB):** the browser splits the file into 2 MiB
+pieces (up to 3 in flight) so a dropped connection loses pieces, not the file.
+Each piece is a `POST` with `Content-Range: bytes <start>-<end>/<total>` and an
+`X-Upload-Id` the client picks (same id across retries, so a reload resumes):
+
+```bash
+curl -X POST --data-binary @chunk1 \
+  -H "Content-Range: bytes 0-2097151/5242880" -H "X-Upload-Id: abc123" \
+  -H "X-Filename: big.bin" http://HOST:5000/api/files
+```
+
+While incomplete the server answers `308` with `{"received", "total", "ranges"}`;
+`201` carries the saved file once the last byte arrives. Pieces may arrive in
+any order and rewrites are idempotent. `GET /api/uploads/<id>/status` reports
+what arrived, so an interrupted upload resumes with the missing pieces only.
+
 ### `GET /files/<name>` — download
 Always an attachment, with `Range` support for resuming (`curl -C - -O`). `?inline=1` displays images, audio and video in the browser. `/download/<name>` is a legacy alias.
 
@@ -112,7 +128,9 @@ These power the device grid. "Owner" means a request from the device itself
 | `GET /api/state` | anyone | `{me, host, devices, incoming, outgoing, discovery, pairing?, inbox?}` with an `ETag` (poll with `If-None-Match`) |
 | `POST /api/me` `{name, form?, platform?}` | anyone | Rename this device (owner) or how this browser appears (visitor) |
 | `POST /api/send` `{to: [ids], files: [{name, size, mime}]}` | anyone | Offer files to devices → `201 {job}` |
-| `PUT /api/send/<job>/files/<n>` | job creator | The file's bytes (`Content-Length` required), streamed to every receiver that accepted |
+| `PUT /api/send/<job>/files/<n>` | job creator | The file's bytes (`Content-Length` required), streamed to every receiver that accepted. Big files arrive as `Content-Range` chunks (see above) staged under `relay-chunks/`, then fanned out when complete |
+| `GET /api/send/<job>/files/<n>/status?upload_id=…` | job creator | Staged bytes/ranges for one chunked file (resume + pause support) |
+| `POST /api/invites` `{}` → `{token, url, expires_in}` · `GET /api/invites` | owner | Mint a single-use guest link (`/?invite=…`): lets one visitor past the PIN as a trusted guest, then expires (10 min default) |
 | `DELETE /api/send/<job>` · `DELETE /api/send/<job>/targets/<id>` | job creator | Cancel everything / one receiver |
 | `POST /api/send/<job>/retry` `{to?: [ids]}` | job creator | Re-offer the job's files to declined/failed/expired targets → `201 {job}` (receiver is asked again) |
 | `POST /api/incoming/<id>/accept` · `/decline` · `DELETE /api/incoming/<id>` | the recipient | Answer or stop an incoming transfer |

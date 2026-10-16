@@ -71,7 +71,9 @@ between **paired** apps carry a signature (§4).
 | `POST /hello` body = caller's info | Registers the caller (address = TCP peer address); returns `/info` |
 | `POST /offers` | Offer files (below) → `201 {id, secret, state, reason}` (`reason` says why, when it is declined straight away) |
 | `GET /offers/<id>` + `X-OT-Secret` | `{state, reason, files: [{state, received}]}` |
-| `PUT /offers/<id>/files/<n>` + `X-OT-Secret`, `Content-Length` | Raw file bytes → `201 {file}` |
+| `PUT /offers/<id>/files/<n>` + `X-OT-Secret`, `Content-Length` | Raw file bytes → `201 {file}` (small files) |
+| `PUT /offers/<id>/files/<n>` + `X-OT-Secret`, `Content-Range` | One 2 MiB piece of a big file → `308 {received, ranges}` until complete, then `201`. Pieces may arrive in any order; the receiver stages them sparsely and publishes atomically |
+| `GET /offers/<id>/files/<n>/status` + `X-OT-Secret` | Staged bytes/ranges for one incoming file (sender resumes the missing pieces) |
 | `DELETE /offers/<id>` + `X-OT-Secret` | Sender cancels |
 | `POST /pair`, `POST /pair/confirm` | Pairing (§3) |
 
@@ -186,5 +188,8 @@ auto-accepted; anything else is treated as a stranger (asked first).
   on shared networks. TLS with pinned per-device certificates is on the roadmap.
 * Browser → browser goes direct (WebRTC, see above). Browser → app and
   app → browser-on-another-app still pass through the app the browser opened.
-* No resume: an interrupted file restarts from zero (retry re-offers it).
-* Folders aren't sent as folders — zip them first.
+* Big files are resumable end to end: the browser uploads 2 MiB pieces (3 in
+  flight, pausable) staged under `relay-chunks/`, and the sending app forwards
+  big files to each receiving app piece-by-piece with per-piece retry.
+* Folders are zipped in the browser (stored, structure kept as paths) and sent
+  as one `.zip` through the normal pipeline.

@@ -2,6 +2,16 @@
 
 All notable changes are documented here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses [Semantic Versioning](https://semver.org/).
 
+## [3.2.0] — 2026-10-16
+
+### Added
+- **Chunked transfers**: files over ~4 MB are split into 2 MiB `Content-Range` pieces (3 in flight, any order, idempotent rewrites) on every leg — browser to app (`POST /api/files`, `PUT /api/send/<job>/files/<n>`) and app to app (`PUT /api/p2p/v1/offers/<id>/files/<n>`) — with `GET …/status` endpoints reporting staged ranges, so a dropped connection loses pieces, not the file.
+- **Pause / Resume** for chunked uploads (shared-folder and device sends), surviving page reloads via the stored upload id.
+- **Folder sending**: drop or pick a folder and it is zipped in the browser (structure kept as paths, no dependency, offline) then sent through the normal pipeline.
+- **Recent transfers** with per-transfer speed graphs (inline SVG sparklines, live during upload, kept for the last 30 in the browser).
+- **Single-use guest links** (`POST /api/invites`, `/?invite=…`): one visitor past the PIN as a trusted guest, expiring after 10 minutes.
+- `GET /api/info` limits now advertise `chunk_size` and `chunk_threshold`.
+
 ## [3.1.0] — 2026-10-15
 
 ### Added

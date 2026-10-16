@@ -3,8 +3,9 @@
 // file list · shared-folder uploads · drag/drop/paste · PIN · boot.
 // lib.js has the helpers, nearby.js the devices, sending and pairing.
 
-import { $, api, can, copyText, formatBytes, formatDuration, guessKind, h, icon, plural, relativeTime, setLockHandler, state, toast } from "./lib.js";
+import { $, addHistory, api, can, chunkLimits, clearHistory, copyText, formatBytes, formatDuration, guessKind, h, icon, loadHistory, newUploadId, plural, pushSample, relativeTime, setLockHandler, shouldChunk, sparklineSVG, state, toast, uploadParallel } from "./lib.js";
 import { announceSelf, busy, fetchState, forgetDirectFile, initNearby, isDeviceMode, mesh, openAddDevice, stageFiles } from "./nearby.js";
+import { collectDropped, zipFiles, zipName } from "./zip.js";
 
 const POLL_MS = 1500;
 const POLL_BUSY_MS = 700;
@@ -451,6 +452,12 @@ function pump() {
 
 function startUpload(t) {
   Object.assign(t, { state: "uploading", loaded: 0, speed: 0, error: "", lastAt: performance.now(), lastLoaded: 0 });
+  // Big files go chunk-by-chunk (2 MiB pieces, retried per chunk) so a Wi-Fi
+  // hiccup loses one chunk instead of the whole file.
+  if (shouldChunk(t.size)) {
+    startChunkedUpload(t);
+    return;
+  }
   const xhr = new XMLHttpRequest();
   t.xhr = xhr;
   xhr.open("POST", "/api/files");
@@ -504,6 +511,95 @@ function startUpload(t) {
   xhr.send(t.file);
 }
 
+async function startChunkedUpload(t) {
+  // Big files go up in parallel chunks (3 in flight): a Wi-Fi hiccup loses
+  // the in-flight pieces, not the whole file. Pausing aborts the workers but
+  // keeps the upload id, so resuming continues where it stopped.
+  t.uploadId = t.uploadId || newUploadId();
+  t.abort = new AbortController();
+  t.samples = t.samples || [];
+  const total = t.size;
+  t.startedAt = t.startedAt || performance.now();
+  try {
+    const { size: chunkSize } = chunkLimits();
+    const chunks = Math.max(1, Math.ceil(total / chunkSize));
+    let lastAt = performance.now();
+    let lastSent = 0;
+    const { data } = await uploadParallel(
+      "/api/files",
+      {
+        method: "POST", file: t.file, total, name: t.name, uploadId: t.uploadId,
+        statusUrl: `/api/uploads/${encodeURIComponent(t.uploadId)}/status`,
+        signal: t.abort.signal, concurrency: 3,
+        onProgress: (sent) => {
+          const now = performance.now();
+          const dt = (now - lastAt) / 1000;
+          if (dt >= 0.4 && sent > lastSent) {
+            const instant = (sent - lastSent) / dt;
+            t.speed = t.speed ? t.speed * 0.6 + instant * 0.4 : instant;
+            pushSample(t.samples, t.speed);
+            lastAt = now;
+            lastSent = sent;
+          }
+          t.loaded = sent;
+          t.chunkNote = total > chunkSize ? `${Math.min(chunks, Math.ceil(sent / chunkSize) + 1)}/${chunks} chunks · 3 parallel` : "";
+          scheduleTransferRender();
+        },
+      },
+    );
+    const saved = data?.files?.[0] || null;
+    t.state = "done";
+    t.loaded = total;
+    t.chunkNote = "";
+    state.etag = null;
+    await poll(true);
+    const match = saved || state.files.find((f) => f.size === total);
+    t.savedName = match?.name || t.name;
+    state.sentInBatch.push(t.savedName);
+    if (t.savedName) state.justAdded.add(t.savedName);
+    const secs = Math.max(0.1, (performance.now() - t.startedAt) / 1000);
+    addHistory({ name: t.savedName, size: total, direction: "up", status: "done", speed: total / secs, samples: t.samples.slice(-30) });
+    renderHistory();
+    setTimeout(() => removeTransfer(t), 3500);
+  } catch (err) {
+    if (t.wantCancel) {
+      t.wantCancel = false;
+      t.state = "canceled";
+      removeTransfer(t);
+      settle();
+      return;
+    }
+    if (err.paused || t.abort.signal.aborted) {
+      if (t.state === "uploading" || t.state === "pausing") {
+        t.state = "paused";
+        t.chunkNote = `Paused at ${Math.floor((t.loaded / Math.max(1, total)) * 100)}% — resume to continue`;
+      }
+      renderTransfers();
+      return;
+    }
+    t.state = "error";
+    t.error = err.message || "Connection lost. Retry to resume where it stopped.";
+    t.fatal = [403, 413].includes(err.status);
+    t.chunkNote = "";
+  }
+  settle();
+}
+
+function pauseTransfer(t) {
+  if (t.state !== "uploading") return;
+  t.state = "pausing";
+  renderTransfers();
+  t.abort?.abort();
+}
+
+function resumeTransfer(t) {
+  if (t.state !== "paused" && t.state !== "error") return;
+  Object.assign(t, { state: "uploading", error: "", announced: false });
+  renderTransfers();
+  if (shouldChunk(t.size)) startChunkedUpload(t);
+  else startUpload(t);
+}
+
 function settle() {
   pump();
   renderTransfers();
@@ -526,8 +622,16 @@ function settle() {
 }
 
 function cancelOrDismiss(t) {
-  if (t.state === "uploading") t.xhr.abort();
-  else {
+  if (t.state === "uploading" || t.state === "paused" || t.state === "pausing") {
+    t.wantCancel = true;
+    if (t.xhr) t.xhr.abort();
+    if (t.abort) t.abort.abort();
+    if (t.state === "paused") {
+      t.state = "canceled";
+      removeTransfer(t);
+      settle();
+    }
+  } else {
     t.state = "canceled";
     removeTransfer(t);
     settle();
@@ -535,6 +639,7 @@ function cancelOrDismiss(t) {
 }
 
 function retryTransfer(t) {
+  t.wantCancel = false;
   t.state = "queued";
   t.announced = false;
   pump();
@@ -596,24 +701,42 @@ function renderTransfers() {
     }
     let text;
     if (t.state === "queued") text = `Waiting · ${formatBytes(t.size)}`;
-    else if (t.state === "uploading") {
+    else if (t.state === "uploading" || t.state === "pausing") {
       const eta = t.speed > 0 ? formatDuration((t.size - t.loaded) / t.speed) : "";
-      text = [`${formatBytes(t.loaded)} of ${formatBytes(t.size)}`, t.speed > 0 && `${formatBytes(t.speed)}/s`, eta].filter(Boolean).join(" · ");
+      const parts = [`${formatBytes(t.loaded)} of ${formatBytes(t.size)}`, t.speed > 0 && `${formatBytes(t.speed)}/s`, eta];
+      if (t.chunkNote) parts.push(t.chunkNote);
+      text = parts.filter(Boolean).join(" · ");
       if (t.loaded >= t.size && t.size > 0) text = "Finishing…";
-    } else if (t.state === "done") text = t.savedName && t.savedName !== t.name ? `Sent as “${t.savedName}”` : "Sent";
+    } else if (t.state === "paused") text = t.chunkNote || `Paused · ${formatBytes(t.loaded)} of ${formatBytes(t.size)}`;
+    else if (t.state === "done") text = t.savedName && t.savedName !== t.name ? `Sent as “${t.savedName}”` : "Sent";
     else if (t.state === "error") text = t.error;
     else text = "";
     if (sub.textContent !== text) sub.textContent = text;
+    // Live speed sparkline under the progress bar.
+    let spark = t.el.querySelector(".spark-wrap");
+    if (t.samples?.length >= 2 && (t.state === "uploading" || t.state === "paused")) {
+      if (!spark) {
+        spark = h("span", { class: "spark-wrap" });
+        t.el.querySelector(".row-main")?.append(spark);
+      }
+      const svg = sparklineSVG(t.samples);
+      if (svg) spark.replaceChildren(svg);
+    } else if (spark) {
+      spark.remove();
+    }
 
-    const mode = t.state === "done" ? "done" : t.state === "error" ? (t.fatal ? "error-fatal" : "error") : "active";
+    const pausable = (t.state === "uploading" || t.state === "paused") && shouldChunk(t.size);
+    const mode = t.state === "done" ? "done" : t.state === "error" ? (t.fatal ? "error-fatal" : "error") : t.state === "paused" ? "paused" : "active";
     if (actions.dataset.mode !== mode) {
       actions.dataset.mode = mode;
       actions.replaceChildren(
         ...(mode === "done"
           ? [h("span", { class: "status-badge", "aria-label": "Sent" }, icon("check"))]
           : [
+              mode === "paused" && h("button", { class: "icon-btn is-accent", type: "button", "aria-label": `Resume ${t.name}`, title: "Resume", onclick: () => resumeTransfer(t) }, icon("retry")),
               mode === "error" && h("button", { class: "icon-btn is-accent", type: "button", "aria-label": `Retry ${t.name}`, title: "Retry", onclick: () => retryTransfer(t) }, icon("retry")),
-              h("button", { class: "icon-btn", type: "button", "aria-label": mode === "active" ? `Cancel ${t.name}` : `Dismiss ${t.name}`, title: mode === "active" ? "Cancel" : "Dismiss", onclick: () => cancelOrDismiss(t) }, icon("x")),
+              pausable && t.state === "uploading" && h("button", { class: "icon-btn", type: "button", "aria-label": `Pause ${t.name}`, title: "Pause", onclick: () => pauseTransfer(t) }, h("svg", { class: "icon", "aria-hidden": "true" }, h("use", { href: "#i-pause" }))),
+              h("button", { class: "icon-btn", type: "button", "aria-label": mode === "active" || t.state === "pausing" ? `Cancel ${t.name}` : `Dismiss ${t.name}`, title: mode === "active" || t.state === "pausing" ? "Cancel" : "Dismiss", onclick: () => cancelOrDismiss(t) }, icon("x")),
             ]
         ).filter(Boolean),
       );
@@ -644,14 +767,35 @@ function hasFiles(event) {
 
 function droppedFiles(event) {
   const items = [...(event.dataTransfer?.items || [])];
-  const folders = items.filter((item) => item.webkitGetAsEntry?.()?.isDirectory).length;
-  if (folders) {
-    toast(folders === 1 ? "Folders can’t be sent yet — zip it first." : "Folders can’t be sent yet — zip them first.", { tone: "error", icon: "alert" });
-  }
   if (items.length) {
-    return items.filter((item) => item.kind === "file" && !item.webkitGetAsEntry?.()?.isDirectory).map((item) => item.getAsFile()).filter(Boolean);
+    return items.filter((item) => item.kind === "file").map((item) => item.getAsFile()).filter(Boolean);
   }
   return [...(event.dataTransfer?.files || [])];
+}
+
+/** Drop handler that zips folders on the fly, then enqueues everything. */
+async function handleDrop(event) {
+  let items = [];
+  let folders = 0;
+  try {
+    ({ files: items, folders } = await collectDropped(event));
+  } catch {
+    items = droppedFiles(event).map((file) => ({ path: file.name, file }));
+  }
+  if (!items.length) return;
+  if (folders) {
+    toast(`Zipping ${plural(items.length, "file")} from ${plural(folders, "folder")}…`, { icon: "folder" });
+    try {
+      const blob = await zipFiles(items);
+      const file = new File([blob], zipName(items), { type: "application/zip" });
+      enqueueFiles([file], { source: "drop" });
+      return;
+    } catch {
+      toast("Couldn’t read that folder.", { tone: "error", icon: "alert" });
+      return;
+    }
+  }
+  enqueueFiles(items.map((entry) => entry.file || entry), { source: "drop" });
 }
 
 function setupDropAndPaste() {
@@ -691,7 +835,7 @@ function setupDropAndPaste() {
     if (!hasFiles(event)) return;
     event.preventDefault();
     hide();
-    if (canDrop()) enqueueFiles(droppedFiles(event), { source: "drop" });
+    if (canDrop()) handleDrop(event);
   });
 
   zone.addEventListener("click", () => input.click());
@@ -704,6 +848,20 @@ function setupDropAndPaste() {
   input.addEventListener("change", () => {
     enqueueFiles(input.files);
     input.value = "";
+  });
+  const folderInput = $("#folder-input");
+  folderInput?.addEventListener("change", async () => {
+    const picked = [...(folderInput.files || [])];
+    folderInput.value = "";
+    if (!picked.length) return;
+    const items = picked.map((file) => ({ path: file.webkitRelativePath || file.name, file }));
+    toast(`Zipping ${plural(items.length, "file")}…`, { icon: "folder" });
+    try {
+      const blob = await zipFiles(items);
+      enqueueFiles([new File([blob], zipName(items), { type: "application/zip" })]);
+    } catch {
+      toast("Couldn’t read that folder.", { tone: "error", icon: "alert" });
+    }
   });
 
   document.addEventListener("paste", (event) => {
@@ -795,6 +953,12 @@ function boot() {
   });
   for (const button of [$("#connect-button"), $("#empty-connect")]) button.addEventListener("click", () => openAddDevice());
   setupPinForm();
+  renderHistory();
+  window.addEventListener("ot-history", renderHistory);
+  $("#clear-history")?.addEventListener("click", () => {
+    clearHistory();
+    renderHistory();
+  });
   $("#search").addEventListener("input", (event) => {
     state.search = event.target.value;
     renderFiles();
@@ -809,6 +973,37 @@ function boot() {
   });
   if (state.info.auth.required && !state.info.auth.authenticated) showLock();
   else enterMain();
+}
+
+function renderHistory() {
+  const section = $("#history-section");
+  const list = $("#history-list");
+  if (!section || !list) return;
+  const entries = loadHistory();
+  section.hidden = entries.length === 0;
+  if (!entries.length) return;
+  $("#history-meta").textContent = plural(entries.length, "transfer");
+  list.replaceChildren(
+    ...entries.slice(0, 20).map((e) => {
+      const when = e.when ? relativeTime(e.when / 1000) : "";
+      const speed = e.speed > 0 ? `${formatBytes(e.speed)}/s` : "";
+      const sub = [`${formatBytes(e.size)}`, when, speed, e.status === "done" ? null : e.status].filter(Boolean).join(" · ");
+      const row = h(
+        "li",
+        { class: "row history-row" },
+        h("span", { class: "thumb", "aria-hidden": "true" }, icon(e.name?.endsWith(".zip") ? "archive" : guessKind(e.name || ""))),
+        h("div", { class: "row-main" }, h("span", { class: "row-title", title: e.name }, e.name), h("span", { class: "row-sub" }, sub)),
+        h("span", { class: "history-dir", dataset: { dir: e.direction === "up" ? "up" : "down" } }, e.direction === "up" ? "Sent" : "Received"),
+      );
+      const graph = e.samples?.length >= 2 ? sparklineSVG(e.samples) : null;
+      if (graph) {
+        const wrap = h("span", { class: "spark-wrap", title: "Speed over time" });
+        wrap.append(graph);
+        row.querySelector(".row-main")?.append(wrap);
+      }
+      return row;
+    }),
+  );
 }
 
 boot();

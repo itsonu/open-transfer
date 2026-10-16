@@ -13,6 +13,7 @@ Design notes
 
 from __future__ import annotations
 
+import contextlib
 import errno
 import hashlib
 import mimetypes
@@ -27,6 +28,8 @@ from collections.abc import Iterator
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Protocol
+
+from open_transfer.chunks import ChunkSessions
 
 CHUNK_SIZE = 1024 * 1024
 STATE_DIR = ".open-transfer"
@@ -181,6 +184,9 @@ class Storage:
         self._lock = threading.Lock()
         for directory in (self.root, self._incoming, self._trash):
             directory.mkdir(parents=True, exist_ok=True)
+        # Chunk sessions live beside incoming (not inside it) so crash-cleanup
+        # checks on incoming/ keep working and partial chunks are never listed.
+        self.chunks = ChunkSessions(self._state / "chunks")
         self._cleanup_incoming()
 
     # ------------------------------------------------------------------ reading
@@ -286,6 +292,44 @@ class Storage:
             target = self._unique_path(name)
             os.replace(part, target)
         return FileInfo.from_path(target)
+
+    def publish_path(self, src: Path, name: str) -> FileInfo:
+        """Publish an already-assembled file (e.g. a completed chunk session)."""
+        name = safe_filename(name)
+        with self._lock:
+            target = self._unique_path(name)
+            # Copy when crossing volumes, move otherwise; source is cleaned up.
+            try:
+                os.replace(src, target)
+            except OSError:
+                shutil.copyfile(src, target)
+                with contextlib.suppress(OSError):
+                    Path(src).unlink(missing_ok=True)
+        return FileInfo.from_path(target)
+
+    def finish_chunked(self, upload_id: str, name: str, max_size: int = 0) -> FileInfo:
+        """Publish a completed chunk session under a unique name."""
+        info = self.chunks.status(upload_id)
+        if info is None:
+            raise NotFound("Unknown upload.")
+        if info["received"] != info["total"]:
+            raise IncompleteUpload("The upload isn’t finished yet.")
+        if max_size and info["total"] > max_size:
+            self.chunks.discard(upload_id)
+            raise TooLarge(f"File is larger than the {_human(max_size)} limit.")
+        src = self.chunks.path(upload_id)
+        if src is None:
+            raise NotFound("Unknown upload.")
+        # Copy out first (keeps the session intact if publish fails), then discard.
+        tmp = self._incoming / f"{secrets.token_hex(8)}.part"
+        shutil.copyfile(src, tmp)
+        try:
+            saved = self._publish(tmp, safe_filename(name or info["name"]))
+        finally:
+            with contextlib.suppress(OSError):
+                tmp.unlink(missing_ok=True)
+        self.chunks.discard(upload_id)
+        return saved
 
     def _unique_path(self, name: str) -> Path:
         candidate = self.root / name

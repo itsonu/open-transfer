@@ -152,17 +152,20 @@ Any device can send to any other — there's no host or server role. A phone wit
 - Each device shows its **name, type and platform**; rename yours in one tap
 - Send to **one, several or all** devices; recipients are always shown before you send, and sending to everyone needs a confirmation
 - **Accept / Decline** prompt on the receiver with the sender, file names and sizes; offers expire after 2 minutes
-- **Pairing** with a QR code or 6-digit code (proved with HMAC, never sent in clear); paired devices auto-accept
+- **Pairing** with a QR code or 6-digit code (proved with HMAC, never sent in clear); paired devices auto-accept. Owners can also mint a **single-use guest link** (past the PIN, expires in 10 minutes)
 - **Paired-only** mode (like AirDrop's "Contacts only"), and add-by-address where multicast is blocked
 - Browsers without the app join a device's group by QR code and can send and receive too — **browser to browser goes direct** over WebRTC (falls back to the app if the network blocks it). Add the page to the home screen to use it like an app.
 
 **Transfers**
 - **Device to device**: one upload is streamed to every receiver at the same time — nothing is staged on disk
 - Multiple files, **no size limit** except free space; live progress per recipient with speed and time left
+- **Big files go in chunks**: files over ~4 MB are split into 2 MiB pieces (3 in flight) with per-piece retry — a Wi‑Fi drop loses pieces, not the file. **Pause and resume** any chunked upload, even after a reload. App-to-app legs are chunked the same way.
+- **Folders**: drop a folder (or pick one) and it's zipped in the browser — structure kept — then sent through the same pipeline
 - Cancel per recipient or all, **retry** the ones that failed, "send now" to the ones that already accepted
 - A device leaving or losing Wi‑Fi mid-transfer only affects its own transfer; the rest continue
 - Received files land in **Downloads/Open Transfer**; duplicates are kept as `photo (1).jpg`; Unicode names work
 - Paste (⌘V / Ctrl+V) screenshots and files; drag and drop anywhere
+- **Recent transfers** with per-transfer speed graphs, kept in the browser
 
 **Experience**
 - Clean, native-feeling interface with automatic **dark mode**, fluid motion that respects **Reduce Motion**, and layouts tuned for phones, tablets and desktops
@@ -346,10 +349,10 @@ nginx limits request bodies to 1 MB by default. Set `client_max_body_size 0;` an
 ## Roadmap
 
 - [ ] Encrypted transfers (TLS with per-device certificates, pinned at pairing)
-- [ ] Folder transfers that keep their structure; resumable transfers
+- [x] Folder transfers (zipped in the browser, structure kept); resumable transfers (chunked, pausable, app-to-app)
 - [ ] "Share to Open Transfer" from other Android apps; iOS app
 - [ ] Signed/notarised desktop builds, Play Store / F-Droid
-- [ ] Share text snippets and links, not just files
+- [x] Share text snippets and links, not just files
 - [ ] Translations (i18n)
 
 Have an idea? [Open a feature request](https://github.com/itsonu/open-transfer/issues/new/choose).

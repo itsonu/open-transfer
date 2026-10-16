@@ -268,7 +268,11 @@ def create_app(config: Config | None = None) -> Flask:
                     "send": owner or config.allow_upload,
                 },
                 shared_folder=config.share_folder,
-                limits={"max_upload_size": config.max_upload_size},
+                limits={
+                    "max_upload_size": config.max_upload_size,
+                    "chunk_size": 2 * 1024 * 1024,
+                    "chunk_threshold": 4 * 1024 * 1024,
+                },
                 storage={"free": storage.usage()["free"]},
                 # Only the owner (loopback) may see the PIN, e.g. to show it
                 # next to the QR code. Authenticated visitors must not learn
@@ -336,7 +340,8 @@ def create_app(config: Config | None = None) -> Flask:
     def index() -> Any:
         supplied = request.args.get("pin")
         pair = request.args.get("pair")
-        if supplied is not None or pair is not None:
+        invite = request.args.get("invite")
+        if supplied is not None or pair is not None or invite is not None:
             # QR codes embed the PIN (and the owner's pairing code) so scanning
             # is enough to get in. Strip them from the URL straight away so
             # they don't linger in history. Both are rate-limited.
@@ -349,6 +354,12 @@ def create_app(config: Config | None = None) -> Flask:
                 and mesh.check_visitor_code(pair, client_id()) is True
             ):
                 session.permanent = True
+                session["wtrust"] = mesh.id
+            if invite and not is_owner() and mesh.redeem_invite(invite):
+                # Single-use guest link: past the PIN and trusted like a
+                # paired device, then dead — no lingering access.
+                session.permanent = True
+                session["pin"] = pin_digest
                 session["wtrust"] = mesh.id
             return redirect(url_for("index"))
         return render_template("index.html", info=server_info(), version=__version__)
@@ -426,11 +437,94 @@ def create_app(config: Config | None = None) -> Flask:
         response.set_etag(etag)
         return response
 
+    @app.get("/api/uploads/<upload_id>/status")
+    def upload_status(upload_id: str) -> Response:
+        """Bytes already staged (with ranges, so clients resume missing pieces)."""
+        info = storage.chunks.status(upload_id)
+        if info is None:
+            return jsonify({"received": 0, "total": 0, "ranges": []})
+        return jsonify(
+            {"received": info["received"], "total": info["total"], "ranges": info.get("ranges", [])}
+        )
+
     @app.post("/api/files")
     @app.post("/transfer")
     def upload() -> Any:
         if not can_upload():
             return error(403, "upload_disabled", "Uploading is turned off on this computer.")
+        # Chunked path: big files arrive as 2 MiB pieces with
+        # ``Content-Range: bytes <start>-<end>/<total>`` + ``X-Upload-Id``.
+        # A lost connection loses one chunk, not the whole file.
+        content_range = request.headers.get("Content-Range")
+        if content_range and request.mimetype != "multipart/form-data":
+            from open_transfer.chunks import MAX_CHUNK_BYTES, parse_content_range
+
+            parsed = parse_content_range(content_range)
+            if parsed is None:
+                return error(400, "bad_range", "Invalid Content-Range header.")
+            start, end, total = parsed
+            upload_id = (request.headers.get("X-Upload-Id") or "").strip()[:64]
+            if not upload_id:
+                return error(400, "bad_request", "Missing X-Upload-Id header.")
+            header = request.headers.get("X-Filename")
+            name = unquote(header) if header else request.args.get("name", "")
+            if not name:
+                return error(400, "invalid_name", "Missing file name (send an X-Filename header).")
+            try:
+                data = request.get_data(cache=False)
+            except (ClientDisconnected, ConnectionError) as exc:
+                raise IncompleteUpload("The upload was interrupted before it finished.") from exc
+            if len(data) != end - start + 1:
+                return error(400, "bad_range", "Chunk size doesn’t match Content-Range.")
+            if len(data) > MAX_CHUNK_BYTES:
+                return error(413, "too_large", "Chunk is too big.")
+            if config.max_upload_size and total > config.max_upload_size:
+                return error(413, "too_large", "File is larger than this device accepts.")
+            try:
+                from open_transfer.chunks import ChunkStatus
+
+                info: ChunkStatus | None = storage.chunks.status(upload_id)
+                if info is None:
+                    storage.chunks.touch(upload_id, name, total, 0)
+                    info = ChunkStatus(name=name, total=total, received=0, contiguous=0, ranges=[])
+                if info["total"] != total:
+                    return error(400, "bad_range", "Total doesn’t match this upload.")
+                # Any order is fine (parallel chunks); rewrites are idempotent.
+                received = storage.chunks.append(upload_id, start, data)
+                refreshed = storage.chunks.status(upload_id)
+                if refreshed is not None:
+                    info = refreshed
+            except ValueError:
+                return error(400, "bad_range", "Chunk is outside the file.")
+            except (OSError, StorageError) as exc:
+                if isinstance(exc, StorageError):
+                    raise exc
+                return error(500, "internal_error", "Couldn’t store that chunk.")
+            if received < total:
+                response = jsonify(
+                    {
+                        "received": received,
+                        "total": total,
+                        "done": False,
+                        "ranges": info["ranges"],
+                    }
+                )
+                response.status_code = 308
+                response.headers["Range"] = f"bytes=0-{received - 1}" if received else "bytes=*/0"
+                return response
+            try:
+                saved_file = storage.finish_chunked(
+                    upload_id, name, max_size=config.max_upload_size
+                )
+            except StorageError as exc:
+                raise exc
+            log.info(
+                "Received %s (%s bytes, chunked) from %s",
+                log_safe(saved_file.name),
+                saved_file.size,
+                client_id(),
+            )
+            return jsonify({"files": [saved_file.to_dict()]}), 201
         saved = []
         try:
             if request.mimetype == "multipart/form-data":
