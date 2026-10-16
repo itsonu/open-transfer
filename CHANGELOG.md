@@ -2,6 +2,11 @@
 
 All notable changes are documented here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Fixed
+- Releases no longer attach the Docker build record (`*.dockerbuild`) as a download; only the app, package and APK builds are published.
+
 ## [3.2.0] — 2026-10-16
 
 ### Added
@@ -94,6 +99,8 @@ The project is now **Open Transfer**: a rewrite of the original Flask "File Tran
 ### Removed
 - Unrelated packet-sniffing and network-scanning scripts (`get.py`, `get2.py`, `scan.py`), the duplicate `backup.py`, the unused Tkinter import and IDE settings.
 
-[Unreleased]: https://github.com/itsonu/open-transfer/compare/v3.0.0...HEAD
+[Unreleased]: https://github.com/itsonu/open-transfer/compare/v3.2.0...HEAD
+[3.2.0]: https://github.com/itsonu/open-transfer/compare/v3.1.0...v3.2.0
+[3.1.0]: https://github.com/itsonu/open-transfer/compare/v3.0.0...v3.1.0
 [3.0.0]: https://github.com/itsonu/open-transfer/compare/v2.0.0...v3.0.0
 [2.0.0]: https://github.com/itsonu/open-transfer/releases/tag/v2.0.0
