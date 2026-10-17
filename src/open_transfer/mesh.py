@@ -36,7 +36,8 @@ import secrets
 import threading
 import time
 from collections.abc import Callable
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor
+from concurrent.futures import wait as wait_futures
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -79,6 +80,7 @@ PEER_FORGET = 120.0  # …and is dropped from the list (paired apps stay, greyed
 VISITOR_STALE = 25.0  # browsers poll every 1.5 s, hidden tabs every 10 s
 VISITOR_FORGET = 24 * 3600.0
 HELLO_EVERY = 6.0
+HELLO_TIMEOUT = 3.0  # seconds a hello may take before we give up on it
 FINISHED_KEEP = 90.0  # finished transfers stay in the UI this long
 PAIR_CODE_TTL = 600.0
 STALL_TIMEOUT = 60.0  # a receiver that takes no data for this long is dropped
@@ -142,6 +144,7 @@ class Peer:
     version: str = ""
     rev: int = -1
     last_seen: float = 0.0
+    left_at: float = 0.0  # when it last said goodbye
     manual: bool = False
     visitors: list[dict[str, str]] = field(default_factory=list)
     accepts: str = "everyone"
@@ -288,6 +291,7 @@ class Mesh:
         self._executor = ThreadPoolExecutor(max_workers=16, thread_name_prefix="ot-mesh")
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
+        self._hellos: set[Future[bool]] = set()
 
     # ------------------------------------------------------------- lifecycle
 
@@ -312,6 +316,11 @@ class Mesh:
 
     def stop(self) -> None:
         self._stop.set()
+        # Let hellos already on their way land before saying goodbye, so none of
+        # them arrives after it and makes us look online again.
+        with self._lock:
+            in_flight = list(self._hellos)
+        wait_futures(in_flight, timeout=HELLO_TIMEOUT)
         if self.discovery:
             self.discovery.stop()
         with self._lock:
@@ -455,7 +464,7 @@ class Mesh:
         return peer
 
     def _on_packet(self, packet: dict[str, Any], src: str) -> None:
-        if packet.get("id") == self.id:
+        if packet.get("id") == self.id or self._stop.is_set():
             return
         kind = packet["type"]
         if kind == "find":
@@ -467,6 +476,7 @@ class Mesh:
                 peer = self._peers.get(packet["id"])
                 if peer:
                     peer.last_seen = 0.0
+                    peer.left_at = time.monotonic()
                     peer.visitors = []
             return
         with self._lock:
@@ -488,23 +498,53 @@ class Mesh:
             # us even if multicast only works in one direction.
             if kind == "announce" and self.discovery:
                 self.discovery.reply_soon()
-            self._executor.submit(self._hello, peer)
+            self._say_hello(peer)
         elif changed:
-            self._executor.submit(self._hello, peer)
+            self._say_hello(peer)
+
+    def _say_hello(self, peer: Peer) -> None:
+        """Say hello in the background, remembering it until it lands (see ``stop``)."""
+        if self._stop.is_set():
+            return
+        try:
+            future = self._executor.submit(self._hello, peer)
+        except RuntimeError:  # the executor shut down meanwhile
+            return
+        with self._lock:
+            self._hellos.add(future)
+        future.add_done_callback(self._hello_done)
+
+    def _hello_done(self, future: Future[bool]) -> None:
+        with self._lock:
+            self._hellos.discard(future)
 
     def _hello(self, peer: Peer) -> bool:
+        if self._stop.is_set():
+            return False
+        started = time.monotonic()
         try:
             status, info = self._http(
-                peer, "POST", f"{P2P}/hello", body=self.self_info(include_visitors=False), timeout=3
+                peer,
+                "POST",
+                f"{P2P}/hello",
+                body=self.self_info(include_visitors=False),
+                timeout=HELLO_TIMEOUT,
             )
         except OSError:
             return False
         if status != 200:
             return False
+        with self._lock:
+            known = self._peers.get(peer.id)
+            said_goodbye = known is not None and known.left_at >= started
+        if said_goodbye:
+            return False  # they left while we were talking: the answer is stale
         self._upsert_peer(info, peer.host, manual=peer.manual)
         return True
 
     def handle_hello(self, info: dict[str, Any], host: str) -> dict[str, Any]:
+        if self._stop.is_set():
+            raise MeshError(503, "stopping", "This device is shutting down.")
         self._upsert_peer(info, host)
         return self.self_info()
 
@@ -523,7 +563,7 @@ class Mesh:
         peer = self._upsert_peer(info, host, manual=True)
         if peer is None:
             raise MeshError(502, "not_open_transfer", f"{host}:{port} isn’t an Open Transfer app.")
-        self._executor.submit(self._hello, peer)
+        self._say_hello(peer)
         return peer
 
     # ------------------------------------------------------------ visitors
@@ -1857,7 +1897,7 @@ class Mesh:
             if now - last_hello >= HELLO_EVERY:
                 last_hello = now
                 for peer in peers:
-                    self._executor.submit(self._hello, peer)
+                    self._say_hello(peer)
                 for address in self.config.peers:
                     if now - manual_known.get(address, -1e9) >= HELLO_EVERY * 2:
                         manual_known[address] = now

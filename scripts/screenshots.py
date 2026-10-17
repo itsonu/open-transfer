@@ -3,6 +3,7 @@
     python scripts/screenshots.py
 
 Needs the e2e extra (``pip install -e '.[e2e]'`` + ``playwright install chromium``).
+Set ``OT_CHROMIUM`` to use a specific Chromium binary.
 Starts four real devices in this process (a Mac, a Windows PC, a Galaxy Tab and
 a Pixel phone) that find each other on the local network, then captures the
 main states in light and dark mode on desktop and phone sizes.
@@ -95,7 +96,9 @@ def main() -> None:
     OUT.mkdir(parents=True, exist_ok=True)
     discovery_port = random.randint(40000, 59000)  # noqa: S311 - not security related
     with tempfile.TemporaryDirectory() as tmp, sync_playwright() as p:
-        browser = p.chromium.launch(args=["--no-proxy-server"])
+        browser = p.chromium.launch(
+            args=["--no-proxy-server"], executable_path=os.environ.get("OT_CHROMIUM") or None
+        )
         seed(Path(tmp) / "Sonu’s MacBook Pro", browser.new_page())
         nodes = []
         for name, extra in DEVICES:

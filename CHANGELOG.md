@@ -4,6 +4,9 @@ All notable changes are documented here. The format follows [Keep a Changelog](h
 
 ## [Unreleased]
 
+### Fixed
+- A device that quit could show as nearby again for up to 15 seconds: a hello still on its way (or the discovery loop's last announcement) could land after its goodbye. Quitting now finishes those first and says goodbye last, refuses new hellos while stopping, and others ignore a hello answer that started before the goodbye.
+
 ## [3.2.1] — 2026-10-17
 
 ### Changed
