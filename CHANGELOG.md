@@ -4,6 +4,9 @@ All notable changes are documented here. The format follows [Keep a Changelog](h
 
 ## [Unreleased]
 
+### Changed
+- **New app icon** ("Beam"): a continuous-corner squircle in a cyan → blue → indigo gradient with faint discovery rings and staggered send/receive arrows, the same on the web app, website, Windows, macOS and Android. Android's launcher icon was a paper plane; it now matches, with an adaptive gradient background, the arrows as foreground and themed (monochrome) icon. `scripts/brand_icon.py` draws it in code and writes every icon asset.
+
 ### Fixed
 - Releases no longer attach the Docker build record (`*.dockerbuild`) as a download; only the app, package and APK builds are published.
 
