@@ -1,5 +1,11 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!-- The app icon's gradient (scripts/brand_icon.py) behind the loading-screen arrows. -->
 <shape xmlns:android="http://schemas.android.com/apk/res/android"
     android:shape="oval">
-    <solid android:color="@color/brand" />
+    <gradient
+        android:angle="315"
+        android:centerColor="#1C7CFF"
+        android:endColor="#3B2BCF"
+        android:startColor="#62D0FF"
+        android:type="linear" />
 </shape>

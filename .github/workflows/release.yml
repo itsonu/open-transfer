@@ -157,6 +157,9 @@ jobs:
       - uses: actions/download-artifact@v8
         with:
           path: artifacts
+          # Only our builds: docker/build-push-action also uploads a
+          # *.dockerbuild record artifact that must not become a release asset.
+          pattern: "{python-dist,binary-*,open-transfer-android}"
           merge-multiple: true
       - uses: softprops/action-gh-release@v3
         with:

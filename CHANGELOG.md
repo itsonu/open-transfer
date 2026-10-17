@@ -2,6 +2,17 @@
 
 All notable changes are documented here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+## [3.2.1] — 2026-10-17
+
+### Changed
+- **New app icon** ("Beam"): a continuous-corner squircle in a cyan → blue → indigo gradient with faint discovery rings and staggered send/receive arrows, the same on the web app, website, Windows, macOS and Android. Android's launcher icon was a paper plane; it now matches, with an adaptive gradient background, the arrows as foreground and themed (monochrome) icon. `scripts/brand_icon.py` draws it in code and writes every icon asset.
+
+### Fixed
+- Releases no longer attach the Docker build record (`*.dockerbuild`) as a download; only the app, package and APK builds are published.
+- The Android app reported version 3.0.0 (versionCode 300) since 3.0.0; it now carries the release version.
+
 ## [3.2.0] — 2026-10-16
 
 ### Added
@@ -94,6 +105,9 @@ The project is now **Open Transfer**: a rewrite of the original Flask "File Tran
 ### Removed
 - Unrelated packet-sniffing and network-scanning scripts (`get.py`, `get2.py`, `scan.py`), the duplicate `backup.py`, the unused Tkinter import and IDE settings.
 
-[Unreleased]: https://github.com/itsonu/open-transfer/compare/v3.0.0...HEAD
+[Unreleased]: https://github.com/itsonu/open-transfer/compare/v3.2.1...HEAD
+[3.2.1]: https://github.com/itsonu/open-transfer/compare/v3.2.0...v3.2.1
+[3.2.0]: https://github.com/itsonu/open-transfer/compare/v3.1.0...v3.2.0
+[3.1.0]: https://github.com/itsonu/open-transfer/compare/v3.0.0...v3.1.0
 [3.0.0]: https://github.com/itsonu/open-transfer/compare/v2.0.0...v3.0.0
 [2.0.0]: https://github.com/itsonu/open-transfer/releases/tag/v2.0.0
