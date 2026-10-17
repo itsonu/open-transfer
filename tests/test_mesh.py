@@ -564,6 +564,58 @@ def test_devices_find_each_other_automatically(make_node: NodeFactory) -> None:
     )
 
 
+def test_hello_answered_after_a_goodbye_does_not_bring_the_device_back(
+    make_node: NodeFactory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    a = make_node("Alpha")
+    mesh = a.mesh
+    info = {"id": "d-" + "ab" * 12, "name": "Charlie", "port": 4242, "form": "computer"}
+    peer = mesh._upsert_peer(info, "127.0.0.1")
+    assert peer is not None
+    assert peer.online
+
+    def answer_after_goodbye(*_args: Any, **_kwargs: Any) -> tuple[int, dict[str, Any]]:
+        # Charlie says goodbye while our hello is still on its way back.
+        mesh._on_packet({"type": "bye", "id": info["id"]}, "127.0.0.1")
+        return 200, info
+
+    monkeypatch.setattr(mesh, "_http", answer_after_goodbye)
+    assert mesh._hello(peer) is False
+    assert not peer.online
+
+
+def test_a_device_that_is_stopping_refuses_hellos(make_node: NodeFactory) -> None:
+    from open_transfer.mesh import MeshError
+
+    a = make_node("Alpha")
+    a.mesh.stop()
+    with pytest.raises(MeshError) as info:
+        a.mesh.handle_hello({"id": "d-" + "cd" * 12, "name": "Bravo", "port": 4242}, "127.0.0.1")
+    assert info.value.status == 503
+
+
+def test_discovery_says_goodbye_after_its_last_announcement(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from open_transfer.discovery import Discovery
+
+    sent: list[tuple[str, bool]] = []
+    disco = Discovery(lambda: {"id": "d-" + "ef" * 12}, lambda *_: None, port=0, interval=0.05)
+    real_send = disco.send
+
+    def record(packet: dict[str, Any]) -> None:
+        sent.append((packet["type"], bool(disco._thread and disco._thread.is_alive())))
+        real_send(packet)
+
+    monkeypatch.setattr(disco, "send", record)
+    disco.start()
+    if not disco.working:
+        pytest.skip("no UDP socket here")
+    wait_for(lambda: any(kind == "announce" for kind, _ in sent))
+    disco.stop()
+    assert sent[-1] == ("bye", False)  # last, and sent once the loop has ended
+
+
 def test_state_supports_etags(make_node: NodeFactory) -> None:
     a = make_node("Alpha")
     request = urllib.request.Request(f"{a.local_url}/api/state")

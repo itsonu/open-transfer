@@ -112,11 +112,12 @@ class Discovery:
     def stop(self) -> None:
         if not self._sock:
             return
-        with contextlib.suppress(OSError):
-            self.send({"type": "bye"})
+        # Stop the loop first so no announcement can follow the goodbye.
         self._stop.set()
         if self._thread:
             self._thread.join(timeout=3)
+        with contextlib.suppress(OSError):
+            self.send({"type": "bye"})
         with contextlib.suppress(OSError):
             self._sock.close()
         self._sock = None
