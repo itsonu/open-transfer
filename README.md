@@ -14,9 +14,9 @@
 ![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-3776ab.svg)
 ![Platforms](https://img.shields.io/badge/apps-Windows%20%7C%20macOS%20%7C%20Android%20%7C%20Linux-555.svg)
 
-<a href="https://itsonu.github.io/open-transfer/demo/demo.mp4"><img src="docs/demo/demo.gif" alt="Demo: a Mac drops two files, picks a Pixel phone and a Galaxy tablet, the phone taps Accept, and both show Delivered" width="860"></a>
+<a href="https://itsonu.github.io/open-transfer/docs/demo/demo.mp4"><img src="docs/demo/demo.gif" alt="Demo: a Mac drops two files, picks a Pixel phone and a Galaxy tablet, the phone taps Accept, and both show Delivered" width="860"></a>
 
-<sub>▶ <b><a href="https://itsonu.github.io/open-transfer/demo/demo.mp4">Watch the 20-second demo with sound</a></b> · recorded from the real app: four devices, one real transfer</sub>
+<sub>▶ <b><a href="https://itsonu.github.io/open-transfer/docs/demo/demo.mp4">Watch the 20-second demo with sound</a></b> · recorded from the real app: four devices, one real transfer</sub>
 
 </div>
 
