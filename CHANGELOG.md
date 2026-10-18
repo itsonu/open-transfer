@@ -4,6 +4,8 @@ All notable changes are documented here. The format follows [Keep a Changelog](h
 
 ## [Unreleased]
 
+## [3.2.4] — 2026-10-18
+
 ### Fixed
 - Resuming a transfer that was paused just as its last pieces arrived uploaded the whole file again, even though it had already been delivered (the progress restarted from 0 next to "Delivered"). The device now remembers files it has finished, so a resumed upload sees it is done; and if every piece is there but unconfirmed, only the last one is sent again. Same for big uploads to your own device, which could otherwise save a second copy (#44).
 
@@ -123,7 +125,8 @@ The project is now **Open Transfer**: a rewrite of the original Flask "File Tran
 ### Removed
 - Unrelated packet-sniffing and network-scanning scripts (`get.py`, `get2.py`, `scan.py`), the duplicate `backup.py`, the unused Tkinter import and IDE settings.
 
-[Unreleased]: https://github.com/itsonu/open-transfer/compare/v3.2.3...HEAD
+[Unreleased]: https://github.com/itsonu/open-transfer/compare/v3.2.4...HEAD
+[3.2.4]: https://github.com/itsonu/open-transfer/compare/v3.2.3...v3.2.4
 [3.2.3]: https://github.com/itsonu/open-transfer/compare/v3.2.2...v3.2.3
 [3.2.2]: https://github.com/itsonu/open-transfer/compare/v3.2.1...v3.2.2
 [3.2.1]: https://github.com/itsonu/open-transfer/compare/v3.2.0...v3.2.1
