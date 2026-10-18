@@ -9,6 +9,7 @@ on:
     paths:
       - "site/**"
       - "docs/screenshots/**"
+      - "docs/demo/**"
       - "src/open_transfer/static/icons/**"
       - "scripts/build_site.py"
       - ".github/workflows/pages.yml"

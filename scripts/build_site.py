@@ -2,7 +2,7 @@
 
     python scripts/build_site.py
 
-Copies ``site/`` plus the logo and the README screenshots, then checks that
+Copies ``site/`` plus the logo, the README screenshots and the demo video, then checks that
 every local ``src``/``href`` in the HTML points at a file that exists, so a
 renamed screenshot fails CI instead of shipping a broken page.
 """
@@ -23,6 +23,7 @@ def build() -> None:
     shutil.rmtree(OUT, ignore_errors=True)
     shutil.copytree(ROOT / "site", OUT)
     shutil.copytree(ROOT / "docs" / "screenshots", OUT / "screenshots")
+    shutil.copytree(ROOT / "docs" / "demo", OUT / "demo")  # the README links the video here
     for name in ("logo.svg", "apple-touch-icon.png", "icon-512.png"):
         shutil.copy2(ICONS / name, OUT / name)
     (OUT / ".nojekyll").touch()  # serve files as-is, no Jekyll processing

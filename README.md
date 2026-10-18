@@ -14,7 +14,9 @@
 ![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-3776ab.svg)
 ![Platforms](https://img.shields.io/badge/apps-Windows%20%7C%20macOS%20%7C%20Android%20%7C%20Linux-555.svg)
 
-<img src="docs/screenshots/desktop-light.png" alt="Open Transfer on a Mac showing three nearby devices and received files" width="820">
+<a href="https://itsonu.github.io/open-transfer/demo/demo.mp4"><img src="docs/demo/demo.gif" alt="Demo: a Mac drops two files, picks a Pixel phone and a Galaxy tablet, the phone taps Accept, and both show Delivered" width="860"></a>
+
+<sub>▶ <b><a href="https://itsonu.github.io/open-transfer/demo/demo.mp4">Watch the 20-second demo with sound</a></b> · recorded from the real app: four devices, one real transfer</sub>
 
 </div>
 
@@ -190,7 +192,7 @@ Any device can send to any other — there's no host or server role. A phone wit
 | :---: | :---: | :---: |
 | <img src="docs/screenshots/incoming.png" alt="Galaxy Tab asked to accept two files from a MacBook" width="260"> | <img src="docs/screenshots/connect-light.png" alt="Add a device sheet with a QR code and 6-digit pairing code" width="300"> | <img src="docs/screenshots/phone-dark.png" alt="Phone layout in dark mode" width="200"> |
 
-Screenshots are generated from the real app by [`scripts/screenshots.py`](scripts/screenshots.py).
+Screenshots are generated from the real app by [`scripts/screenshots.py`](scripts/screenshots.py), the demo video at the top by [`scripts/demo/build.py`](scripts/demo/build.py).
 
 ## Configuration
 

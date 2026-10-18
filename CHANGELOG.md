@@ -4,6 +4,9 @@ All notable changes are documented here. The format follows [Keep a Changelog](h
 
 ## [Unreleased]
 
+### Added
+- **Demo video** at the top of the README: a 20-second recording of the real app (a Mac sends two files to a Pixel phone and a Galaxy tablet; the phone taps Accept). The README shows a silent loop that plays inline and links to the full video with sound on the website. `scripts/demo/build.py` records it again after UI changes.
+
 ### Fixed
 - Sending a file over 4 MB from one app to another failed with "Invalid upload" (since 3.2.0): the receiving device rejected the name of its own chunk store. Big files now arrive in chunks as intended.
 - The sender's **Recent** list said "Received" for files sent to nearby devices, and showed a nonsense speed (e.g. "0.0169 bytes/s") because it mixed two clocks. It now says "Sent" with the real average speed.

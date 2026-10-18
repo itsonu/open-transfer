@@ -1,0 +1,113 @@
+<!doctype html>
+<!-- The demo video's stage (see record.py): the real app in a Mac window and a phone, captions, cursor, title cards. -->
+<html><head><meta charset="utf-8">
+<style>
+  :root { --ink:#1d1d1f; --sub:#6e6e73; --accent:#0071e3; }
+  * { box-sizing: border-box; margin: 0; }
+  html, body { width: 1920px; height: 1080px; overflow: clip; }
+  body { font-family: "Inter", system-ui, sans-serif; color: var(--ink);
+    background: radial-gradient(1200px 700px at 50% 0%, #e9f2ff 0%, rgba(233,242,255,0) 60%),
+                linear-gradient(#fbfbfd, #eceef3); }
+  /* caption */
+  #cap { position: absolute; left: 0; right: 0; top: 58px; text-align: center;
+    font: 650 50px/1.1 "Inter Display", "Inter", sans-serif; letter-spacing: -0.02em; }
+  #cap span { display: inline-block; transition: opacity .35s ease, transform .45s cubic-bezier(.2,.8,.2,1); }
+  #cap span.out { opacity: 0; transform: translateY(14px); }
+  /* desktop window */
+  .win { position: absolute; left: 152px; top: 172px; width: 1100px; height: 788px; border-radius: 14px;
+    background: #fff; overflow: hidden;
+    box-shadow: 0 1px 0 rgba(0,0,0,.04), 0 30px 80px rgba(20,40,90,.18), 0 0 0 1px rgba(0,0,0,.08); }
+  .bar { height: 38px; background: #f3f3f5; border-bottom: 1px solid #e3e3e6; display: flex; align-items: center; padding: 0 16px; gap: 8px; }
+  .bar i { width: 12px; height: 12px; border-radius: 50%; display: block; }
+  .bar .t { flex: 1; text-align: center; font: 500 13px "Inter", sans-serif; color: #86868b; margin-right: 60px; }
+  .win iframe { width: 846px; height: 577px; border: 0; display: block; transform: scale(1.3); transform-origin: 0 0; }
+  /* phone */
+  .phone { position: absolute; left: 1362px; top: 158px; width: 405px; height: 846px; border-radius: 58px;
+    background: #111; padding: 14px; box-shadow: 0 30px 80px rgba(20,40,90,.22), 0 0 0 1px rgba(0,0,0,.2); }
+  .screen { width: 377px; height: 818px; border-radius: 45px; overflow: hidden; position: relative; background: #f5f5f7; }
+  .screen iframe { width: 393px; height: 852px; border: 0; transform: scale(.96); transform-origin: 0 0; display: block; }
+  .label { position: absolute; top: 1024px; font: 500 20px "Inter", sans-serif; color: var(--sub); text-align: center; }
+  .label b { color: var(--ink); font-weight: 600; }
+  /* cursor + taps */
+  #cursor { position: absolute; left: 700px; top: 1150px; width: 30px; height: 30px; z-index: 20;
+    transition: left .7s cubic-bezier(.3,.7,.2,1), top .7s cubic-bezier(.3,.7,.2,1), transform .12s ease; }
+  #cursor.down { transform: scale(.82); }
+  .ripple { position: absolute; width: 56px; height: 56px; margin: -28px 0 0 -28px; border-radius: 50%; z-index: 19;
+    background: rgba(0,113,227,.28); border: 2px solid rgba(0,113,227,.55); animation: rip .55s ease-out forwards; pointer-events: none; }
+  .ripple.touch { width: 64px; height: 64px; margin: -32px 0 0 -32px; background: rgba(255,255,255,.45); border-color: rgba(0,0,0,.25); }
+  @keyframes rip { from { transform: scale(.35); opacity: 1; } to { transform: scale(1.35); opacity: 0; } }
+  /* flying file chip */
+  .chip { position: absolute; z-index: 18; display: flex; align-items: center; gap: 12px; padding: 12px 18px 12px 14px;
+    background: #fff; border-radius: 14px; font: 600 19px "Inter", sans-serif;
+    box-shadow: 0 18px 40px rgba(20,40,90,.25), 0 0 0 1px rgba(0,0,0,.06);
+    transition: left .9s cubic-bezier(.25,.8,.25,1), top .9s cubic-bezier(.25,.8,.25,1), opacity .25s ease, transform .9s ease; }
+  .chip small { display: block; font: 500 14px "Inter", sans-serif; color: var(--sub); }
+  .chip .ic { width: 38px; height: 38px; border-radius: 9px; display: grid; place-items: center; color: #fff; font: 700 13px "Inter"; }
+  /* full-screen cards (hook / outro) */
+  .card { position: absolute; inset: 0; z-index: 30; display: flex; flex-direction: column; align-items: center; justify-content: center;
+    background: radial-gradient(1100px 700px at 50% 38%, #ffffff 0%, #eef3fb 70%, #e4ebf7 100%);
+    transition: opacity .6s ease, transform .7s cubic-bezier(.3,.7,.2,1); }
+  .card.gone { opacity: 0; transform: scale(1.06); pointer-events: none; }
+  .card .logo { width: 168px; height: 168px; filter: drop-shadow(0 24px 40px rgba(0,60,180,.28)); }
+  .card h1 { font: 700 96px/1.05 "Inter Display", "Inter", sans-serif; letter-spacing: -0.035em; margin-top: 40px; }
+  .card p { font: 500 34px "Inter", sans-serif; color: var(--sub); margin-top: 22px; letter-spacing: -0.01em; }
+  .card .pill { margin-top: 38px; padding: 14px 28px; border-radius: 999px; background: var(--ink); color: #fff; font: 600 28px "Inter", sans-serif; }
+  .card .row { display: flex; gap: 34px; margin-top: 44px; }
+  .card .dev { width: 150px; height: 150px; border-radius: 34px; background: #fff; display: grid; place-items: center;
+    box-shadow: 0 16px 36px rgba(20,40,90,.12), 0 0 0 1px rgba(0,0,0,.05); color: var(--accent); }
+  .card .dev svg { width: 70px; height: 70px; }
+  .card .dev > div { display: grid; place-items: center; gap: 22px; }
+  .card .dev svg { fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; }
+  .card .dev em { display: block; font: 600 18px "Inter"; font-style: normal; color: var(--ink); margin-top: -18px; }
+  .in { opacity: 0; transform: translateY(26px) scale(.96); transition: opacity .5s ease, transform .65s cubic-bezier(.2,.9,.25,1.15); }
+  .in.on { opacity: 1; transform: none; }
+</style></head>
+<body>
+  <svg width="0" height="0" style="position:absolute" aria-hidden="true">__SPRITE__</svg>
+  <div id="cap"><span class="out" id="cap-text"></span></div>
+  <div class="win"><div class="bar"><i style="background:#ff5f57"></i><i style="background:#febc2e"></i><i style="background:#28c840"></i><div class="t">Open Transfer</div></div>
+    <iframe id="mac" src="__MAC__"></iframe></div>
+  <div class="phone"><div class="screen"><iframe id="pixel" src="__PIXEL__"></iframe></div></div>
+  <div class="label" style="left:152px;width:1100px"><b>MacBook Pro</b> · Mac app</div>
+  <div class="label" style="left:1362px;width:405px"><b>Pixel 8</b> · Android app</div>
+  <svg id="cursor" viewBox="0 0 24 24"><path d="M4 2.5 L4 20 L8.6 15.6 L11.7 22 L14.6 20.6 L11.6 14.4 L18 14.4 Z" fill="#111" stroke="#fff" stroke-width="1.6" stroke-linejoin="round"/></svg>
+
+  <div class="card" id="hook">
+    <img class="logo in" src="__LOGO__" alt="">
+    <h1 class="in">AirDrop for every device.</h1>
+    <div class="row">
+      __DEVICES__
+    </div>
+  </div>
+
+  <div class="card gone" id="outro">
+    <img class="logo in" src="__LOGO__" alt="">
+    <h1 class="in">Open Transfer</h1>
+    <p class="in">Windows · Mac · Android · Linux · any browser</p>
+    <div class="pill in">Free &amp; open source · No account · No cloud</div>
+    <p class="in" style="font-size:28px;margin-top:30px;color:#0071e3;font-weight:600">itsonu.github.io/open-transfer</p>
+  </div>
+
+<script>
+const $ = (s) => document.querySelector(s);
+window.stage = {
+  show(id, on) { $(id).classList.toggle("gone", !on); },
+  reveal(id, step = 160) { [...$(id).querySelectorAll(".in")].forEach((el, i) => setTimeout(() => el.classList.add("on"), i * step)); },
+  caption(text) {
+    const el = $("#cap-text");
+    el.classList.add("out");
+    setTimeout(() => { el.textContent = text; if (text) el.classList.remove("out"); }, text && el.textContent ? 380 : 0);
+  },
+  move(x, y) { const c = $("#cursor"); c.style.left = (x - 4) + "px"; c.style.top = (y - 2) + "px"; },
+  press(x, y, touch = false) {
+    const c = $("#cursor"); if (!touch) { c.classList.add("down"); setTimeout(() => c.classList.remove("down"), 140); }
+    const r = document.createElement("div"); r.className = "ripple" + (touch ? " touch" : "");
+    r.style.left = x + "px"; r.style.top = y + "px"; document.body.appendChild(r); setTimeout(() => r.remove(), 700);
+  },
+  chip(id, html, x, y) { const c = document.createElement("div"); c.className = "chip"; c.id = id; c.innerHTML = html;
+    c.style.left = x + "px"; c.style.top = y + "px"; document.body.appendChild(c); },
+  fly(id, x, y, scale = 1) { const c = $("#" + id); c.style.left = x + "px"; c.style.top = y + "px"; c.style.transform = `scale(${scale})`; },
+  fade(id) { const c = $("#" + id); c.style.opacity = 0; setTimeout(() => c.remove(), 400); },
+};
+</script>
+</body></html>
