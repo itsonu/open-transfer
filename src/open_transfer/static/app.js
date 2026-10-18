@@ -986,14 +986,15 @@ function renderHistory() {
   list.replaceChildren(
     ...entries.slice(0, 20).map((e) => {
       const when = e.when ? relativeTime(e.when / 1000) : "";
-      const speed = e.speed > 0 ? `${formatBytes(e.speed)}/s` : "";
+      const sent = e.direction === "up" || e.direction === "send"; // uploads here, or sends to devices
+      const speed = e.speed >= 1000 ? `${formatBytes(e.speed)}/s` : "";
       const sub = [`${formatBytes(e.size)}`, when, speed, e.status === "done" ? null : e.status].filter(Boolean).join(" · ");
       const row = h(
         "li",
         { class: "row history-row" },
         h("span", { class: "thumb", "aria-hidden": "true" }, icon(e.name?.endsWith(".zip") ? "archive" : guessKind(e.name || ""))),
         h("div", { class: "row-main" }, h("span", { class: "row-title", title: e.name }, e.name), h("span", { class: "row-sub" }, sub)),
-        h("span", { class: "history-dir", dataset: { dir: e.direction === "up" ? "up" : "down" } }, e.direction === "up" ? "Sent" : "Received"),
+        h("span", { class: "history-dir", dataset: { dir: sent ? "up" : "down" } }, sent ? "Sent" : "Received"),
       );
       const graph = e.samples?.length >= 2 ? sparklineSVG(e.samples) : null;
       if (graph) {

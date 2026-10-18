@@ -4,6 +4,10 @@ All notable changes are documented here. The format follows [Keep a Changelog](h
 
 ## [Unreleased]
 
+### Fixed
+- Sending a file over 4 MB from one app to another failed with "Invalid upload" (since 3.2.0): the receiving device rejected the name of its own chunk store. Big files now arrive in chunks as intended.
+- The sender's **Recent** list said "Received" for files sent to nearby devices, and showed a nonsense speed (e.g. "0.0169 bytes/s") because it mixed two clocks. It now says "Sent" with the real average speed.
+
 ## [3.2.2] — 2026-10-18
 
 ### Fixed

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from collections.abc import Iterator
 
 import pytest
@@ -14,7 +15,10 @@ def browser() -> Iterator[object]:
     with sync_api.sync_playwright() as p:
         try:
             # Local test servers only: never route them through an HTTP proxy.
-            b = p.chromium.launch(args=["--no-proxy-server"])
+            # OT_CHROMIUM: use a specific Chromium binary instead of Playwright's own.
+            b = p.chromium.launch(
+                args=["--no-proxy-server"], executable_path=os.environ.get("OT_CHROMIUM") or None
+            )
         except Exception as exc:  # pragma: no cover - depends on the machine
             pytest.skip(f"Chromium not available: {exc}")
             return

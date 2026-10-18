@@ -1507,7 +1507,7 @@ class Mesh:
                 raise MeshError(400, "size_mismatch", "The file size doesn’t match the offer.")
             if len(data) > MAX_CHUNK_BYTES:
                 raise MeshError(413, "too_large", "Chunk is too big.")
-            key = f"{session_id}:{index}"
+            key = _incoming_chunk_key(session_id, index)
             item.state = RECEIVING
             session.state = RECEIVING
         store = self.storage if session.target == self.id else self.inbox(session.target)
@@ -1558,7 +1558,7 @@ class Mesh:
         if not 0 <= index < len(session.files):
             raise MeshError(404, "not_found", "No such file in this transfer.")
         store = self.storage if session.target == self.id else self.inbox(session.target)
-        info = store.chunks.status(f"{session_id}:{index}")
+        info = store.chunks.status(_incoming_chunk_key(session_id, index))
         if info is None:
             return {"received": 0, "total": session.files[index].size, "ranges": []}
         return {
@@ -2226,6 +2226,11 @@ class _Sink:
             raise MeshError(
                 res.status, "remote", _remote_message(data, "The receiver rejected the file.")
             )
+
+
+def _incoming_chunk_key(session_id: str, index: int) -> str:
+    """Chunk-store id for one incoming file (the store only takes ``[A-Za-z0-9_-]``)."""
+    return f"{session_id}-{index}"
 
 
 def _describe_error(exc: Exception, delivery: Delivery) -> str:
