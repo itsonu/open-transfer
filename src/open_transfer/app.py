@@ -10,6 +10,7 @@ import mimetypes
 import os
 import secrets
 import time
+from collections import OrderedDict
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote, unquote, urlsplit
@@ -127,6 +128,9 @@ def create_app(config: Config | None = None) -> Flask:
     app.json.sort_keys = False  # type: ignore[attr-defined]
     app.extensions["open_transfer"] = {"config": config, "storage": storage, "mesh": mesh}
     limiter = RateLimiter(attempts=5, window=60)
+    # Chunked uploads that already finished (upload id → the final answer), so a
+    # resumed upload learns it's done instead of sending the file again (#44).
+    finished_uploads: OrderedDict[str, dict[str, Any]] = OrderedDict()
     machine_names = (network.hostname().lower(), f"{network.hostname().lower()}.local")
     pin_digest = hashlib.sha256((config.pin or "").encode()).hexdigest()[:16]
 
@@ -440,6 +444,8 @@ def create_app(config: Config | None = None) -> Flask:
     @app.get("/api/uploads/<upload_id>/status")
     def upload_status(upload_id: str) -> Response:
         """Bytes already staged (with ranges, so clients resume missing pieces)."""
+        if upload_id in finished_uploads:
+            return jsonify(finished_uploads[upload_id])
         info = storage.chunks.status(upload_id)
         if info is None:
             return jsonify({"received": 0, "total": 0, "ranges": []})
@@ -480,6 +486,8 @@ def create_app(config: Config | None = None) -> Flask:
                 return error(413, "too_large", "Chunk is too big.")
             if config.max_upload_size and total > config.max_upload_size:
                 return error(413, "too_large", "File is larger than this device accepts.")
+            if upload_id in finished_uploads:  # a resumed upload re-sending a piece
+                return jsonify(finished_uploads[upload_id]), 201
             try:
                 from open_transfer.chunks import ChunkStatus
 
@@ -524,7 +532,16 @@ def create_app(config: Config | None = None) -> Flask:
                 saved_file.size,
                 client_id(),
             )
-            return jsonify({"files": [saved_file.to_dict()]}), 201
+            answer = {
+                "received": total,
+                "total": total,
+                "done": True,
+                "files": [saved_file.to_dict()],
+            }
+            finished_uploads[upload_id] = answer
+            while len(finished_uploads) > 256:
+                finished_uploads.popitem(last=False)
+            return jsonify(answer), 201
         saved = []
         try:
             if request.mimetype == "multipart/form-data":

@@ -4,6 +4,9 @@ All notable changes are documented here. The format follows [Keep a Changelog](h
 
 ## [Unreleased]
 
+### Fixed
+- Resuming a transfer that was paused just as its last pieces arrived uploaded the whole file again, even though it had already been delivered (the progress restarted from 0 next to "Delivered"). The device now remembers files it has finished, so a resumed upload sees it is done; and if every piece is there but unconfirmed, only the last one is sent again. Same for big uploads to your own device, which could otherwise save a second copy (#44).
+
 ## [3.2.3] — 2026-10-18
 
 ### Added

@@ -196,7 +196,7 @@ export async function fetchChunkStatus(statusUrl, signal) {
 export async function fetchChunkState(statusUrl, signal) {
   try {
     const { data } = await api(statusUrl, { signal, timeout: 8000 });
-    return { received: data?.received || 0, total: data?.total || 0, ranges: data?.ranges || [] };
+    return { received: data?.received || 0, total: data?.total || 0, ranges: data?.ranges || [], done: data?.done === true, data };
   } catch {
     return { received: 0, total: 0, ranges: [] };
   }
@@ -231,10 +231,16 @@ export async function uploadParallel(
 ) {
   const { size: chunkSize } = chunkLimits();
   const state0 = statusUrl ? await fetchChunkState(statusUrl, signal) : { received: 0, ranges: [] };
+  if (state0.done && total > 0) {
+    // Already finished (e.g. paused just as the last pieces landed): nothing to resend.
+    onProgress?.(total, total);
+    return { data: state0.data };
+  }
   let queue = missingChunks(state0.ranges, total, chunkSize);
   if (!queue.length && total > 0) {
-    // Server knows nothing yet (or state fetch failed): upload everything.
-    queue = missingChunks([], total, chunkSize);
+    // Every piece is there but the server never confirmed the end: send the last
+    // one again so it finishes, instead of the whole file.
+    queue = missingChunks([], total, chunkSize).slice(-1);
   }
   let sent = total - queue.reduce((n, c) => n + (c.end - c.start), 0);
   onProgress?.(sent, total);
