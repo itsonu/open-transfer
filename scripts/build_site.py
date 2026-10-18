@@ -23,7 +23,7 @@ def build() -> None:
     shutil.rmtree(OUT, ignore_errors=True)
     shutil.copytree(ROOT / "site", OUT)
     shutil.copytree(ROOT / "docs" / "screenshots", OUT / "screenshots")
-    shutil.copytree(ROOT / "docs" / "demo", OUT / "demo")  # the README links the video here
+    shutil.copytree(ROOT / "docs" / "demo", OUT / "docs" / "demo")  # the README links the video here
     for name in ("logo.svg", "apple-touch-icon.png", "icon-512.png"):
         shutil.copy2(ICONS / name, OUT / name)
     (OUT / ".nojekyll").touch()  # serve files as-is, no Jekyll processing
