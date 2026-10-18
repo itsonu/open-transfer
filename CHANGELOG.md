@@ -4,6 +4,8 @@ All notable changes are documented here. The format follows [Keep a Changelog](h
 
 ## [Unreleased]
 
+## [3.2.2] — 2026-10-18
+
 ### Fixed
 - A device that quit could show as nearby again for up to 15 seconds: a hello still on its way (or the discovery loop's last announcement) could land after its goodbye. Quitting now finishes those first and says goodbye last, refuses new hellos while stopping, and others ignore a hello answer that started before the goodbye.
 
@@ -108,7 +110,8 @@ The project is now **Open Transfer**: a rewrite of the original Flask "File Tran
 ### Removed
 - Unrelated packet-sniffing and network-scanning scripts (`get.py`, `get2.py`, `scan.py`), the duplicate `backup.py`, the unused Tkinter import and IDE settings.
 
-[Unreleased]: https://github.com/itsonu/open-transfer/compare/v3.2.1...HEAD
+[Unreleased]: https://github.com/itsonu/open-transfer/compare/v3.2.2...HEAD
+[3.2.2]: https://github.com/itsonu/open-transfer/compare/v3.2.1...v3.2.2
 [3.2.1]: https://github.com/itsonu/open-transfer/compare/v3.2.0...v3.2.1
 [3.2.0]: https://github.com/itsonu/open-transfer/compare/v3.1.0...v3.2.0
 [3.1.0]: https://github.com/itsonu/open-transfer/compare/v3.0.0...v3.1.0
