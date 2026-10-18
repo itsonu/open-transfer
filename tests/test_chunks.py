@@ -53,6 +53,30 @@ def test_chunked_upload_assembles_file(client: FlaskClient) -> None:
     assert client.get("/files/big.bin").data == payload
 
 
+def test_resuming_a_finished_chunked_upload_does_not_start_over(client: FlaskClient) -> None:
+    # Paused as the last piece landed: resume must see "done", and a re-sent
+    # piece must not save a second copy (#44).
+    total = 5 * 1024 * 1024
+    payload = b"B" * total
+    uid = "chunk-done-456"
+    for start in range(0, total, CHUNK_SIZE):
+        end = min(start + CHUNK_SIZE, total) - 1
+        res = _put(client, start, end, total, uid, payload[start : end + 1])
+    assert res.status_code == 201
+    saved = res.json["files"][0]
+
+    state = client.get(f"/api/uploads/{uid}/status").json
+    assert state["done"] is True
+    assert state["received"] == state["total"] == total
+
+    again = _put(client, 2 * CHUNK_SIZE, total - 1, total, uid, payload[2 * CHUNK_SIZE :])
+    assert again.status_code == 201
+    assert again.json["files"][0]["name"] == saved["name"]
+    names = [f["name"] for f in client.get("/api/files").json["files"]]
+    assert names.count("big.bin") == 1
+    assert not any(n.startswith("big (") for n in names)
+
+
 def test_chunked_upload_out_of_order_is_accepted(client: FlaskClient) -> None:
     # Parallel chunks may arrive in any order; every valid offset is stored.
     total = 100

@@ -241,6 +241,62 @@ def test_big_file_reaches_another_device_in_chunks(make_node: NodeFactory) -> No
     wait_for(lambda: target_states(alice, job) == {"Bravo": "done"})
 
 
+def send_in_chunks(client: Client, job: str, payload: bytes, upload_id: str) -> Any:
+    piece = 2 * 1024 * 1024
+    result: Any = None
+    for start in range(0, len(payload), piece):
+        chunk = payload[start : start + piece]
+        status, result = client(
+            "PUT",
+            f"/api/send/{job}/files/0",
+            data=chunk,
+            headers={
+                "Content-Range": f"bytes {start}-{start + len(chunk) - 1}/{len(payload)}",
+                "X-Upload-Id": upload_id,
+            },
+        )
+        last = start + len(chunk) == len(payload)
+        assert status in ({200, 201} if last else {308}), result
+    return result
+
+
+def test_resuming_a_finished_chunked_send_does_not_start_over(make_node: NodeFactory) -> None:
+    # Paused right at the end: the last pieces still arrived and the file was
+    # delivered. Resume must learn that, not upload everything again.
+    a, b = make_node("Alpha"), make_node("Bravo")
+    connect(a, b)
+    alice, bob = owner(a), owner(b)
+    payload = os.urandom(5_000_000)
+    job = send(alice, [device_id(alice, "Bravo")], [("film.mp4", payload)])
+    offer = incoming(bob)
+    assert bob("POST", f"/api/incoming/{offer['id']}/accept")[0] == 200
+    wait_for(lambda: target_states(alice, job) == {"Bravo": "accepted"})
+    send_in_chunks(alice, job, payload, "upload1")
+    wait_for(lambda: target_states(alice, job) == {"Bravo": "done"})
+
+    status, state = alice("GET", f"/api/send/{job}/files/0/status?upload_id=upload1")
+    assert status == 200, state
+    assert state["received"] == state["total"] == len(payload)
+    assert state["done"] is True
+
+    # A browser that still re-sends a piece gets the finished result back.
+    tail = len(payload) - len(payload) % (2 * 1024 * 1024)
+    status, again = alice(
+        "PUT",
+        f"/api/send/{job}/files/0",
+        data=payload[tail:],
+        headers={
+            "Content-Range": f"bytes {tail}-{len(payload) - 1}/{len(payload)}",
+            "X-Upload-Id": "upload1",
+        },
+    )
+    assert status in {200, 201}, again
+    assert again["done"] is True
+    assert sorted(p.name for p in Path(b.config.storage_dir).iterdir() if p.is_file()) == [
+        "film.mp4"
+    ]
+
+
 def test_declined_offer_sends_nothing(make_node: NodeFactory) -> None:
     a, b = make_node("Alpha"), make_node("Bravo")
     connect(a, b)

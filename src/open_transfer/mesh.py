@@ -247,6 +247,10 @@ class Job:
     created: float = field(default_factory=time.monotonic)
     canceled: bool = False
     finished: float = 0.0
+    # Files already relayed to every receiver: index → the fan-out result. The
+    # staged chunks are gone by then, so this is how a resumed upload learns
+    # it has nothing left to send (#44).
+    relayed: dict[int, dict[str, Any]] = field(default_factory=dict)
 
 
 # ====================================================================== mesh
@@ -1212,6 +1216,8 @@ class Mesh:
         job = self.job_for(job_id, viewer)
         if not 0 <= index < len(job.files):
             raise MeshError(404, "not_found", "No such file in this transfer.")
+        if index in job.relayed:
+            return dict(job.relayed[index])
         info = self._relay_chunks.status(upload_id)
         if info is None:
             return {"received": 0, "total": int(job.files[index]["size"]), "ranges": []}
@@ -1234,6 +1240,8 @@ class Mesh:
             raise MeshError(410, CANCELED, "This transfer was canceled.")
         if not 0 <= index < len(job.files):
             raise MeshError(404, "not_found", "No such file in this transfer.")
+        if index in job.relayed:  # a resumed upload re-sending a piece: already done
+            return dict(job.relayed[index])
         size = int(job.files[index]["size"])
         name = str(job.files[index].get("name", "file"))
         if len(data) > MAX_CHUNK_BYTES:
@@ -1402,6 +1410,7 @@ class Mesh:
         result.update({"received": size, "total": size, "done": True})
         for tid, info in chunked_results.items():
             result.setdefault("targets", {}).setdefault(tid, info)
+        job.relayed[index] = dict(result)
         return result
 
     def _push_chunked(
