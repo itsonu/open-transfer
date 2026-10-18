@@ -29,6 +29,7 @@ from __future__ import annotations
 import contextlib
 import dataclasses
 import http.client
+import ipaddress
 import json
 import logging
 import queue
@@ -451,7 +452,11 @@ class Mesh:
             peer.name = clean_name(info.get("name"))
             peer.form = clean_form(info.get("form"))
             peer.platform = clean_platform(info.get("platform"))
-            peer.host, peer.port = host, port
+            # A hello from loopback came through a local tunnel (adb forward,
+            # SSH -L): it says nothing about where the peer really is.
+            if not (_is_loopback(host) and peer.host and not _is_loopback(peer.host)):
+                peer.host = host
+            peer.port = port
             peer.version = str(info.get("version") or info.get("ver") or "")[:20]
             peer.accepts = "paired" if info.get("accepts") == "paired" else "everyone"
             peer.manual = peer.manual or manual
@@ -2226,6 +2231,13 @@ class _Sink:
             raise MeshError(
                 res.status, "remote", _remote_message(data, "The receiver rejected the file.")
             )
+
+
+def _is_loopback(host: str) -> bool:
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return host == "localhost"
 
 
 def _incoming_chunk_key(session_id: str, index: int) -> str:

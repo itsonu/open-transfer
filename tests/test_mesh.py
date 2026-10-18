@@ -616,6 +616,18 @@ def test_hello_answered_after_a_goodbye_does_not_bring_the_device_back(
     assert not peer.online
 
 
+def test_hello_through_a_local_tunnel_keeps_the_real_address(make_node: NodeFactory) -> None:
+    # A device added by its LAN address answers through a port forward (adb
+    # forward, SSH -L): its hello arrives from loopback. Keep the real address.
+    a, b = make_node("Alpha"), make_node("Bravo")
+    info = b.mesh.self_info(include_visitors=False)
+    a.mesh._upsert_peer(info, "192.168.1.50", manual=True)
+    a.mesh.handle_hello(info, "127.0.0.1")
+    assert a.mesh._peers[b.mesh.id].host == "192.168.1.50"
+    a.mesh.handle_hello(info, "192.168.1.77")  # it really moved: follow it
+    assert a.mesh._peers[b.mesh.id].host == "192.168.1.77"
+
+
 def test_a_device_that_is_stopping_refuses_hellos(make_node: NodeFactory) -> None:
     from open_transfer.mesh import MeshError
 

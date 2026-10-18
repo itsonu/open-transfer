@@ -12,6 +12,7 @@ All notable changes are documented here. The format follows [Keep a Changelog](h
 ### Fixed
 - Sending a file over 4 MB from one app to another failed with "Invalid upload" (since 3.2.0): the receiving device rejected the name of its own chunk store. Big files now arrive in chunks as intended.
 - The sender's **Recent** list said "Received" for files sent to nearby devices, and showed a nonsense speed (e.g. "0.0169 bytes/s") because it mixed two clocks. It now says "Sent" with the real average speed.
+- A device reached through a port forward (`adb forward`, `ssh -L`) could lose its real address: its hello arrives from 127.0.0.1, which replaced the address you added, so sending to it failed with "Lost connection" (since 3.0.0). A hello from loopback no longer replaces a real address.
 
 ## [3.2.2] — 2026-10-18
 
