@@ -4,6 +4,8 @@ All notable changes are documented here. The format follows [Keep a Changelog](h
 
 ## [Unreleased]
 
+## [3.2.3] — 2026-10-18
+
 ### Added
 - **Demo video** at the top of the README: a 20-second recording of the real app (a Mac sends two files to a Pixel phone and a Galaxy tablet; the phone taps Accept). The README shows a silent loop that plays inline and links to the full video with sound on the website. `scripts/demo/build.py` records it again after UI changes.
 
@@ -117,7 +119,8 @@ The project is now **Open Transfer**: a rewrite of the original Flask "File Tran
 ### Removed
 - Unrelated packet-sniffing and network-scanning scripts (`get.py`, `get2.py`, `scan.py`), the duplicate `backup.py`, the unused Tkinter import and IDE settings.
 
-[Unreleased]: https://github.com/itsonu/open-transfer/compare/v3.2.2...HEAD
+[Unreleased]: https://github.com/itsonu/open-transfer/compare/v3.2.3...HEAD
+[3.2.3]: https://github.com/itsonu/open-transfer/compare/v3.2.2...v3.2.3
 [3.2.2]: https://github.com/itsonu/open-transfer/compare/v3.2.1...v3.2.2
 [3.2.1]: https://github.com/itsonu/open-transfer/compare/v3.2.0...v3.2.1
 [3.2.0]: https://github.com/itsonu/open-transfer/compare/v3.1.0...v3.2.0
