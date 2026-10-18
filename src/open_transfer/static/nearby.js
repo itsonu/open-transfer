@@ -725,10 +725,10 @@ function finishJob(job, outcome) {
     } else if (failed.length) toast(failed[0].reason || `Couldn’t send to ${failed[0].name}`, { tone: "error", icon: "alert" });
   } else if (done.length && !failed.length && !declined.length) {
     toast(done.length === 1 ? `Sent to ${done[0].name}` : `Sent to ${plural(done.length, "device")}`, { tone: "success", icon: "check" });
-    const secs = Math.max(0.1, (Date.now() - (job.startedAt || Date.now())) / 1000);
+    const secs = job.startedAt ? Math.max(0.1, (performance.now() - job.startedAt) / 1000) : 0;
     const bytes = job.files.reduce((n, f) => n + f.size, 0);
     const title = job.files.length === 1 ? job.files[0].name : plural(job.files.length, "file");
-    addHistory({ name: title, size: bytes, direction: "send", status: "done", speed: bytes / secs, samples: (job.samples || []).slice(-30) });
+    addHistory({ name: title, size: bytes, direction: "send", status: "done", speed: secs ? bytes / secs : 0, samples: (job.samples || []).slice(-30) });
     window.dispatchEvent(new CustomEvent("ot-history"));
   } else if (declined.length) {
     toast(declined.length === 1 ? `${declined[0].name} declined — retry to ask again` : `${declined.length} declined — retry to ask again`, {
@@ -772,6 +772,7 @@ function uploadNext(job) {
   }
   const xhr = new XMLHttpRequest();
   job.xhr = xhr;
+  job.startedAt = job.startedAt || performance.now();
   job.lastAt = performance.now();
   job.lastLoaded = 0;
   job.fileLoaded = 0;

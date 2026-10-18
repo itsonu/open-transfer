@@ -93,6 +93,11 @@ def test_send_to_a_chosen_device_and_accept(
         "Delivered", timeout=10_000
     )
     assert (bravo.root / "Holiday photo.jpg").read_bytes() == sample.read_bytes()
+    sent = page.locator(".history-row", has_text="Holiday photo.jpg")
+    expect(sent.locator(".history-dir")).to_have_text("Sent")
+    expect(sent.locator(".row-sub")).to_have_text(
+        re.compile(r"^300 KB · [^·]+ · [\d.]+ (KB|MB|GB)/s$")
+    )
     expect(second_page.locator(".file-row", has_text="Holiday photo.jpg")).to_be_visible(
         timeout=8000
     )

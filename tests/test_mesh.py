@@ -41,8 +41,9 @@ class Client:
         body: Json | None = None,
         data: bytes | None = None,
         raw: bool = False,
+        headers: dict[str, str] | None = None,
     ) -> tuple[int, Any]:
-        headers = {"Accept": "application/json"}
+        headers = {"Accept": "application/json", **(headers or {})}
         if body is not None:
             data = json.dumps(body).encode()
             headers["Content-Type"] = "application/json"
@@ -207,6 +208,37 @@ def test_send_to_one_device_after_accepting(make_node: NodeFactory) -> None:
     assert (Path(b.config.storage_dir) / "holiday.mov").read_bytes() == payload
     wait_for(lambda: target_states(alice, job) == {"Bravo": "done"})
     assert incoming(bob, "done")["received"] == len(payload)
+
+
+def test_big_file_reaches_another_device_in_chunks(make_node: NodeFactory) -> None:
+    # Over CHUNK_THRESHOLD the browser uploads in pieces and the app forwards
+    # them to the other app in pieces too.
+    a, b = make_node("Alpha"), make_node("Bravo")
+    connect(a, b)
+    alice, bob = owner(a), owner(b)
+    payload = os.urandom(5_000_000)
+    job = send(alice, [device_id(alice, "Bravo")], [("film.mp4", payload)])
+    offer = incoming(bob)
+    assert bob("POST", f"/api/incoming/{offer['id']}/accept")[0] == 200
+    wait_for(lambda: target_states(alice, job) == {"Bravo": "accepted"})
+
+    piece = 2 * 1024 * 1024
+    for start in range(0, len(payload), piece):
+        chunk = payload[start : start + piece]
+        status, result = alice(
+            "PUT",
+            f"/api/send/{job}/files/0",
+            data=chunk,
+            headers={
+                "Content-Range": f"bytes {start}-{start + len(chunk) - 1}/{len(payload)}",
+                "X-Upload-Id": "upload1",
+            },
+        )
+        last = start + len(chunk) == len(payload)
+        assert status in ({200, 201} if last else {308}), result  # 308: send the next piece
+    assert all(t["ok"] for t in result["targets"].values()), result
+    assert (Path(b.config.storage_dir) / "film.mp4").read_bytes() == payload
+    wait_for(lambda: target_states(alice, job) == {"Bravo": "done"})
 
 
 def test_declined_offer_sends_nothing(make_node: NodeFactory) -> None:
@@ -582,6 +614,18 @@ def test_hello_answered_after_a_goodbye_does_not_bring_the_device_back(
     monkeypatch.setattr(mesh, "_http", answer_after_goodbye)
     assert mesh._hello(peer) is False
     assert not peer.online
+
+
+def test_hello_through_a_local_tunnel_keeps_the_real_address(make_node: NodeFactory) -> None:
+    # A device added by its LAN address answers through a port forward (adb
+    # forward, SSH -L): its hello arrives from loopback. Keep the real address.
+    a, b = make_node("Alpha"), make_node("Bravo")
+    info = b.mesh.self_info(include_visitors=False)
+    a.mesh._upsert_peer(info, "192.168.1.50", manual=True)
+    a.mesh.handle_hello(info, "127.0.0.1")
+    assert a.mesh._peers[b.mesh.id].host == "192.168.1.50"
+    a.mesh.handle_hello(info, "192.168.1.77")  # it really moved: follow it
+    assert a.mesh._peers[b.mesh.id].host == "192.168.1.77"
 
 
 def test_a_device_that_is_stopping_refuses_hellos(make_node: NodeFactory) -> None:
