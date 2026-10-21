@@ -58,11 +58,12 @@ jobs:
         #   open-transfer-macos-arm64.dmg         desktop app, Apple silicon
         #   open-transfer-macos-arm64-cli.tar.gz  command-line app, Apple silicon
         #   open-transfer-macos-x64.dmg           desktop app, Intel Mac
+        #   open-transfer-macos-x64-cli.tar.gz    command-line app, Intel Mac
         include:
           - { os: ubuntu-latest, name: linux-x64, cli: open-transfer-linux-x64, desktop: false }
           - { os: windows-latest, name: windows-x64, cli: open-transfer-windows-x64-cli, desktop: true }
           - { os: macos-latest, name: macos-arm64, cli: open-transfer-macos-arm64-cli, desktop: true, desktop-flags: --require-window }
-          - { os: macos-15-intel, name: macos-x64, cli: "", desktop: true, desktop-flags: --require-window }
+          - { os: macos-15-intel, name: macos-x64, cli: open-transfer-macos-x64-cli, desktop: true, desktop-flags: --require-window }
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7
@@ -161,6 +162,13 @@ jobs:
           # *.dockerbuild record artifact that must not become a release asset.
           pattern: "{python-dist,binary-*,open-transfer-android}"
           merge-multiple: true
+      # One file listing every asset's SHA-256, so downloads can be checked with
+      # `sha256sum -c SHA256SUMS --ignore-missing`.
+      - name: Checksums
+        run: |
+          cd artifacts
+          sha256sum -- * > SHA256SUMS
+          cat SHA256SUMS
       - uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ env.TAG }}

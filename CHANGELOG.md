@@ -4,6 +4,10 @@ All notable changes are documented here. The format follows [Keep a Changelog](h
 
 ## [Unreleased]
 
+### Added
+- Every release has a `SHA256SUMS` file, so you can check a download is exactly what was built (see the README).
+- A command-line build for Intel Macs (`open-transfer-macos-x64-cli.tar.gz`), as there already was for Apple silicon.
+
 ## [3.2.4] — 2026-10-18
 
 ### Fixed

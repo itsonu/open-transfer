@@ -65,6 +65,8 @@ Install it on each device from the [latest release](https://github.com/itsonu/op
 
 Received files go to **Downloads/Open Transfer** on every platform.
 
+**Check your download** (optional): every release has a `SHA256SUMS` file. Put it next to what you downloaded and run `shasum -a 256 -c SHA256SUMS --ignore-missing` (macOS) or `sha256sum -c SHA256SUMS --ignore-missing` (Linux); each file should say **OK**. On Windows: `Get-FileHash .\open-transfer-windows-x64.exe` and compare with the line in `SHA256SUMS`.
+
 **iPhone / iPad, or a device you can't install on?** Open the link or scan the QR code shown under **Add device** on any device that runs the app. The browser joins the group and can send and receive (through that device).
 
 **Build the apps yourself** (Python 3.10+, on the OS you want it for):
