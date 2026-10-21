@@ -176,3 +176,13 @@ jobs:
           name: Open Transfer ${{ env.TAG }}
           files: artifacts/*
           body_path: ${{ runner.temp }}/notes.md
+      # Moves the Homebrew tap (itsonu/homebrew-tap) to this release right away.
+      # Needs a HOMEBREW_TAP_TOKEN secret (a token that can write to that repo);
+      # without it the tap catches up on its own within 6 hours.
+      - name: Update the Homebrew tap
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: |
+          if [ -z "$GH_TOKEN" ]; then echo "No HOMEBREW_TAP_TOKEN; the tap updates on its schedule."; exit 0; fi
+          gh api repos/itsonu/homebrew-tap/dispatches -f event_type=release -f "client_payload[tag]=$TAG"
