@@ -809,6 +809,7 @@ function setupDropAndPaste() {
     overlay.classList.remove("is-visible");
     zone.classList.remove("is-over");
     document.body.classList.remove("is-dragging");
+    document.dispatchEvent(new CustomEvent("ot-drag-end"));
   };
   document.addEventListener("ot-drop-handled", hide);
 

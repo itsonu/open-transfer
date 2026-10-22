@@ -145,7 +145,7 @@ Your browser opens and the terminal shows the address and a QR code:
 ## How it works for your users
 
 1. **Open** Open Transfer on your devices. Each one shows the others under **Nearby devices** within a second or two.
-2. **Pick** who gets the files — tap one device, several, or **Select all** — and choose or drop files. (Or drop files straight onto a device.) Sending to everyone asks you to confirm first.
+2. **Pick** who gets the files — tap one device, several, or **Select all** — and choose or drop files. (Or drop files straight onto a device, onto any selected device to send to all of them, or onto **Everyone nearby**.) Sending to everyone asks you to confirm first. Star the devices you use most: favorites stay first and get a one-tap send button (**Alt+1…9**).
 3. **Accept** on the other side: "Gaming PC wants to send you 3 files". Paired devices skip this step.
 
 Any device can send to any other — there's no host or server role. A phone without the app scans the QR code under **Add device** and joins from its browser.

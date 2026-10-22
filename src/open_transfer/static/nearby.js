@@ -24,6 +24,8 @@ export const mesh = {
   directFiles: [], // files received straight from another browser (kept in memory)
   tiles: new Map(), // device id -> { el, sig }
   incomingRows: new Map(),
+  favorites: loadFavorites(), // [{ id, name, form, platform, kind }], first = Alt+1
+  quickTarget: null, // device id the quick-send file picker is for
 };
 
 let ctx = { requestPoll: () => {}, droppedFiles: () => [], libraryChanged: () => {} };
@@ -215,6 +217,66 @@ function renderMe() {
   }
 }
 
+// -------------------------------------------------------------- favorites
+
+function loadFavorites() {
+  try {
+    const saved = JSON.parse(localStorage.getItem("ot-favorites") || "[]");
+    return Array.isArray(saved) ? saved.filter((f) => f && typeof f.id === "string" && typeof f.name === "string") : [];
+  } catch {
+    return []; // storage blocked: no favorites
+  }
+}
+
+function saveFavorites() {
+  try {
+    localStorage.setItem("ot-favorites", JSON.stringify(mesh.favorites));
+  } catch {
+    /* storage blocked: favorites last until the page closes */
+  }
+}
+
+const isFavorite = (id) => mesh.favorites.some((f) => f.id === id);
+
+function toggleFavorite(d) {
+  if (isFavorite(d.id)) mesh.favorites = mesh.favorites.filter((f) => f.id !== d.id);
+  else mesh.favorites.push({ id: d.id, name: d.name, form: d.form, platform: d.platform, kind: d.kind });
+  saveFavorites();
+  renderDevices();
+}
+
+/** Nearby devices plus favorites that aren't around: favorites first, online before offline. */
+function gridDevices() {
+  const live = mesh.data.devices;
+  let renamed = false;
+  for (const d of live) {
+    const fav = mesh.favorites.find((f) => f.id === d.id);
+    if (fav && fav.name !== d.name) {
+      Object.assign(fav, { name: d.name, form: d.form, platform: d.platform });
+      renamed = true;
+    }
+  }
+  if (renamed) saveFavorites();
+  const known = new Set(live.map((d) => d.id));
+  const away = mesh.favorites.filter((f) => !known.has(f.id)).map((f) => ({ kind: "app", ...f, online: false }));
+  const rank = (d) => (isFavorite(d.id) ? 0 : 2) + (d.online ? 0 : 1);
+  return [...live, ...away]
+    .map((d, i) => ({ d, i }))
+    .sort((a, b) => rank(a.d) - rank(b.d) || a.i - b.i)
+    .map(({ d }) => d);
+}
+
+/** Online favorites in grid order (Alt+1 is the first). */
+function onlineFavorites() {
+  const online = new Map(onlineDevices().map((d) => [d.id, d]));
+  return gridDevices().filter((d) => isFavorite(d.id) && online.has(d.id));
+}
+
+function quickSend(id) {
+  mesh.quickTarget = id;
+  $("#quick-input").click();
+}
+
 // -------------------------------------------------------------- device grid
 
 function activityFor(deviceId) {
@@ -276,52 +338,100 @@ function buildTile(d) {
       h("span", { class: "device-sub" }),
     ),
     h("span", { class: "device-badge", title: "Paired", "aria-label": "Paired" }, icon("link")),
+    h("span", { class: "device-drop-hint", "aria-hidden": "true" }),
+    h("button", { class: "icon-btn device-fav", type: "button", "aria-pressed": "false", onclick: () => toggleFavorite(el._device) }, icon("star")),
+    h("button", { class: "icon-btn device-quick", type: "button", hidden: true, onclick: () => quickSend(el.dataset.id) }, icon("send")),
   );
   const button = el.querySelector(".device-button");
-  button.addEventListener("click", () => toggle(d.id));
+  button.addEventListener("click", () => toggle(el.dataset.id));
   // Drop files straight onto a device to send them to it — the AirDrop gesture.
+  // Onto a selected device: to every selected device.
   el.addEventListener("dragover", (event) => {
-    if (!el.dataset.online || ![...(event.dataTransfer?.types || [])].includes("Files")) return;
+    if (!hasFiles(event)) return;
     event.preventDefault();
     event.stopPropagation();
+    if (!el.dataset.online) {
+      event.dataTransfer.dropEffect = "none";
+      return;
+    }
     event.dataTransfer.dropEffect = "copy";
     el.classList.add("is-drop-target");
+    const ids = dropRecipients(el.dataset.id);
+    announceDrop(ids.length > 1 ? `Release to send to ${ids.length} selected devices` : `Release to send to ${deviceName(el.dataset.id)}`);
   });
   el.addEventListener("dragleave", () => el.classList.remove("is-drop-target"));
-  el.addEventListener("drop", async (event) => {
+  el.addEventListener("drop", (event) => {
     el.classList.remove("is-drop-target");
-    if (!el.dataset.online) return;
+    if (!hasFiles(event)) return;
     event.preventDefault();
     event.stopPropagation();
     document.dispatchEvent(new CustomEvent("ot-drop-handled"));
-    // Folders dropped onto a device are zipped on the fly, then sent as one file.
-    try {
-      const { files, folders } = await collectDropped(event);
-      if (!files.length) return;
-      if (folders) {
-        toast(`Zipping ${plural(files.length, "file")} from ${plural(folders, "folder")}…`, { icon: "folder" });
-        const blob = await zipFiles(files);
-        startSend([el.dataset.id], [new File([blob], zipName(files), { type: "application/zip" })]);
-        return;
-      }
-      startSend([el.dataset.id], files.map((entry) => entry.file || entry));
-    } catch {
-      const files = ctx.droppedFiles(event);
-      if (files.length) startSend([el.dataset.id], files);
+    if (!el.dataset.online) {
+      toast(`${el._device.name} isn’t nearby right now — nothing was sent`, { tone: "error", icon: "alert" });
+      return;
     }
+    sendDropped(event, dropRecipients(el.dataset.id));
   });
   return el;
 }
 
+const hasFiles = (event) => [...(event.dataTransfer?.types || [])].includes("Files");
+
+/** Who a drop onto ``id`` goes to: every selected device if ``id`` is one of them. */
+function dropRecipients(id) {
+  const online = new Set(onlineDevices().map((d) => d.id));
+  const selected = [...mesh.selected].filter((s) => online.has(s));
+  return selected.length > 1 && selected.includes(id) ? selected : [id];
+}
+
+function announceDrop(text) {
+  const live = $("#drop-live");
+  if (live && live.textContent !== text) live.textContent = text;
+}
+
+/** Send what was dropped; folders are zipped on the fly and sent as one file. */
+async function sendDropped(event, ids) {
+  let files = [];
+  try {
+    const dropped = await collectDropped(event);
+    if (dropped.folders) {
+      toast(`Zipping ${plural(dropped.files.length, "file")} from ${plural(dropped.folders, "folder")}…`, { icon: "folder" });
+      const blob = await zipFiles(dropped.files);
+      files = [new File([blob], zipName(dropped.files), { type: "application/zip" })];
+    } else {
+      files = dropped.files.map((entry) => entry.file || entry);
+    }
+  } catch {
+    files = ctx.droppedFiles(event);
+  }
+  if (!files.length || !(await confirmRecipients(ids, files))) return;
+  await startSend(ids, files);
+}
+
 function updateTile(el, d) {
+  el._device = d;
   const selected = mesh.selected.has(d.id);
+  const favorite = isFavorite(d.id);
   const status = tileStatus(d);
   el.dataset.online = d.online ? "1" : "";
   el.dataset.kind = d.kind;
   el.classList.toggle("is-selected", selected);
   el.classList.toggle("is-offline", !d.online);
   el.classList.toggle("is-paired", Boolean(d.paired));
+  el.classList.toggle("is-favorite", favorite);
   el.dataset.tone = status.tone;
+  const fav = el.querySelector(".device-fav");
+  fav.setAttribute("aria-pressed", String(favorite));
+  fav.setAttribute("aria-label", favorite ? `Remove ${d.name} from favorites` : `Add ${d.name} to favorites`);
+  fav.title = favorite ? "Favorite" : "Add to favorites";
+  const quick = el.querySelector(".device-quick");
+  quick.hidden = !(favorite && d.online);
+  quick.setAttribute("aria-label", `Quick send to ${d.name}`);
+  quick.title = `Send files to ${d.name}`;
+  const together = selected ? [...mesh.selected].filter((id) => onlineDevices().some((o) => o.id === id)).length : 0;
+  const hint = together > 1 ? `Drop to send to ${together}` : "Drop to send";
+  const hintEl = el.querySelector(".device-drop-hint");
+  if (hintEl.textContent !== hint) hintEl.textContent = hint;
   const button = el.querySelector(".device-button");
   button.disabled = !d.online;
   button.setAttribute("aria-pressed", String(selected));
@@ -339,7 +449,7 @@ function updateTile(el, d) {
 
 function renderDevices() {
   const grid = $("#device-grid");
-  const devices = [...mesh.data.devices].sort((a, b) => Number(b.online) - Number(a.online));
+  const devices = gridDevices();
   let cursor = grid.firstElementChild;
   const ids = new Set();
   for (const d of devices) {
@@ -361,6 +471,9 @@ function renderDevices() {
     }
   }
   const online = devices.filter((d) => d.online);
+  const everyone = $("#everyone-target");
+  everyone.dataset.ready = online.length >= 2 ? "1" : "";
+  $("#everyone-count").textContent = plural(online.length, "device");
   $("#nearby-empty").hidden = devices.length > 0;
   grid.hidden = devices.length === 0;
   $("#nearby-meta").textContent = online.length ? plural(online.length, "device") : "";
@@ -532,21 +645,24 @@ function renderSendBar() {
   go.querySelector("span").textContent = ids.length > 1 ? `Send to ${ids.length}` : "Send";
 }
 
+/** Sending to 3+ devices, or to everyone nearby, asks first. */
+async function confirmRecipients(ids, files) {
+  const online = onlineDevices();
+  const everyone = ids.length >= 2 && ids.length === online.length;
+  if (ids.length < 3 && !everyone) return true;
+  return confirmDialog({
+    title: everyone ? `Send to everyone nearby?` : `Send to ${ids.length} devices?`,
+    text: `${plural(files.length, "file")} (${formatBytes(files.reduce((s, f) => s + f.size, 0))}) will be offered to:`,
+    items: ids.map(deviceName),
+    confirm: `Send to ${ids.length}`,
+  });
+}
+
 async function sendStaged() {
   const ids = [...mesh.selected];
   const files = [...mesh.staged];
   if (!ids.length || !files.length) return;
-  const online = onlineDevices();
-  const everyone = ids.length >= 2 && ids.length === online.length;
-  if (ids.length >= 3 || everyone) {
-    const ok = await confirmDialog({
-      title: everyone ? `Send to everyone nearby?` : `Send to ${ids.length} devices?`,
-      text: `${plural(files.length, "file")} (${formatBytes(files.reduce((s, f) => s + f.size, 0))}) will be offered to:`,
-      items: ids.map(deviceName),
-      confirm: `Send to ${ids.length}`,
-    });
-    if (!ok) return;
-  }
+  if (!(await confirmRecipients(ids, files))) return;
   await startSend(ids, files);
 }
 
@@ -1612,6 +1728,7 @@ export function initNearby(context) {
     renderSendBar();
   });
   $("#send-go").addEventListener("click", sendStaged);
+  setupQuickSend();
   $("#send-clear").addEventListener("click", () => {
     mesh.staged = [];
     mesh.selected.clear();
@@ -1632,6 +1749,52 @@ export function initNearby(context) {
       renderIncomingRows();
     }
   }, 2000);
+}
+
+function setupQuickSend() {
+  const everyone = $("#everyone-target");
+  everyone.addEventListener("dragover", (event) => {
+    if (!hasFiles(event)) return;
+    event.preventDefault();
+    event.stopPropagation();
+    event.dataTransfer.dropEffect = "copy";
+    everyone.classList.add("is-drop-target");
+    announceDrop(`Release to send to everyone nearby (${plural(onlineDevices().length, "device")})`);
+  });
+  everyone.addEventListener("dragleave", () => everyone.classList.remove("is-drop-target"));
+  everyone.addEventListener("drop", (event) => {
+    everyone.classList.remove("is-drop-target");
+    if (!hasFiles(event)) return;
+    event.preventDefault();
+    event.stopPropagation();
+    document.dispatchEvent(new CustomEvent("ot-drop-handled"));
+    sendDropped(event, onlineDevices().map((d) => d.id));
+  });
+  document.addEventListener("ot-drag-end", () => announceDrop(""));
+
+  const input = $("#quick-input");
+  input.addEventListener("change", () => {
+    const files = [...(input.files || [])];
+    const id = mesh.quickTarget;
+    input.value = "";
+    mesh.quickTarget = null;
+    if (!files.length || !id) return;
+    if (!onlineDevices().some((d) => d.id === id)) {
+      toast(`${deviceName(id)} isn’t nearby right now — nothing was sent`, { tone: "error", icon: "alert" });
+      return;
+    }
+    startSend([id], files);
+  });
+  // Alt+1…9: quick send to the first…ninth favorite that's nearby.
+  document.addEventListener("keydown", (event) => {
+    const digit = /^Digit([1-9])$/.exec(event.code);
+    if (!digit || !event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) return;
+    if (event.target.closest?.("input, textarea, [contenteditable]") || document.querySelector("dialog[open]")) return;
+    const target = onlineFavorites()[Number(digit[1]) - 1];
+    if (!target) return;
+    event.preventDefault();
+    quickSend(target.id);
+  });
 }
 
 export function isDeviceMode() {

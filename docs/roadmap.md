@@ -2,7 +2,7 @@
 
 Tracking issue: [#47](https://github.com/itsonu/open-transfer/issues/47). Each phase lands as its own commits: **tests first** (they fail), then the code (they pass), then the whole suite (unit + browser end-to-end) before it's pushed.
 
-Status legend: **Done** · **Partial** (some of it existed before this plan) · **New**.
+Status legend: **Done** · **Partial** (some of it existed before this plan) · **New** · ✅ **Phase X** (shipped in that phase).
 
 ## Ground rules
 
@@ -18,12 +18,12 @@ Status legend: **Done** · **Partial** (some of it existed before this plan) · 
 
 | Feature | Before | Steps | Tests |
 |---|---|---|---|
-| **Device Drag-and-Drop** | Done | Keep. Dropping onto an offline device says why nothing happened. | Existing `test_drop_files_onto_a_device`; new: drop on an offline tile shows a message. |
-| **Visual Device Drop Targets** | Partial | 1. While dragging files, each online tile shows "Drop to send". 2. The tile under the pointer is highlighted and announced to screen readers ("Release to send to Pixel"). 3. Offline tiles dim. | Drag over a tile → it has `is-drop-target` and the hint; the live region names the device. |
-| **Multi-Device Drag-and-Drop** | New | 1. Dropping onto a **selected** tile sends to **every** selected device. 2. While dragging with 2+ devices online, an **"Everyone"** group target appears; dropping there sends to all online devices (after the usual "send to everyone?" check). | Select 2 devices, drop on one → both get the offer. Drop on "Everyone" → confirm dialog, then all get it. |
-| **Nearby Device Favorites** | New | 1. Star button on each tile (`aria-pressed`). 2. Favorites sort first and stay listed (dimmed) when offline. 3. Stored per browser/app in `localStorage`. | Star a device → it moves first and survives a reload; un-star → back in place. |
-| **Quick Send** | New | 1. A favorite's tile gets a **Send…** shortcut: pick files → they go straight to that device (no Send bar step). 2. `Ctrl/⌘ + 1–9` opens the picker for the nth favorite. | Quick send to a favorite → the receiver gets the offer with no Send click. |
-| **Adaptive Device Layout** | Partial | Grid sizes by width: 2 columns on phones, 3–4 on tablets (incl. Galaxy Tab), auto on desktop; tap targets ≥ 44 px; the send bar never covers the last row. | Phone (390 px), tablet (800 px) and desktop (1280 px) viewports: no horizontal scroll, tile ≥ 44 px, expected columns. |
+| **Device Drag-and-Drop** | ✅ Phase A | Kept. Dropping onto an offline device says why nothing happened. | Existing `test_drop_files_onto_a_device`; new: drop on an offline tile shows a message. |
+| **Visual Device Drop Targets** | ✅ Phase A | 1. While dragging files, each online tile shows "Drop to send". 2. The tile under the pointer is highlighted and announced to screen readers ("Release to send to Pixel"). 3. Offline tiles dim. | Drag over a tile → it has `is-drop-target` and the hint; the live region names the device. |
+| **Multi-Device Drag-and-Drop** | ✅ Phase A | 1. Dropping onto a **selected** tile sends to **every** selected device. 2. While dragging with 2+ devices online, an **"Everyone"** group target appears; dropping there sends to all online devices (after the usual "send to everyone?" check). | Select 2 devices, drop on one → both get the offer. Drop on "Everyone" → confirm dialog, then all get it. |
+| **Nearby Device Favorites** | ✅ Phase A | 1. Star button on each tile (`aria-pressed`). 2. Favorites sort first and stay listed (dimmed) when offline. 3. Stored per browser/app in `localStorage`. | Star a device → it moves first and survives a reload; un-star → back in place. |
+| **Quick Send** | ✅ Phase A | 1. A favorite's tile gets a **Send…** shortcut: pick files → they go straight to that device (no Send bar step). 2. `Alt + 1–9` opens the picker for the nth favorite (browsers keep `Ctrl/⌘ + 1–9` for switching tabs). | Quick send to a favorite → the receiver gets the offer with no Send click. |
+| **Adaptive Device Layout** | ✅ Phase A | Grid sizes by width: 3 columns on phones, bigger tiles on touch tablets (incl. Galaxy Tab), auto on desktop; tiles ≥ 96 × 44 px, star ≥ 32 px and always shown on touch; the send bar never covers the last row. | Phone (390 px), tablet (800 px) and desktop (1280 px) viewports: no horizontal scroll, tile ≥ 44 px, expected columns. |
 
 ## Phase B — Previews and media
 
@@ -60,7 +60,7 @@ Status legend: **Done** · **Partial** (some of it existed before this plan) · 
 
 ## Cross-cutting (every phase)
 
-- **Keyboard Shortcuts:** `Ctrl/⌘+O` choose files · `Ctrl/⌘+Enter` send · `/` search · `Esc` close or cancel · `Ctrl/⌘+1–9` quick send · `?` shortcut list. Tested per phase as features land.
+- **Keyboard Shortcuts:** `Ctrl/⌘+O` choose files · `Ctrl/⌘+Enter` send · `/` search · `Esc` close or cancel · `Alt+1–9` quick send (done in Phase A) · `?` shortcut list. Tested per phase as features land.
 - **Accessibility Support:** every control has a name, focus is visible and returns after dialogs, drop targets and progress are announced, nothing needs a mouse. A browser test fails on unnamed buttons or images without `alt`.
 
 ## Not in scope

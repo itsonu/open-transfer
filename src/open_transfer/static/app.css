@@ -1637,6 +1637,136 @@ body.is-dragging .device[data-online="1"] .device-button {
   display: block;
 }
 
+/* Favorite star, quick send and the "drop here" hint on a tile. */
+.device-fav,
+.device-quick {
+  position: absolute;
+  top: 6px;
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+}
+
+.device-fav .icon,
+.device-quick .icon {
+  width: 17px;
+  height: 17px;
+}
+
+.device-fav {
+  left: 6px;
+  color: var(--text-2);
+  opacity: 0;
+  transition:
+    opacity var(--t-fast) var(--ease-out),
+    color var(--t-fast) var(--ease-out);
+}
+
+.device:hover .device-fav,
+.device:focus-within .device-fav,
+.device.is-favorite .device-fav {
+  opacity: 1;
+}
+
+.device.is-favorite .device-fav {
+  color: var(--warning);
+}
+
+.device.is-favorite .device-fav .icon {
+  fill: currentColor;
+}
+
+.device-quick {
+  right: 6px;
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+.device.is-favorite:not(.is-offline) .device-badge {
+  right: 44px;
+}
+
+.device-drop-hint {
+  position: absolute;
+  bottom: -9px;
+  left: 50%;
+  display: none;
+  padding: 2px 9px;
+  border-radius: 999px;
+  background: var(--accent);
+  color: var(--on-accent);
+  font-size: 11px;
+  font-weight: 600;
+  white-space: nowrap;
+  transform: translateX(-50%);
+  pointer-events: none;
+}
+
+body.is-dragging .device[data-online="1"] .device-drop-hint {
+  display: block;
+}
+
+/* While dragging files with 2+ devices nearby: one target for all of them. */
+.everyone-target {
+  display: none;
+  align-items: center;
+  gap: 12px;
+  margin-top: 14px;
+  padding: 14px 16px;
+  border: 2px dashed var(--accent);
+  border-radius: var(--r-lg);
+  background: var(--accent-soft);
+  color: var(--accent);
+  transition:
+    background var(--t-fast) var(--ease-out),
+    color var(--t-fast) var(--ease-out);
+}
+
+body.is-dragging .everyone-target[data-ready="1"] {
+  display: flex;
+}
+
+.everyone-target.is-drop-target {
+  border-style: solid;
+  background: var(--accent);
+  color: var(--on-accent);
+}
+
+.everyone-icon .icon {
+  width: 24px;
+  height: 24px;
+}
+
+.everyone-text {
+  display: flex;
+  flex-direction: column;
+  font-size: 15px;
+}
+
+.everyone-text span {
+  font-size: 12px;
+  opacity: 0.85;
+}
+
+/* Touch screens have no hover: show the star, and leave room for it. */
+@media (pointer: coarse) {
+  .device-fav {
+    opacity: 1;
+  }
+
+  .device-grid .device-button {
+    padding-top: 26px;
+  }
+}
+
+/* Tablets (iPad, Galaxy Tab): bigger tiles, easy to hit with a thumb. */
+@media (pointer: coarse) and (min-width: 700px) {
+  .device-grid {
+    grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+    gap: 14px;
+  }
+}
+
 .nearby-empty {
   padding: 30px 24px 26px;
   text-align: center;

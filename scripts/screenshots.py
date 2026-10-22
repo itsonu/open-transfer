@@ -137,8 +137,8 @@ def main() -> None:
             page = ctx.new_page()
             page.goto(mac.local_url)
             wait_devices(page, 3)
-            page.locator(".device", has_text="Gaming PC").locator("button").click()
-            page.locator(".device", has_text="Galaxy Tab").locator("button").click()
+            page.locator(".device", has_text="Gaming PC").locator(".device-button").click()
+            page.locator(".device", has_text="Galaxy Tab").locator(".device-button").click()
             page.set_input_files(
                 "#file-input",
                 files=[

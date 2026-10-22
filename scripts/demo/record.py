@@ -146,7 +146,7 @@ def play(
     mac.locator("#file-input").set_input_files(files=uploads)
 
     for label, name, t in (("pick1", "Pixel 8", 7.4), ("pick2", "Galaxy Tab", 8.1)):
-        button = mac.locator(".device", has_text=name).locator("button").first
+        button = mac.locator(".device", has_text=name).locator(".device-button")
         x, y = center(button)
         at(t - 0.7, f"{label}-move")
         page.evaluate(f"stage.move({x}, {y})")
