@@ -310,6 +310,33 @@ def test_focus_requests_are_answered(tmp_path: Path) -> None:
     lock.release()
 
 
+def test_busy_focus_request_shows_the_window_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Windows: the asking copy may still be writing the request, so it can't be
+    # deleted yet. The window comes forward once; the next tick only confirms.
+    path = tmp_path / instance.FOCUS_FILE
+    path.write_text("x")
+    shown: list[bool] = []
+    watcher = desktop.FocusRequests(path, lambda: shown.append(True))
+    unlink = Path.unlink
+    busy = [True]
+
+    def flaky_unlink(self: Path, missing_ok: bool = False) -> None:
+        if busy.pop(0) if busy else False:
+            raise PermissionError("in use")
+        unlink(self, missing_ok=missing_ok)
+
+    monkeypatch.setattr(Path, "unlink", flaky_unlink)
+    assert not watcher.poll()
+    assert watcher.poll()
+    assert shown == [True]
+    assert not path.exists()
+    path.write_text("x")  # a later request is shown again
+    assert watcher.poll()
+    assert shown == [True, True]
+
+
 def test_failed_focus_request_is_not_confirmed(tmp_path: Path) -> None:
     def broken() -> None:
         raise RuntimeError("no window")

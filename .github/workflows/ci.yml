@@ -120,7 +120,7 @@ jobs:
           - { os: windows-latest, name: windows-x64, cli: open-transfer-windows-x64-cli, desktop: true }
           - { os: macos-latest, name: macos-arm64, cli: open-transfer-macos-arm64-cli, desktop: true, desktop-flags: --require-window }
           # GitHub's last Intel macOS image (x64).
-          - { os: macos-15-intel, name: macos-x64, cli: "", desktop: true, desktop-flags: --require-window }
+          - { os: macos-15-intel, name: macos-x64, cli: open-transfer-macos-x64-cli, desktop: true, desktop-flags: --require-window }
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7

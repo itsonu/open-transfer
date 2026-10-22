@@ -58,11 +58,12 @@ jobs:
         #   open-transfer-macos-arm64.dmg         desktop app, Apple silicon
         #   open-transfer-macos-arm64-cli.tar.gz  command-line app, Apple silicon
         #   open-transfer-macos-x64.dmg           desktop app, Intel Mac
+        #   open-transfer-macos-x64-cli.tar.gz    command-line app, Intel Mac
         include:
           - { os: ubuntu-latest, name: linux-x64, cli: open-transfer-linux-x64, desktop: false }
           - { os: windows-latest, name: windows-x64, cli: open-transfer-windows-x64-cli, desktop: true }
           - { os: macos-latest, name: macos-arm64, cli: open-transfer-macos-arm64-cli, desktop: true, desktop-flags: --require-window }
-          - { os: macos-15-intel, name: macos-x64, cli: "", desktop: true, desktop-flags: --require-window }
+          - { os: macos-15-intel, name: macos-x64, cli: open-transfer-macos-x64-cli, desktop: true, desktop-flags: --require-window }
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7
@@ -161,6 +162,13 @@ jobs:
           # *.dockerbuild record artifact that must not become a release asset.
           pattern: "{python-dist,binary-*,open-transfer-android}"
           merge-multiple: true
+      # One file listing every asset's SHA-256, so downloads can be checked with
+      # `sha256sum -c SHA256SUMS --ignore-missing`.
+      - name: Checksums
+        run: |
+          cd artifacts
+          sha256sum -- * > SHA256SUMS
+          cat SHA256SUMS
       - uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ env.TAG }}
@@ -168,3 +176,13 @@ jobs:
           name: Open Transfer ${{ env.TAG }}
           files: artifacts/*
           body_path: ${{ runner.temp }}/notes.md
+      # Moves the Homebrew tap (itsonu/homebrew-tap) to this release right away.
+      # Needs a HOMEBREW_TAP_TOKEN secret (a token that can write to that repo);
+      # without it the tap catches up on its own within 6 hours.
+      - name: Update the Homebrew tap
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: |
+          if [ -z "$GH_TOKEN" ]; then echo "No HOMEBREW_TAP_TOKEN; the tap updates on its schedule."; exit 0; fi
+          gh api repos/itsonu/homebrew-tap/dispatches -f event_type=release -f "client_payload[tag]=$TAG"
