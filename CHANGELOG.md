@@ -4,9 +4,12 @@ All notable changes are documented here. The format follows [Keep a Changelog](h
 
 ## [Unreleased]
 
+## [3.2.5] — 2026-10-22
+
 ### Added
 - Every release has a `SHA256SUMS` file, so you can check a download is exactly what was built (see the README).
 - A command-line build for Intel Macs (`open-transfer-macos-x64-cli.tar.gz`), as there already was for Apple silicon.
+- Homebrew: `brew install --cask itsonu/tap/open-transfer` (desktop app) or `brew install itsonu/tap/open-transfer` (command line).
 
 ## [3.2.4] — 2026-10-18
 
@@ -129,7 +132,8 @@ The project is now **Open Transfer**: a rewrite of the original Flask "File Tran
 ### Removed
 - Unrelated packet-sniffing and network-scanning scripts (`get.py`, `get2.py`, `scan.py`), the duplicate `backup.py`, the unused Tkinter import and IDE settings.
 
-[Unreleased]: https://github.com/itsonu/open-transfer/compare/v3.2.4...HEAD
+[Unreleased]: https://github.com/itsonu/open-transfer/compare/v3.2.5...HEAD
+[3.2.5]: https://github.com/itsonu/open-transfer/compare/v3.2.4...v3.2.5
 [3.2.4]: https://github.com/itsonu/open-transfer/compare/v3.2.3...v3.2.4
 [3.2.3]: https://github.com/itsonu/open-transfer/compare/v3.2.2...v3.2.3
 [3.2.2]: https://github.com/itsonu/open-transfer/compare/v3.2.1...v3.2.2

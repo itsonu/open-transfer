@@ -65,6 +65,8 @@ Install it on each device from the [latest release](https://github.com/itsonu/op
 
 Received files go to **Downloads/Open Transfer** on every platform.
 
+**With Homebrew** (Mac): `brew install --cask itsonu/tap/open-transfer`. The first launch needs the same **Open Anyway** step as above.
+
 **Check your download** (optional): every release has a `SHA256SUMS` file. Put it next to what you downloaded and run `shasum -a 256 -c SHA256SUMS --ignore-missing` (macOS) or `sha256sum -c SHA256SUMS --ignore-missing` (Linux); each file should say **OK**. On Windows: `Get-FileHash .\open-transfer-windows-x64.exe` and compare with the line in `SHA256SUMS`.
 
 **iPhone / iPad, or a device you can't install on?** Open the link or scan the QR code shown under **Add device** on any device that runs the app. The browser joins the group and can send and receive (through that device).
@@ -115,10 +117,11 @@ Your browser opens and the terminal shows the address and a QR code:
 ```
 
 <details markdown="1">
-<summary><b>Other ways to run it</b> — pipx, Docker, standalone binary</summary>
+<summary><b>Other ways to run it</b> — Homebrew, pipx, Docker, standalone binary</summary>
 
 | Method | Command |
 | ------ | ------- |
+| **Homebrew** (Mac, Linux) | `brew install --cask itsonu/tap/open-transfer` (desktop app) or `brew install itsonu/tap/open-transfer` (command line) |
 | **pipx / uv** (installs the `open-transfer` command) | `pipx install git+https://github.com/itsonu/open-transfer` or `uv tool install git+https://github.com/itsonu/open-transfer` |
 | **Docker** | `docker compose up -d` (see [Self-hosting](#self-hosting--docker)) |
 | **Standalone app** (no Python needed) | See [Option 1](#option-1--download-the-app-no-python-needed), or build it with `python3 scripts/build_app.py` |
