@@ -1,7 +1,9 @@
 from __future__ import annotations
 
-from collections.abc import Callable
+import random
+from collections.abc import Callable, Iterator
 from pathlib import Path
+from typing import Any
 
 import pytest
 from flask import Flask
@@ -9,6 +11,7 @@ from flask.testing import FlaskClient
 
 from open_transfer.app import create_app
 from open_transfer.config import Config
+from open_transfer.node import Node
 
 AppFactory = Callable[..., Flask]
 
@@ -53,3 +56,32 @@ def upload(client: FlaskClient, name: str, data: bytes = b"hello", **headers: st
         data=data,
         headers={"X-Filename": quote(name), "Content-Type": "application/octet-stream", **headers},
     )
+
+
+# Real nodes on 127.0.0.1 (each with its own folder) for app-to-app tests.
+NodeFactory = Callable[..., Node]
+
+
+@pytest.fixture
+def make_node(tmp_path: Path) -> Iterator[NodeFactory]:
+    nodes: list[Node] = []
+    discovery_port = random.randint(40000, 59000)
+
+    def factory(name: str, **overrides: Any) -> Node:
+        overrides.setdefault("discovery", False)
+        overrides.setdefault("discovery_port", discovery_port)
+        config = Config(
+            storage_dir=tmp_path / name,
+            port=0,
+            device_name=name,
+            reserve_disk_bytes=0,
+            **overrides,
+        )
+        node = Node(config)
+        node.start()
+        nodes.append(node)
+        return node
+
+    yield factory
+    for node in nodes:
+        node.stop()

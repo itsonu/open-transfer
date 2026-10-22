@@ -12,15 +12,15 @@ import struct
 import time
 import urllib.error
 import urllib.request
-from collections.abc import Callable, Iterator
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
 import pytest
 
 from open_transfer import network
-from open_transfer.config import Config
 from open_transfer.node import Node
+from tests.conftest import NodeFactory
 
 Json = dict[str, Any]
 
@@ -76,34 +76,6 @@ def wait_for(check: Callable[[], Any], timeout: float = 10.0, interval: float = 
         if time.monotonic() > deadline:
             raise AssertionError("timed out waiting for condition")
         time.sleep(interval)
-
-
-NodeFactory = Callable[..., Node]
-
-
-@pytest.fixture
-def make_node(tmp_path: Path) -> Iterator[NodeFactory]:
-    nodes: list[Node] = []
-    discovery_port = random.randint(40000, 59000)
-
-    def factory(name: str, **overrides: Any) -> Node:
-        overrides.setdefault("discovery", False)
-        overrides.setdefault("discovery_port", discovery_port)
-        config = Config(
-            storage_dir=tmp_path / name,
-            port=0,
-            device_name=name,
-            reserve_disk_bytes=0,
-            **overrides,
-        )
-        node = Node(config)
-        node.start()
-        nodes.append(node)
-        return node
-
-    yield factory
-    for node in nodes:
-        node.stop()
 
 
 def owner(node: Node) -> Client:

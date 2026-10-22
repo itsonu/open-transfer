@@ -3,8 +3,9 @@
 // file list · shared-folder uploads · drag/drop/paste · PIN · boot.
 // lib.js has the helpers, nearby.js the devices, sending and pairing.
 
-import { $, addHistory, api, can, chunkLimits, clearHistory, copyText, formatBytes, formatDuration, guessKind, h, icon, loadHistory, newUploadId, plural, pushSample, relativeTime, setLockHandler, shouldChunk, sparklineSVG, state, toast, uploadParallel } from "./lib.js";
-import { announceSelf, busy, fetchState, forgetDirectFile, initNearby, isDeviceMode, mesh, openAddDevice, stageFiles } from "./nearby.js";
+import { $, addHistory, api, can, chunkLimits, clearHistory, copyText, formatBytes, formatDuration, guessKind, h, icon, loadHistory, newUploadId, plural, pushSample, relativeTime, setLockHandler, shouldChunk, sparklineSVG, stamp, state, toast, uploadParallel } from "./lib.js";
+import { initClipboard, readClipboard } from "./clipboard.js";
+import { announceSelf, busy, confirmSensitive, fetchState, forgetDirectFile, initNearby, isDeviceMode, mesh, openAddDevice, stageFiles } from "./nearby.js";
 import { canShareFiles, copyImage, initMedia, isImage, isVideo, openMenu, openPreview, previewKind, shareFile, videoThumb } from "./media.js";
 import { collectDropped, zipFiles, zipName } from "./zip.js";
 
@@ -996,13 +997,75 @@ function setupDropAndPaste() {
   });
 
   document.addEventListener("paste", (event) => {
-    if (event.target.closest?.("input, textarea") || !canDrop()) return;
+    if (event.target.closest?.("input, textarea, [contenteditable]") || !canDrop()) return;
     const files = [...(event.clipboardData?.files || [])];
     if (files.length) {
       event.preventDefault();
       enqueueFiles(files, { source: "paste" });
+      return;
+    }
+    const text = event.clipboardData?.getData("text/plain") || "";
+    if (text.trim()) {
+      event.preventDefault();
+      sendText(text, "Pasted text");
     }
   });
+}
+
+/** Text to send, as a .txt file; private-looking text asks first. */
+async function sendText(text, label) {
+  if (!(await confirmSensitive(text))) return;
+  enqueueFiles([new File([text.replace(/\r\n/g, "\n")], `${label} ${stamp()}.txt`, { type: "text/plain" })]);
+}
+
+/** Send what's on the clipboard: an image as is, text as a .txt file. */
+async function sendClipboard() {
+  if (!(can("upload") || can("send"))) return;
+  const clip = await readClipboard();
+  if (!clip) return;
+  if (clip.file) enqueueFiles([clip.file]);
+  else sendText(clip.text, "Clipboard");
+}
+
+/** Ctrl/⌘+C on a file: text files copy their text, pictures themselves, the rest their link. */
+async function copyFocusedFile(row) {
+  const file = row._file;
+  if (previewKind(file) === "text" && file.size <= COPYABLE_TEXT_BYTES) {
+    await copyFileText(file);
+  } else if (isImage(file) && navigator.clipboard?.write) {
+    toast((await copyImage(urlFor(file, true))) ? "Image copied" : "Couldn’t copy the image", { icon: "copy" });
+  } else if (!file.direct) {
+    toast((await copyText(linkFor(file))) ? "Link copied" : "Couldn’t copy the link", { icon: "link" });
+  }
+}
+
+function setupShortcuts() {
+  document.addEventListener("keydown", (event) => {
+    const mod = event.ctrlKey || event.metaKey;
+    if (!mod || event.altKey || document.querySelector("dialog[open]")) return;
+    const typing = event.target.closest?.("input, textarea, select, [contenteditable]");
+    const key = event.key.toLowerCase();
+    if (key === "v" && event.shiftKey && !typing) {
+      event.preventDefault();
+      sendClipboard();
+    } else if (key === "c" && !event.shiftKey && !typing && !String(getSelection()).trim()) {
+      const row = event.target.closest?.(".file-row");
+      if (row?._file) {
+        event.preventDefault();
+        copyFocusedFile(row);
+      }
+    }
+  });
+  const canRead = Boolean(navigator.clipboard?.readText) && window.isSecureContext;
+  for (const id of ["#send-clipboard", "#dropzone-clipboard"]) {
+    const button = $(id);
+    if (!button) continue;
+    button.hidden = !canRead;
+    button.addEventListener("click", (event) => {
+      event.stopPropagation(); // inside the drop zone: don't open the file picker too
+      sendClipboard();
+    });
+  }
 }
 
 // --------------------------------------------------------------------- PIN
@@ -1066,6 +1129,7 @@ function boot() {
   setLockHandler(showLock);
   applyInfo(state.info);
   setupDropAndPaste();
+  setupShortcuts();
   initNearby({
     requestPoll: () => poll(true),
     droppedFiles,
@@ -1104,6 +1168,7 @@ function boot() {
   $("#library-filter").addEventListener("change", (event) => setLibrary({ filter: event.target.value }));
   $("#library-sort").addEventListener("change", (event) => setLibrary({ sort: event.target.value }));
   initMedia();
+  initClipboard();
   $("#clear-transfers").addEventListener("click", () => {
     for (const t of [...state.transfers.values()]) if (t.state === "error") removeTransfer(t);
   });

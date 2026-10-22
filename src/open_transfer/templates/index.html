@@ -149,6 +149,9 @@
               <span class="only-pointer">or <span class="link-like">choose from your computer</span></span>
               <span class="only-touch"><span class="link-like">Tap to choose photos or files</span></span>
             </p>
+            <button class="btn btn-plain btn-small drop-clipboard" type="button" id="dropzone-clipboard" hidden>
+              <svg class="icon" aria-hidden="true"><use href="#i-copy"/></svg><span>Send what you copied</span>
+            </button>
             <p class="drop-hint" id="drop-hint"></p>
             <input type="file" id="file-input" multiple hidden>
             <input type="file" id="folder-input" hidden webkitdirectory>
@@ -179,6 +182,32 @@
             </div>
           </div>
           <ul class="list card" id="history-list"></ul>
+        </section>
+
+        <section class="transfers clipboard" id="clipboard-section" aria-labelledby="clip-title" hidden>
+          <div class="section-head">
+            <h2 id="clip-title">Clipboard</h2>
+            <span class="section-meta" id="clip-meta"></span>
+            <div class="section-tools">
+              <label class="search">
+                <svg class="icon" aria-hidden="true"><use href="#i-search"/></svg>
+                <span class="visually-hidden">Search clipboard history</span>
+                <input type="search" id="clip-search" placeholder="Search" autocomplete="off">
+              </label>
+              <button class="btn btn-plain btn-small" id="clip-settings" type="button">Sync settings</button>
+              <button class="btn btn-plain btn-small" id="clip-clear" type="button" hidden>Clear</button>
+            </div>
+          </div>
+          <div class="clip-bar card">
+            <button class="btn btn-primary" id="clip-push" type="button">
+              <svg class="icon" aria-hidden="true"><use href="#i-copy"/></svg><span>Share clipboard</span>
+            </button>
+            <div class="clip-bar-text">
+              <span id="clip-sync-note"></span>
+              <label class="clip-auto"><input type="checkbox" id="clip-auto"> Share automatically while this window is open</label>
+            </div>
+          </div>
+          <ul class="list card" id="clip-list" hidden></ul>
         </section>
 
         <section class="library" id="library" aria-labelledby="library-title">
@@ -298,6 +327,9 @@
         </button>
         <button class="btn btn-tinted" id="send-text" type="button">
           <svg class="icon" aria-hidden="true"><use href="#i-edit"/></svg><span>Text</span>
+        </button>
+        <button class="btn btn-tinted" id="send-clipboard" type="button" title="Send what you copied (Ctrl/⌘+Shift+V)" hidden>
+          <svg class="icon" aria-hidden="true"><use href="#i-copy"/></svg><span>Clipboard</span>
         </button>
         <button class="btn btn-primary" id="send-go" type="button" disabled>
           <svg class="icon" aria-hidden="true"><use href="#i-send"/></svg><span>Send</span>
@@ -492,6 +524,36 @@
   </dialog>
 
   <div class="menu" id="file-menu" role="menu" aria-label="File actions" hidden></div>
+
+  <dialog class="sheet clip-sheet" id="clip-dialog" aria-labelledby="clip-dialog-title">
+    <form method="dialog" class="sheet-close-form">
+      <button class="icon-btn sheet-close" aria-label="Close" value="close">
+        <svg class="icon" aria-hidden="true"><use href="#i-x"/></svg>
+      </button>
+    </form>
+    <h2 id="clip-dialog-title">Clipboard sharing</h2>
+    <p class="muted">Paired devices you turn on here get your clipboard when you share it, and can send you theirs. Both devices have to turn it on.</p>
+    <div class="clip-devices" id="clip-devices"></div>
+    <div class="clip-retention">
+      <label>Keep
+        <select id="clip-max-items">
+          <option value="20">20 items</option>
+          <option value="50">50 items</option>
+          <option value="100">100 items</option>
+          <option value="200">200 items</option>
+        </select>
+      </label>
+      <label>for
+        <select id="clip-max-age">
+          <option value="1">1 day</option>
+          <option value="7">7 days</option>
+          <option value="30">30 days</option>
+          <option value="0">as long as they fit</option>
+        </select>
+      </label>
+    </div>
+    <p class="muted clip-note">Anything that looks like a password, one-time code, card number or key asks before it’s shared and is never saved. A web page can’t see which app copied something, so particular apps can’t be left out here.</p>
+  </dialog>
 
   <div class="toasts" id="toasts" aria-live="polite" aria-atomic="false"></div>
   <p class="visually-hidden" id="drop-live" aria-live="assertive"></p>

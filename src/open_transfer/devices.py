@@ -76,7 +76,7 @@ def new_visitor_id() -> str:
     return "w-" + secrets.token_hex(12)
 
 
-def _write_private(path: Path, data: dict[str, Any]) -> None:
+def write_private(path: Path, data: dict[str, Any]) -> None:
     """Atomically write JSON readable only by this user."""
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(f".{path.name}.{secrets.token_hex(4)}.tmp")
@@ -136,7 +136,7 @@ class IdentityStore:
 
     def _save(self) -> None:
         try:
-            _write_private(self._path, {"id": self.identity.id, "name": self.identity.name})
+            write_private(self._path, {"id": self.identity.id, "name": self.identity.name})
         except OSError:  # read-only volume: identity lives for this run only
             log.debug("could not save the device identity", exc_info=True)
 
@@ -213,7 +213,7 @@ class TrustStore:
             for d in self._devices.values()
         }
         try:
-            _write_private(self._path, data)
+            write_private(self._path, data)
         except OSError:
             log.warning("Could not save paired devices to %s", self._path)
 

@@ -3,7 +3,7 @@
 // and renaming this device.
 
 import { DIRECT_MAX_BYTES, directSupported, handleSignals, sendDirect } from "./direct.js";
-import { $, ApiError, addHistory, api, chunkLimits, copyText, formatBytes, formatDuration, guessKind, h, icon, newUploadId, plural, pushSample, shouldChunk, sparklineSVG, state, toast, uploadParallel } from "./lib.js";
+import { $, ApiError, addHistory, api, chunkLimits, copyText, formatBytes, formatDuration, guessKind, h, icon, looksSensitive, newUploadId, plural, pushSample, SENSITIVE_REASONS, shouldChunk, sparklineSVG, state, toast, uploadParallel } from "./lib.js";
 import { isImage, makeThumb } from "./media.js";
 import { collectDropped, zipFiles, zipName } from "./zip.js";
 
@@ -128,6 +128,7 @@ function apply() {
   renderSendBar();
   if (!state.info.owner) ctx.libraryChanged(inboxFiles());
   if (data.signals) fetchSignals();
+  window.dispatchEvent(new CustomEvent("ot-mesh-state", { detail: data }));
 }
 
 async function fetchSignals() {
@@ -1440,15 +1441,44 @@ async function stopIncoming(id) {
 
 // ------------------------------------------------------------------ dialogs
 
+let confirmAnswer = null; // resolves the question on screen
+
+function answerConfirm(ok) {
+  const resolve = confirmAnswer;
+  confirmAnswer = null;
+  resolve?.(ok);
+}
+
 export function confirmDialog({ title, text, items = [], confirm = "OK" }) {
   const dialog = $("#confirm-dialog");
+  if (!dialog.dataset.wired) {
+    // Answer from the button press itself (sync): a "close" event arrives later and
+    // could otherwise land on the next question when two come in quick succession.
+    dialog.dataset.wired = "1";
+    dialog.querySelector("form").addEventListener("submit", (event) => answerConfirm(event.submitter?.value === "ok"));
+    dialog.addEventListener("cancel", () => answerConfirm(false));
+    dialog.addEventListener("close", () => !dialog.open && answerConfirm(dialog.returnValue === "ok"));
+  }
+  answerConfirm(false); // a question still waiting (shouldn't happen) is a no
   $("#confirm-title").textContent = title;
   $("#confirm-text").textContent = text;
   $("#confirm-items").replaceChildren(...items.map((name) => h("li", {}, name)));
   $("#confirm-ok").textContent = confirm;
-  dialog.showModal();
+  dialog.returnValue = "";
   return new Promise((resolve) => {
-    dialog.addEventListener("close", () => resolve(dialog.returnValue === "ok"), { once: true });
+    confirmAnswer = resolve;
+    if (!dialog.open) dialog.showModal();
+  });
+}
+
+/** Text that looks like a password, code, card number or key asks first. */
+export async function confirmSensitive(text, { action = "Send" } = {}) {
+  const reason = looksSensitive(text);
+  if (!reason) return true;
+  return confirmDialog({
+    title: `This looks like ${SENSITIVE_REASONS[reason]}`,
+    text: `Make sure you trust everyone who’ll get it. ${action} it anyway?`,
+    confirm: `${action} anyway`,
   });
 }
 

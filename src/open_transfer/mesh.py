@@ -26,6 +26,7 @@ Sending
 
 from __future__ import annotations
 
+import base64
 import contextlib
 import dataclasses
 import http.client
@@ -45,6 +46,10 @@ from typing import Any
 from open_transfer import __version__
 from open_transfer.chunks import CHUNK_SIZE as RESUMABLE_CHUNK_SIZE
 from open_transfer.chunks import ChunkSessions
+from open_transfer.clipboard import IMAGE_MIME as CLIP_IMAGE_MIME
+from open_transfer.clipboard import MAX_IMAGE_BYTES as CLIP_MAX_IMAGE
+from open_transfer.clipboard import MAX_TEXT_BYTES as CLIP_MAX_TEXT
+from open_transfer.clipboard import ClipboardStore
 from open_transfer.config import Config
 from open_transfer.devices import (
     IdentityStore,
@@ -269,6 +274,8 @@ class Mesh:
             platform=config.device_platform,
         )
         self.trust = TrustStore(state)
+        self.clipboard = ClipboardStore(state)
+        self._clip_latest = ""  # newest clipboard item received from a paired device
         self._inbox_root = state / "inbox"
         # Big outgoing files are staged here chunk-by-chunk (browser → this app)
         # before being fanned out to the receivers. Crash-safe: a page reload
@@ -752,7 +759,140 @@ class Mesh:
         )
 
     def unpair(self, device_id: str) -> bool:
+        allowed = self.clipboard.settings()["allowed"]
+        if device_id in allowed:
+            self.clipboard.set_settings(allowed=[i for i in allowed if i != device_id])
         return self.trust.remove(device_id)
+
+    # ----------------------------------------------------------- clipboard
+
+    def clipboard_devices(self) -> list[dict[str, Any]]:
+        """Paired apps, and whether this device shares its clipboard with each."""
+        allowed = set(self.clipboard.settings()["allowed"])
+        out = []
+        with self._lock:
+            for trusted in self.trust.all():
+                peer = self._peers.get(trusted.id)
+                out.append(
+                    {
+                        "id": trusted.id,
+                        "name": peer.name if peer else trusted.name,
+                        "online": bool(peer and peer.online),
+                        "allowed": trusted.id in allowed,
+                    }
+                )
+        return sorted(out, key=lambda d: d["name"].lower())
+
+    def set_clipboard_settings(
+        self,
+        *,
+        allowed: list[str] | None = None,
+        max_items: int | None = None,
+        max_age_days: int | None = None,
+    ) -> dict[str, Any]:
+        if allowed is not None:
+            if not isinstance(allowed, list):
+                raise MeshError(400, "bad_request", "Expected a list of devices.")
+            if not set(allowed) <= self.trust.ids():
+                raise MeshError(400, "not_paired", "Only paired devices can share a clipboard.")
+        try:
+            return self.clipboard.set_settings(
+                allowed=allowed, max_items=max_items, max_age_days=max_age_days
+            )
+        except (ValueError, TypeError) as exc:
+            raise MeshError(400, "bad_request", str(exc)) from None
+
+    def share_clipboard(
+        self, *, kind: str, text: str = "", data: bytes = b"", mime: str = ""
+    ) -> dict[str, Any]:
+        """Send a clipboard item to every paired device this one shares with."""
+        allowed = set(self.clipboard.settings()["allowed"])
+        # Don't bounce a clip straight back to the device it just came from.
+        echo = next(
+            (
+                i["device"]["id"]
+                for i in self.clipboard.items()
+                if i["direction"] == "received"
+                and i["kind"] == "text"
+                and kind == "text"
+                and i.get("text") == text
+                and time.time() - i["at"] < 60
+            ),
+            None,
+        )
+        with self._lock:
+            targets = [
+                (device_id, self._peers.get(device_id))
+                for device_id in sorted(allowed)
+                if device_id != echo and self.trust.get(device_id)
+            ]
+        ident = self.identity
+        body: dict[str, Any] = {"from": {"id": ident.id, "name": ident.name}, "kind": kind}
+        if kind == "text":
+            body["text"] = text
+        else:
+            body.update(mime=mime, data=base64.b64encode(data).decode())
+
+        def deliver(peer: Peer | None, device_id: str) -> tuple[bool, str, str]:
+            name = peer.name if peer else (self.trust.get(device_id) or ident).name
+            if peer is None or not peer.online:
+                return False, name, "Not nearby"
+            try:
+                status, reply = self._http(peer, "POST", f"{P2P}/clip", body=body, timeout=15)
+            except OSError:
+                return False, name, "Couldn’t reach it"
+            if status == 200:
+                return True, name, ""
+            error = reply.get("error")
+            if isinstance(error, dict) and error.get("code") == "not_allowed":
+                return False, name, "It doesn’t share its clipboard with this device"
+            return False, name, "Couldn’t send it"
+
+        futures = [
+            (device_id, self._executor.submit(deliver, peer, device_id))
+            for device_id, peer in targets
+        ]
+        delivered: list[dict[str, str]] = []
+        failed: list[dict[str, str]] = []
+        for device_id, future in futures:
+            ok, name, reason = future.result()
+            (delivered if ok else failed).append(
+                {"id": device_id, "name": name, **({"reason": reason} if reason else {})}
+            )
+        names = ", ".join(d["name"] for d in delivered)
+        item = self.clipboard.add(
+            kind=kind,
+            direction="sent",
+            device={"id": delivered[0]["id"] if len(delivered) == 1 else "", "name": names},
+            text=text,
+            data=data,
+            mime=mime,
+        )
+        return {"item": item, "delivered": delivered, "failed": failed}
+
+    def handle_clip(self, sender_id: str, verified: bool, data: dict[str, Any]) -> dict[str, Any]:
+        """A paired device shares its clipboard with us."""
+        trusted = self.trust.get(sender_id) if verified else None
+        if trusted is None:
+            raise MeshError(403, "not_paired", "Only paired devices can share a clipboard.")
+        if not self.clipboard.allowed(sender_id):
+            raise MeshError(403, "not_allowed", "This device doesn’t share its clipboard with you.")
+        kind, text, raw, mime = _clean_clip(data)
+        with self._lock:
+            peer = self._peers.get(sender_id)
+        name = peer.name if peer else trusted.name
+        item = self.clipboard.add(
+            kind=kind,
+            direction="received",
+            device={"id": sender_id, "name": name},
+            text=text,
+            data=raw,
+            mime=mime,
+        )
+        with self._lock:
+            self._clip_latest = item["id"]
+        log.info("Clipboard %s from %s", kind, log_safe(name))
+        return {"ok": True}
 
     # ----------------------------------------------------------- incoming
 
@@ -2067,6 +2207,10 @@ class Mesh:
         }
         if viewer.is_owner:
             state["pairing"] = {"code": self.pair_code, "expires_in": self.pair_code_expires_in()}
+            state["clipboard"] = {
+                "latest": self._clip_latest,
+                "sharing": len(self.clipboard.settings()["allowed"]),
+            }
             state["settings"] = {
                 "auto_accept": self.config.auto_accept,
                 "paired_only": self.config.paired_only,
@@ -2080,6 +2224,35 @@ class Mesh:
 
 
 # =================================================================== helpers
+
+
+def _clean_clip(data: dict[str, Any]) -> tuple[str, str, bytes, str]:
+    """(kind, text, image bytes, mime) of a clipboard item, or a MeshError."""
+    kind = data.get("kind")
+    if kind == "text":
+        text = data.get("text")
+        if not isinstance(text, str) or not text:
+            raise MeshError(400, "bad_request", "Nothing to share.")
+        if len(text.encode()) > CLIP_MAX_TEXT:
+            raise MeshError(413, "too_large", "That text is too long to share (1 MB max).")
+        return "text", text, b"", ""
+    if kind == "image":
+        mime = data.get("mime")
+        if mime not in CLIP_IMAGE_MIME:
+            raise MeshError(
+                400, "bad_request", "Only PNG, JPEG, GIF and WebP images can be shared."
+            )
+        encoded = data.get("data")
+        if not isinstance(encoded, str) or len(encoded) > CLIP_MAX_IMAGE * 4 // 3 + 8:
+            raise MeshError(413, "too_large", "That image is too big to share (10 MB max).")
+        try:
+            raw = base64.b64decode(encoded, validate=True)
+        except ValueError:
+            raise MeshError(400, "bad_request", "That image couldn’t be read.") from None
+        if not raw or len(raw) > CLIP_MAX_IMAGE:
+            raise MeshError(413, "too_large", "That image is too big to share (10 MB max).")
+        return "image", "", raw, str(mime)
+    raise MeshError(400, "bad_request", "Share text or an image.")
 
 
 class _Watched:

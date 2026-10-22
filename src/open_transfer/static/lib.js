@@ -454,3 +454,71 @@ export async function copyText(text) {
   area.remove();
   return ok;
 }
+
+// ------------------------------------------------------- sensitive text
+// Mirrors open_transfer/sensitive.py (tests check both give the same answers):
+// asks before private-looking text is sent, and it's never kept in history.
+
+const SENSITIVE_KEY = /-----BEGIN [A-Z ]*PRIVATE KEY-----/;
+const SENSITIVE_TOKEN = new RegExp(
+  [
+    "gh[pousr]_[A-Za-z0-9]{30,}",
+    "github_pat_[A-Za-z0-9_]{30,}",
+    "(?:sk|pk|rk)-[A-Za-z0-9_-]{20,}",
+    "(?:sk|pk|rk)_(?:live|test)_[A-Za-z0-9]{16,}",
+    "AKIA[0-9A-Z]{16}",
+    "xox[abposr]-[A-Za-z0-9-]{10,}",
+    "AIza[0-9A-Za-z_-]{35}",
+    "eyJ[A-Za-z0-9_-]{8,}\\.[A-Za-z0-9_-]{8,}\\.[A-Za-z0-9_-]{8,}",
+  ].join("|"),
+);
+const SENSITIVE_LABEL = /\b(?:password|passwd|pwd|passcode|pin|secret|api[ _-]?key|token)\s*[:=]\s*\S+/i;
+
+export const SENSITIVE_REASONS = {
+  card: "a card number",
+  code: "a one-time code",
+  key: "a private key",
+  token: "an access token or API key",
+  password: "a password",
+};
+
+function luhn(digits) {
+  let total = 0;
+  [...digits].reverse().forEach((ch, i) => {
+    let n = Number(ch);
+    if (i % 2) n = n > 4 ? n * 2 - 9 : n * 2;
+    total += n;
+  });
+  return total % 10 === 0;
+}
+
+function passwordLike(word) {
+  const length = [...word].length;
+  if (length < 8 || length > 64 || /\s/.test(word) || word.includes("://")) return false;
+  const symbol = /[^\p{L}\p{N}]/u.test(word);
+  const kinds = [/\p{Ll}/u.test(word), /\p{Lu}/u.test(word), /\p{Nd}/u.test(word), symbol].filter(Boolean).length;
+  return kinds >= 4 || (kinds === 3 && symbol && length >= 10);
+}
+
+/** Why ``text`` looks private ("card", "code", "key", "token", "password"), or null. */
+export function looksSensitive(text) {
+  const value = String(text || "").trim();
+  if (!value) return null;
+  if (SENSITIVE_KEY.test(value)) return "key";
+  if (value.length > 20000) return null;
+  if (SENSITIVE_TOKEN.test(value)) return "token";
+  if (SENSITIVE_LABEL.test(value)) return "password";
+  if (/^(?:\d[ -]?){12,18}\d$/.test(value)) {
+    const digits = value.replace(/\D/g, "");
+    return digits.length >= 13 && digits.length <= 19 && luhn(digits) ? "card" : null;
+  }
+  if (/^\d{4,8}$/.test(value) && !(value.length === 4 && /^(19|20)/.test(value))) return "code";
+  if (passwordLike(value)) return "password";
+  return null;
+}
+
+/** A readable, sortable stamp for file names: 2026-10-22 07.31.05 */
+export function stamp(date = new Date()) {
+  const pad = (n) => String(n).padStart(2, "0");
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}.${pad(date.getMinutes())}.${pad(date.getSeconds())}`;
+}

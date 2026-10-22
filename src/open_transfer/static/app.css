@@ -3087,3 +3087,104 @@ body.has-send-bar .toasts {
 .menu-item.is-danger .icon {
   color: var(--danger);
 }
+
+/* ---------------------------------------------------------- clipboard (phase C) */
+
+.drop-clipboard {
+  margin-top: 6px;
+}
+
+.clip-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px 16px;
+  margin-bottom: 10px;
+  padding: 14px 16px;
+}
+
+.clip-bar-text {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 220px;
+  color: var(--text-2);
+  font-size: 13px;
+}
+
+.clip-auto {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+}
+
+.clip-text {
+  display: -webkit-box;
+  white-space: pre-wrap;
+  word-break: break-word;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
+.clip-sheet {
+  text-align: left;
+}
+
+.clip-sheet > .muted {
+  max-width: none;
+  margin: 6px 0 0;
+}
+
+.clip-devices {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 16px 0;
+}
+
+.clip-device {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-height: 44px;
+  padding: 0 12px;
+  border-radius: var(--r-md);
+  background: var(--surface-2);
+  cursor: pointer;
+}
+
+.clip-device-name {
+  flex: 1;
+  font-weight: 500;
+}
+
+.clip-device input,
+.clip-auto input {
+  width: 18px;
+  height: 18px;
+  accent-color: var(--accent);
+}
+
+.clip-retention {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px 16px;
+  font-size: 14px;
+}
+
+.clip-retention select {
+  margin-left: 6px;
+  padding: 6px 8px;
+  border: 0;
+  border-radius: 8px;
+  background: var(--surface-2);
+  color: var(--text);
+  font: inherit;
+}
+
+.clip-note {
+  margin-top: 14px;
+  font-size: 13px;
+}

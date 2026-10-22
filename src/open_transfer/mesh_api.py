@@ -28,9 +28,11 @@ from flask import (
 from werkzeug.exceptions import ClientDisconnected
 
 from open_transfer.archive import zip_stream
+from open_transfer.clipboard import MAX_IMAGE_BYTES as CLIP_MAX_IMAGE
 from open_transfer.devices import clean_form, clean_name, clean_platform, valid_id
 from open_transfer.mesh import P2P, Mesh, MeshError, Viewer
 from open_transfer.security import log_safe
+from open_transfer.sensitive import REASONS, looks_sensitive
 from open_transfer.serve import serve_file
 from open_transfer.storage import IncompleteUpload, StorageError
 
@@ -92,6 +94,11 @@ def register(
             request.path,
             request.get_data(cache=True),
         )
+
+    def too_big_for_clip() -> None:
+        # Base64 of a 10 MB image plus the JSON around it.
+        if (request.content_length or 0) > CLIP_MAX_IMAGE * 4 // 3 + 64 * 1024:
+            raise MeshError(413, "too_large", "That is too big to share (10 MB max).")
 
     def owner_only() -> Viewer:
         current = viewer()
@@ -219,6 +226,15 @@ def register(
         mesh.cancel_incoming(session_id, None, secret=request.headers.get("X-OT-Secret", ""))
         return jsonify({"ok": True})
 
+    @app.post(f"{P2P}/clip")
+    def p2p_clip() -> Response:
+        too_big_for_clip()
+        data = body_json()
+        sender = data.get("from")
+        sender_id = str(sender.get("id", "")) if isinstance(sender, dict) else ""
+        verified = request.headers.get("X-OT-From") == sender_id and signed_by(sender_id)
+        return jsonify(mesh.handle_clip(sender_id, verified, data))
+
     @app.post(f"{P2P}/signal")
     def p2p_signal() -> Response:
         mesh.handle_signal(body_json())
@@ -240,6 +256,74 @@ def register(
         )
 
     # ================================================================ web UI
+
+    # ------------------------------------------------------------ clipboard
+
+    @app.get("/api/clipboard")
+    def ui_clipboard() -> Response:
+        owner_only()
+        return jsonify(
+            {
+                "items": mesh.clipboard.items(str(request.args.get("q", ""))[:200]),
+                "settings": mesh.clipboard.settings(),
+                "devices": mesh.clipboard_devices(),
+            }
+        )
+
+    @app.put("/api/clipboard/settings")
+    def ui_clipboard_settings() -> Response:
+        owner_only()
+        data = body_json()
+        settings = mesh.set_clipboard_settings(
+            allowed=data.get("allowed"),
+            max_items=data.get("max_items"),
+            max_age_days=data.get("max_age_days"),
+        )
+        return jsonify({"settings": settings, "devices": mesh.clipboard_devices()})
+
+    @app.post("/api/clipboard")
+    def ui_clipboard_share() -> Response:
+        owner_only()
+        too_big_for_clip()
+        data = body_json()
+        from open_transfer.mesh import _clean_clip
+
+        kind, text, raw, mime = _clean_clip(data)
+        reason = looks_sensitive(text) if kind == "text" else None
+        if reason and data.get("confirm_sensitive") is not True:
+            response = jsonify(
+                {
+                    "error": {
+                        "code": "sensitive",
+                        "reason": reason,
+                        "message": f"This looks like {REASONS[reason]}. Share it anyway?",
+                    }
+                }
+            )
+            response.status_code = 409
+            return response
+        return jsonify(mesh.share_clipboard(kind=kind, text=text, data=raw, mime=mime))
+
+    @app.delete("/api/clipboard")
+    def ui_clipboard_clear() -> Response:
+        owner_only()
+        mesh.clipboard.clear()
+        return jsonify({"ok": True})
+
+    @app.delete("/api/clipboard/<item_id>")
+    def ui_clipboard_delete(item_id: str) -> Response:
+        owner_only()
+        if not mesh.clipboard.delete(item_id):
+            raise MeshError(404, "not_found", "That item isn’t in the clipboard history.")
+        return jsonify({"ok": True})
+
+    @app.get("/api/clipboard/<item_id>/image")
+    def ui_clipboard_image(item_id: str) -> Response:
+        owner_only()
+        path = mesh.clipboard.image_path(item_id)
+        if path is None:
+            raise MeshError(404, "not_found", "That image isn’t in the clipboard history.")
+        return serve_file(path, inline=True)
 
     @app.get("/api/state")
     def ui_state() -> Response:
