@@ -92,8 +92,9 @@ def test_search_delete_and_clear(tmp_path: Path) -> None:
     )
     assert [i["id"] for i in store.items(query="fridge")] == [a["id"]]
     assert len(store.items(query="bravo")) == 2  # the device name matches too
-    assert store.delete(a["id"])
-    assert not store.delete(a["id"])
+    deleted, again = store.delete(a["id"]), store.delete(a["id"])
+    assert deleted
+    assert not again
     store.clear()
     assert store.items() == []
 
