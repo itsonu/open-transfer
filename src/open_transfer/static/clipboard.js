@@ -4,6 +4,7 @@
 import { copyImage } from "./media.js";
 import { $, api, copyText, formatBytes, h, icon, looksSensitive, plural, relativeTime, SENSITIVE_REASONS, stamp, state, toast } from "./lib.js";
 import { confirmDialog } from "./nearby.js";
+import { notify } from "./notify.js";
 
 const AUTO_MS = 1500;
 const IMAGE_EXT = { "image/png": "png", "image/jpeg": "jpg", "image/gif": "gif", "image/webp": "webp" };
@@ -247,6 +248,7 @@ async function onReceived(latest) {
   } else {
     toast(`Clipboard from ${from}`, { icon: "copy", duration: 8000, action: { label: "Copy", run: () => copyItem(item) } });
   }
+  notify(`Clipboard from ${from}`, { body: item.kind === "image" ? "An image" : item.transient ? "Something private" : item.text.slice(0, 120), tag: "clipboard" });
   window.dispatchEvent(new CustomEvent("ot-clipboard-received", { detail: item }));
 }
 

@@ -208,6 +208,15 @@ def register(
             raise
         return jsonify({"file": saved.to_dict()}), 201
 
+    @app.post(f"{P2P}/offers/<session_id>/files/<int:index>/verify")
+    def p2p_offer_verify(session_id: str, index: int) -> Response:
+        claimed = body_json().get("sha256")
+        if not isinstance(claimed, str) or len(claimed) != 64:
+            raise MeshError(400, "bad_request", "Expected a SHA-256 checksum.")
+        return jsonify(
+            mesh.verify_file(session_id, index, request.headers.get("X-OT-Secret", ""), claimed)
+        )
+
     @app.get(f"{P2P}/offers/<session_id>/files/<int:index>/status")
     def p2p_offer_file_status(session_id: str, index: int) -> Response:
         """Bytes staged for one incoming file (lets senders resume mid-file)."""
@@ -503,7 +512,11 @@ def register(
     @app.post("/api/incoming/<session_id>/<any(accept, decline):decision>")
     def ui_decide(session_id: str, decision: str) -> Response:
         current = viewer()
-        session = mesh.decide(session_id, current, decision == "accept")
+        choice = request.get_json(silent=True)
+        duplicates = choice.get("duplicates", "rename") if isinstance(choice, dict) else "rename"
+        session = mesh.decide(
+            session_id, current, decision == "accept", duplicates=str(duplicates or "rename")
+        )
         log_name = log_safe(session.origin.get("name"))
         app.logger.debug("%s %s from %s", decision, session_id, log_name)
         return jsonify({"state": session.state})

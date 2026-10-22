@@ -6,6 +6,7 @@
 import { $, addHistory, api, can, chunkLimits, copyText, formatBytes, formatDuration, guessKind, h, icon, newUploadId, plural, pushSample, relativeTime, setLockHandler, shouldChunk, sparklineSVG, stamp, state, toast, uploadParallel } from "./lib.js";
 import { initActivity } from "./activity.js";
 import { initClipboard, readClipboard } from "./clipboard.js";
+import { initNotifications } from "./notify.js";
 import { announceSelf, busy, confirmSensitive, fetchState, forgetDirectFile, initNearby, isDeviceMode, mesh, openAddDevice, stageFiles } from "./nearby.js";
 import { canShareFiles, copyImage, initMedia, isImage, isVideo, openMenu, openPreview, previewKind, shareFile, videoThumb } from "./media.js";
 import { collectDropped, zipFiles, zipName } from "./zip.js";
@@ -1165,6 +1166,7 @@ function boot() {
   $("#library-sort").addEventListener("change", (event) => setLibrary({ sort: event.target.value }));
   initMedia();
   initClipboard();
+  initNotifications();
   $("#clear-transfers").addEventListener("click", () => {
     for (const t of [...state.transfers.values()]) if (t.state === "error") removeTransfer(t);
   });

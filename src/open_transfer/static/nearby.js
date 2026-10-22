@@ -6,6 +6,7 @@ import { DIRECT_MAX_BYTES, directSupported, handleSignals, sendDirect } from "./
 import { $, ApiError, addHistory, api, chunkLimits, copyText, formatBytes, formatDuration, guessKind, h, icon, looksSensitive, newUploadId, plural, pushSample, SENSITIVE_REASONS, shouldChunk, sparklineSVG, state, toast, uploadParallel } from "./lib.js";
 import { saveThumb } from "./activity.js";
 import { isImage, makeThumb } from "./media.js";
+import { notify } from "./notify.js";
 import { collectDropped, zipFiles, zipName } from "./zip.js";
 
 const PLATFORM = { windows: "Windows", macos: "Mac", linux: "Linux", android: "Android", ios: "iOS", chromeos: "ChromeOS", unknown: "" };
@@ -921,6 +922,10 @@ function finishJob(job, outcome) {
   const declined = targets.filter((t) => t.state === "declined");
   const failed = targets.filter((t) => ["failed", "expired", "canceled"].includes(t.state));
   const done = targets.filter((t) => t.state === "done");
+  if (failed.length || (outcome === "nobody" && declined.length)) {
+    const who = (failed[0] || declined[0]).name;
+    notify(failed.length ? `Couldn’t send to ${who}` : `${who} declined`, { body: (failed[0] || declined[0]).reason || "", tag: `job-${job.id}` });
+  }
   if (outcome === "nobody") {
     if (declined.length === targets.length && targets.length) {
       toast(targets.length === 1 ? `${targets[0].name} declined — you can ask again` : "Everyone declined — you can ask again", {
@@ -931,6 +936,7 @@ function finishJob(job, outcome) {
       });
     } else if (failed.length) toast(failed[0].reason || `Couldn’t send to ${failed[0].name}`, { tone: "error", icon: "alert" });
   } else if (done.length && !failed.length && !declined.length) {
+    notify(done.length === 1 ? `Sent to ${done[0].name}` : `Sent to ${plural(done.length, "device")}`, { tag: `job-${job.id}` });
     toast(done.length === 1 ? `Sent to ${done[0].name}` : `Sent to ${plural(done.length, "device")}`, { tone: "success", icon: "check" });
     const secs = job.startedAt ? Math.max(0.1, (performance.now() - job.startedAt) / 1000) : 0;
     const bytes = job.files.reduce((n, f) => n + f.size, 0);
@@ -1381,10 +1387,17 @@ function handleIncoming() {
     if (s.state === "pending" && !mesh.prompted.has(s.id)) {
       mesh.prompted.add(s.id);
       mesh.promptQueue.push(s.id);
+      const count = s.files.length === 1 ? "a file" : `${s.files.length} files`;
+      notify(`${s.from.name} wants to send you ${count}`, {
+        body: s.files.map((f) => f.name).slice(0, 3).join(", ") + (s.files.length > 3 ? "…" : ""),
+        tag: `offer-${s.id}`,
+      });
     }
     if (before && before !== s.state) {
       const from = s.from.name;
       if (s.state === "done") {
+        const what = s.files.length === 1 ? `“${s.files[0].saved_name || s.files[0].name}”` : `${s.files.length} files`;
+        notify(`Received ${what} from ${from}`, { tag: `in-${s.id}` });
         toast(s.files.length === 1 ? `Received “${s.files[0].saved_name || s.files[0].name}” from ${from}` : `Received ${s.files.length} files from ${from}`, {
           tone: "success",
           icon: "check",
@@ -1404,7 +1417,10 @@ function handleIncoming() {
         }
         ctx.libraryChanged(null);
       } else if (s.state === "canceled" && before !== "pending") toast(`${from} stopped sending`, { tone: "error", icon: "x" });
-      else if (s.state === "failed") toast(`Couldn’t receive files from ${from}`, { tone: "error", icon: "alert" });
+      else if (s.state === "failed") {
+        notify(`Couldn’t receive files from ${from}`, { body: s.files.find((f) => f.error)?.error || s.reason || "", tag: `in-${s.id}` });
+        toast(`Couldn’t receive files from ${from}`, { tone: "error", icon: "alert" });
+      }
     }
     mesh.seen.set(s.id, s.state);
   }
@@ -1463,9 +1479,27 @@ function fillPrompt(s) {
   $("#incoming-sub").textContent = `${formatBytes(s.total)}${via}${s.paired ? " · paired" : ""}`;
   const shown = s.files.slice(0, 5);
   $("#incoming-files").replaceChildren(
-    ...shown.map((f) => h("li", {}, h("span", { class: "incoming-file-name" }, f.name), h("span", { class: "incoming-file-size" }, formatBytes(f.size)))),
+    ...shown.map((f) =>
+      h(
+        "li",
+        {},
+        h("span", { class: "incoming-file-name" }, f.name),
+        f.duplicate && h("span", { class: "incoming-file-dupe" }, "Already here"),
+        h("span", { class: "incoming-file-size" }, formatBytes(f.size)),
+      ),
+    ),
     ...(s.files.length > shown.length ? [h("li", { class: "muted" }, `and ${s.files.length - shown.length} more`)] : []),
   );
+  // Same name and size as a file already on this device: keep both, skip or replace.
+  const dupes = s.files.filter((f) => f.duplicate).length;
+  $("#incoming-dupes").hidden = dupes === 0;
+  if (dupes) {
+    const one = dupes === 1;
+    $("#incoming-dupes-text").textContent = `${one ? "1 of these files is" : `${dupes} of these files are`} already here (same name and size).`;
+    $("#dupes-skip").textContent = one ? "Skip it" : "Skip them";
+    $("#dupes-replace").textContent = one ? "Replace it" : "Replace them";
+    for (const radio of document.querySelectorAll("input[name=dupes]")) radio.checked = radio.value === "rename";
+  }
   $("#incoming-accept").disabled = false;
   $("#incoming-decline").disabled = false;
   updatePromptCountdown(s);
@@ -1483,8 +1517,9 @@ async function decide(accept) {
   if (!id) return;
   $("#incoming-accept").disabled = true;
   $("#incoming-decline").disabled = true;
+  const duplicates = $("#incoming-dupes").hidden ? "rename" : document.querySelector("input[name=dupes]:checked")?.value || "rename";
   try {
-    await api(`/api/incoming/${encodeURIComponent(id)}/${accept ? "accept" : "decline"}`, { method: "POST" });
+    await api(`/api/incoming/${encodeURIComponent(id)}/${accept ? "accept" : "decline"}`, { method: "POST", json: accept ? { duplicates } : {} });
   } catch (err) {
     toast(err.message, { tone: "error", icon: "alert" });
   }

@@ -21,6 +21,9 @@ All notable changes are documented here. The format follows [Keep a Changelog](h
 - **Activity:** "Recent" is now **Activity**: everything this device sent and received, plus clipboard shares, grouped by day, with search and filters by device and direction. The app keeps it (the last 1,000, private to your user), so it survives reloads and restarts. It records file names, sizes, who and how it ended, never what was in them.
 - **Transfer queue:** two sends run at a time; more wait in line, and you can move them up or down or take them out.
 - **Connection quality:** a dot on each nearby app shows how quick the connection is (round trip in ms), and each transfer says which way it goes: **Direct**, **Via** another device's app, or **Via this device**.
+- **Files already here:** when someone sends a file you already have (same name and size), the Accept prompt says so and lets you **keep both**, **skip** it or **replace** yours.
+- **Every file is checked:** apps compare a SHA-256 checksum of what was sent with what was written. A file that arrives damaged is removed and the sender is told to retry.
+- **Notifications:** turn them on with the bell, and you'll get a system notification while the window is in the background when someone wants to send you files, a transfer finishes or fails, or a clipboard arrives.
 
 ### Fixed
 - Two "Are you sure?" questions in a row could get the first one's answer (Cancel), or both get the second one's.

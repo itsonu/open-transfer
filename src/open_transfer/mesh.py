@@ -29,10 +29,12 @@ from __future__ import annotations
 import base64
 import contextlib
 import dataclasses
+import hashlib
 import http.client
 import ipaddress
 import json
 import logging
+import os
 import queue
 import secrets
 import threading
@@ -191,6 +193,12 @@ class IncomingFile:
     saved_name: str | None = None
     error: str = ""
     direct: bool = False  # received browser-to-browser; it lives in the receiving browser
+    duplicate: bool = False  # a file with this name and size is already here
+    skipped: bool = False  # …and the receiver chose to keep theirs
+    sha256: str = ""  # of what was written (checked against the sender's)
+    verified: bool = False
+    hasher: Any = field(default=None, repr=False)  # chunked: hash of the bytes so far, in order
+    hashed: int = 0
 
 
 @dataclass
@@ -211,6 +219,7 @@ class IncomingSession:
     sender_node: str = ""  # app that made the offer ("" when local)
     started: float = 0.0  # when the first byte arrived (for the speed in history)
     recorded: bool = False  # written to history
+    on_duplicate: str = "rename"  # files already here: "rename" (keep both), "skip" or "replace"
 
     @property
     def total(self) -> int:
@@ -236,6 +245,8 @@ class Delivery:
     files_done: set[int] = field(default_factory=set)
     canceled: bool = False
     direct: bool = False  # the sender's browser is sending straight to the receiver's (WebRTC)
+    skip: set[int] = field(default_factory=set)  # files the receiver already has and kept
+    verified: set[int] = field(default_factory=set)  # files whose checksum the receiver confirmed
 
     def view_state(self) -> str:
         if self.canceled:
@@ -968,6 +979,12 @@ class Mesh:
             job=str(job)[:64],
             sender_node=sender_node,
         )
+        store = self.storage if owner_target else self.inbox(target)
+        for f in session.files:
+            try:
+                f.duplicate = store.resolve(f.name).stat().st_size == f.size
+            except (StorageError, OSError):
+                f.duplicate = False
         problem = self._space_problem(session)
         if problem:
             session.state, session.reason, session.finished = DECLINED, problem, time.monotonic()
@@ -1008,7 +1025,11 @@ class Mesh:
         for f in session.files:
             f.state = "waiting"
 
-    def decide(self, session_id: str, viewer: Viewer, accept: bool) -> IncomingSession:
+    def decide(
+        self, session_id: str, viewer: Viewer, accept: bool, *, duplicates: str = "rename"
+    ) -> IncomingSession:
+        if duplicates not in {"rename", "skip", "replace"}:
+            raise MeshError(400, "bad_request", "Keep both, skip or replace files already here.")
         session = self._session_for(session_id, viewer)
         with self._lock:
             if session.state != PENDING:
@@ -1017,7 +1038,18 @@ class Mesh:
                 problem = self._space_problem(session)
                 if problem:
                     raise MeshError(507, "insufficient_storage", problem)
+                session.on_duplicate = duplicates
                 self._accept(session)
+                if duplicates == "skip":
+                    for f in session.files:
+                        if f.duplicate:
+                            f.state, f.skipped, f.saved_name, f.received = (
+                                DONE,
+                                True,
+                                f.name,
+                                f.size,
+                            )
+                    self._maybe_finish(session)
             else:
                 session.state, session.finished = DECLINED, time.monotonic()
                 session.reason = "Declined"
@@ -1041,7 +1073,10 @@ class Mesh:
             "id": session.id,
             "state": session.state,
             "reason": session.reason,
-            "files": [{"state": f.state, "received": f.received} for f in session.files],
+            "files": [
+                {"state": f.state, "received": f.received, "skipped": f.skipped}
+                for f in session.files
+            ],
         }
 
     def _session_for(self, session_id: str, viewer: Viewer) -> IncomingSession:
@@ -1079,21 +1114,28 @@ class Mesh:
             if not 0 <= index < len(session.files):
                 raise MeshError(404, "not_found", "No such file in this transfer.")
             item = session.files[index]
-            if item.state in {RECEIVING, DONE}:
+            skipped = item.skipped
+            if item.state in {RECEIVING, DONE} and not skipped:
                 raise MeshError(409, "duplicate", "This file is already being received.")
             if length is None:
                 raise MeshError(411, "length_required", "Send a Content-Length header.")
             if length != item.size:
                 raise MeshError(400, "size_mismatch", "The file size doesn’t match the offer.")
-            item.state, item.received, item.error = RECEIVING, 0, ""
-            session.state = RECEIVING
-            session.started = session.started or time.monotonic()
+            if not skipped:
+                item.state, item.received, item.error = RECEIVING, 0, ""
+                session.state = RECEIVING
+                session.started = session.started or time.monotonic()
         store = self.storage if session.target == self.id else self.inbox(session.target)
+        if skipped:  # the receiver kept theirs: take the bytes, keep nothing
+            while stream.read(CHUNK):
+                pass
+            return FileInfo.from_path(store.resolve(item.name))
 
         def count(n: int) -> None:
             item.received += n
 
-        reader = _Watched(stream, count, lambda: session.state == CANCELED)
+        hasher = hashlib.sha256()
+        reader = _Watched(_Hashing(stream, hasher), count, lambda: session.state == CANCELED)
         try:
             saved = store.save_stream(
                 item.name, reader, length=length, max_size=self.config.max_upload_size
@@ -1108,8 +1150,10 @@ class Mesh:
             if isinstance(exc, StorageError):
                 raise
             raise IncompleteUpload("The transfer was interrupted before it finished.") from exc
+        saved = self._place(store, session, item, saved)
         with self._lock:
             item.state, item.saved_name, item.received = DONE, saved.name, item.size
+            item.sha256 = hasher.hexdigest()
             self._maybe_finish(session)
         log.info(
             "Received %s (%s bytes) from %s", log_safe(saved.name), saved.size,
@@ -1118,6 +1162,44 @@ class Mesh:
         if session.target == self.id:
             self._emit("received", {"path": str(store.root / saved.name), "name": saved.name})
         return saved
+
+    def _place(
+        self, store: Storage, session: IncomingSession, item: IncomingFile, saved: FileInfo
+    ) -> FileInfo:
+        """Replace the file already here when the receiver chose to."""
+        if session.on_duplicate != "replace" or not item.duplicate or saved.name == item.name:
+            return saved
+        try:
+            os.replace(store.root / saved.name, store.root / item.name)
+            return FileInfo.from_path(store.resolve(item.name))
+        except (OSError, StorageError):
+            log.warning("Couldn’t replace %s; kept both", log_safe(item.name))
+            return saved
+
+    def verify_file(self, session_id: str, index: int, secret: str, claimed: str) -> dict[str, Any]:
+        """The sender's checksum of a file it sent: does what we wrote match?"""
+        session = self._session_by_secret(session_id, secret)
+        if not 0 <= index < len(session.files):
+            raise MeshError(404, "not_found", "No such file in this transfer.")
+        item = session.files[index]
+        if item.skipped:
+            return {"verified": True, "skipped": True}
+        if item.state != DONE or not item.sha256:
+            raise MeshError(409, "not_done", "This file hasn’t arrived yet.")
+        if secrets.compare_digest(item.sha256, claimed.lower()):
+            item.verified = True
+            return {"verified": True}
+        store = self.storage if session.target == self.id else self.inbox(session.target)
+        if item.saved_name:
+            with contextlib.suppress(StorageError, OSError):
+                store.resolve(item.saved_name).unlink()
+        with self._lock:
+            item.state, item.saved_name, item.verified = FAILED, None, False
+            item.error = "It arrived damaged (checksum mismatch) and was removed."
+            session.state = RECEIVING  # let _maybe_finish decide again
+            self._maybe_finish(session)
+        log.warning("Removed %s: it arrived damaged", log_safe(item.name))
+        raise MeshError(409, "integrity_failed", "The file arrived damaged.")
 
     def _maybe_finish(self, session: IncomingSession) -> None:
         if session.state == CANCELED:
@@ -1260,7 +1342,12 @@ class Mesh:
             state = data.get("state")
             if state == PENDING:
                 delivery.state = "waiting"
-            elif state in {ACCEPTED, RECEIVING}:
+            elif state in {ACCEPTED, RECEIVING} or (state == DONE and _all_skipped(data)):
+                delivery.skip = {
+                    i
+                    for i, f in enumerate(data.get("files") or [])
+                    if isinstance(f, dict) and f.get("skipped")
+                }
                 if delivery.state in {"offering", "waiting"}:
                     delivery.state = ACCEPTED
                 return
@@ -1315,6 +1402,7 @@ class Mesh:
         if length != size:
             raise MeshError(400, "size_mismatch", "The file size doesn’t match.")
         job.started = job.started or time.monotonic()
+        kept = self._mark_kept(job, index)
         sinks = [
             _Sink(self, job, target_id, delivery, index, size)
             for target_id, delivery in job.deliveries.items()
@@ -1323,18 +1411,24 @@ class Mesh:
             and not delivery.direct
         ]
         if not sinks:
+            if kept:  # every receiver already has this one
+                while stream.read(CHUNK):
+                    pass
+                return self._upload_result(job, index, [])
             if any(d.view_state() in {"offering", "waiting"} for d in job.deliveries.values()):
                 raise MeshError(409, "waiting", "Still waiting for the receivers to accept.")
             raise MeshError(409, "no_receivers", "Nobody accepted this transfer.")
         for sink in sinks:
             sink.start()
         received = 0
+        hasher = hashlib.sha256()
         try:
             while True:
                 chunk = stream.read(CHUNK)
                 if not chunk:
                     break
                 received += len(chunk)
+                hasher.update(chunk)
                 live = [s for s in sinks if s.alive]
                 if not live or job.canceled:
                     break
@@ -1358,7 +1452,52 @@ class Mesh:
             sink.finish()
         for sink in sinks:
             sink.join(STALL_TIMEOUT * 2)
+        self._verify_sinks(sinks, index, _claimed_digest(hasher))
         return self._upload_result(job, index, sinks)
+
+    def _mark_kept(self, job: Job, index: int) -> bool:
+        """Receivers that already had file ``index`` and kept theirs: it's done for them."""
+        kept = False
+        for delivery in job.deliveries.values():
+            skipped = index in delivery.skip
+            if delivery.session is not None and index < len(delivery.session.files):
+                skipped = skipped or delivery.session.files[index].skipped
+            if skipped and delivery.view_state() in {ACCEPTED, "sending", DONE}:
+                delivery.files_done.add(index)
+                if delivery.session is None and len(delivery.files_done) == len(job.files):
+                    delivery.state = DONE
+                kept = True
+        return kept
+
+    def _verify_sinks(self, sinks: list[_Sink], index: int, digest: str) -> None:
+        for sink in sinks:
+            if sink.ok and sink.delivery.session is None:
+                problem = self._verify_remote(sink.delivery, index, digest)
+                if problem:
+                    sink.ok, sink.error = False, problem
+
+    def _verify_remote(self, delivery: Delivery, index: int, digest: str) -> str:
+        """Ask the receiving app whether what it wrote has our checksum ("" = fine)."""
+        peer = delivery.peer
+        if peer is None:
+            return ""
+        try:
+            status, data = self._http(
+                peer,
+                "POST",
+                f"{P2P}/offers/{delivery.remote_id}/files/{index}/verify",
+                body={"sha256": digest},
+                headers={"X-OT-Secret": delivery.remote_secret},
+                timeout=STALL_TIMEOUT,
+            )
+        except OSError:
+            return ""  # couldn't ask: says nothing about the file
+        error = data.get("error")
+        if isinstance(error, dict) and error.get("code") == "integrity_failed":
+            return "It arrived damaged — retry to send it again."
+        if status == 200:
+            delivery.verified.add(index)
+        return ""  # older apps don't check; that's not a failure
 
     def _upload_result(self, job: Job, index: int, sinks: list[_Sink]) -> dict[str, Any]:
         results = {}
@@ -1477,6 +1616,7 @@ class Mesh:
         path = self._relay_chunks.path(upload_id)
         if path is None:
             raise MeshError(404, "not_found", "Upload is no longer available.")
+        kept = self._mark_kept(job, index)
         try:
             eligible = [
                 (target_id, delivery)
@@ -1487,6 +1627,14 @@ class Mesh:
             ]
         except Exception:
             eligible = []
+        if not eligible and kept:  # every receiver already has this one
+            result = self._upload_result(job, index, [])
+            self._relay_chunks.discard(upload_id)
+            with self._lock:
+                self._relay_meta.pop(upload_id, None)
+            result.update({"received": size, "total": size, "done": True})
+            job.relayed[index] = dict(result)
+            return result
         if not eligible:
             self._relay_chunks.discard(upload_id)
             with self._lock:
@@ -1541,12 +1689,14 @@ class Mesh:
                 small_sinks = [_Sink(self, job, tid, d, index, size) for tid, d in small]
                 for sink in small_sinks:
                     sink.start()
+                hasher = hashlib.sha256()
                 try:
                     with path.open("rb") as src:
                         while True:
                             chunk = src.read(RESUMABLE_CHUNK_SIZE)
                             if not chunk:
                                 break
+                            hasher.update(chunk)
                             live = [s for s in small_sinks if s.alive]
                             if not live or job.canceled:
                                 break
@@ -1563,6 +1713,7 @@ class Mesh:
                         sink.finish()
                     for sink in small_sinks:
                         sink.join(STALL_TIMEOUT * 2)
+                    self._verify_sinks(small_sinks, index, _claimed_digest(hasher))
                 sinks.extend(small_sinks)
             for tid, delivery in big:
                 if job.canceled or delivery.canceled:
@@ -1570,7 +1721,13 @@ class Mesh:
                 assert delivery.peer is not None  # noqa: S101 - filtered above
                 if delivery.session is None and delivery.state not in {"sending", ACCEPTED}:
                     delivery.state = "sending"
-                ok, error = self._push_chunked(delivery.peer, delivery, path, size, job, index)
+                ok, error, digest = self._push_chunked(
+                    delivery.peer, delivery, path, size, job, index
+                )
+                if ok:
+                    problem = self._verify_remote(delivery, index, digest)
+                    if problem:
+                        ok, error = False, problem
                 push_sink = _Sink(self, job, tid, delivery, index, size)
                 push_sink.ok = ok
                 push_sink.error = error or ""
@@ -1594,24 +1751,27 @@ class Mesh:
 
     def _push_chunked(
         self, peer: Peer, delivery: Delivery, path: object, size: int, job: Job, index: int
-    ) -> tuple[bool, str]:
-        """Send a staged file to one app in 2 MiB pieces with per-chunk retry."""
+    ) -> tuple[bool, str, str]:
+        """Send a staged file to one app in 2 MiB pieces with per-chunk retry.
+
+        Returns (ok, error, checksum of what was sent)."""
         from pathlib import Path as _Path
 
         from open_transfer.chunks import CHUNK_SIZE as _CHUNK
 
         src = _Path(str(path))
         offset = 0
+        hasher = hashlib.sha256()
         try:
             with src.open("rb") as fh:
                 while offset < size:
                     if job.canceled or delivery.canceled or self._stop.is_set():
-                        return False, "Canceled"
+                        return False, "Canceled", ""
                     end = min(offset + _CHUNK, size)
                     fh.seek(offset)
                     data = fh.read(end - offset)
                     if not data:
-                        return False, "Couldn’t read the staged file."
+                        return False, "Couldn’t read the staged file.", ""
                     for attempt in range(4):
                         conn = http.client.HTTPConnection(
                             peer.host, peer.port, timeout=STALL_TIMEOUT, blocksize=_CHUNK
@@ -1636,6 +1796,7 @@ class Mesh:
                                 return (
                                     False,
                                     f"Lost connection to {delivery.target.get('name', 'the receiver')}.",
+                                    "",
                                 )
                             time.sleep(0.4 * (2**attempt))
                             continue
@@ -1644,27 +1805,31 @@ class Mesh:
                         if res.status in (201, 308):
                             offset += len(data)
                             delivery.sent = offset
+                            hasher.update(data)
                             break
                         if res.status == 410:
                             delivery.state = CANCELED
-                            return False, "Canceled by the receiver"
+                            return False, "Canceled by the receiver", ""
                         if res.status in (400, 403, 404, 409, 413):
                             try:
                                 payload = json.loads(raw)
                             except ValueError:
                                 payload = {}
-                            return False, _remote_message(
-                                payload, "The receiver rejected the file."
+                            return (
+                                False,
+                                _remote_message(payload, "The receiver rejected the file."),
+                                "",
                             )
                         if attempt >= 3:
                             return (
                                 False,
                                 f"Lost connection to {delivery.target.get('name', 'the receiver')}.",
+                                "",
                             )
                         time.sleep(0.4 * (2**attempt))
         except OSError:
-            return False, "Couldn’t read the staged file."
-        return True, ""
+            return False, "Couldn’t read the staged file.", ""
+        return True, "", _claimed_digest(hasher)
 
     def receive_chunk(
         self,
@@ -1720,6 +1885,12 @@ class Mesh:
             received = store.chunks.append(key, offset, data)
         except (KeyError, ValueError) as exc:
             raise MeshError(400, "bad_range", "Chunk is outside the file.") from exc
+        with self._lock:  # apps send pieces in order: hash as they come
+            if offset == 0:
+                item.hasher, item.hashed = hashlib.sha256(), 0
+            if item.hasher is not None and offset == item.hashed:
+                item.hasher.update(data)
+                item.hashed += len(data)
         status: dict[str, Any] = dict(store.chunks.status(key) or {})
         with self._lock:
             item.received = received
@@ -1739,8 +1910,15 @@ class Mesh:
                 item.error = str(exc) if isinstance(exc, StorageError) else "Interrupted"
                 self._maybe_finish(session)
             raise
+        digest = (
+            item.hasher.hexdigest()
+            if item.hasher is not None and item.hashed == total
+            else _file_digest(store.root / saved.name)
+        )
+        saved = self._place(store, session, item, saved)
         with self._lock:
             item.state, item.saved_name, item.received = DONE, saved.name, item.size
+            item.sha256, item.hasher = digest, None
             self._maybe_finish(session)
         if session.target == self.id:
             self._emit("received", {"path": str(store.root / saved.name), "name": saved.name})
@@ -2258,6 +2436,11 @@ class Mesh:
                     "received": f.received,
                     "saved_name": f.saved_name,
                     "direct": f.direct,
+                    "duplicate": f.duplicate,
+                    "skipped": f.skipped,
+                    "sha256": f.sha256,
+                    "verified": f.verified,
+                    "error": f.error,
                 }
                 for f in s.files
             ],
@@ -2282,6 +2465,7 @@ class Mesh:
                     "sent": min(sent, total),
                     "direct": d.direct,
                     "path": _path(d),
+                    "verified": d.session is None and len(d.verified | d.skip) == len(job.files),
                 }
             )
         return {
@@ -2347,6 +2531,37 @@ class Mesh:
 
 
 # =================================================================== helpers
+
+
+class _Hashing:
+    """Wraps a stream and hashes what's read through it."""
+
+    def __init__(self, stream: Readable, hasher: Any) -> None:
+        self._stream = stream
+        self._hasher = hasher
+
+    def read(self, size: int = -1) -> bytes:
+        data = self._stream.read(size)
+        self._hasher.update(data)
+        return data
+
+
+def _claimed_digest(hasher: Any) -> str:
+    """The checksum a sender reports for what it sent."""
+    return str(hasher.hexdigest())
+
+
+def _file_digest(path: Any) -> str:
+    hasher = hashlib.sha256()
+    with open(path, "rb") as fh:
+        while chunk := fh.read(1024 * 1024):
+            hasher.update(chunk)
+    return hasher.hexdigest()
+
+
+def _all_skipped(data: dict[str, Any]) -> bool:
+    files = data.get("files") or []
+    return bool(files) and all(isinstance(f, dict) and f.get("skipped") for f in files)
 
 
 def _title(files: list[dict[str, Any]]) -> str:
