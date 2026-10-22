@@ -212,6 +212,7 @@ class FocusRequests:
         self.interval = interval
         self._stop = threading.Event()
         self._thread = threading.Thread(target=self._run, name="ot-focus", daemon=True)
+        self._shown = False  # shown for the pending request, but not yet confirmed
 
     def start(self) -> FocusRequests:
         self._thread.start()
@@ -223,18 +224,22 @@ class FocusRequests:
     def poll(self) -> bool:
         """Handle a pending request, if any. True if one was handled."""
         if not self.path.exists():
+            self._shown = False
             return False
-        try:
-            self.on_request()
-        except Exception:
-            log.warning("could not bring Open Transfer to the front", exc_info=True)
-            return False  # no confirmation: the other copy opens the browser instead
+        if not self._shown:
+            try:
+                self.on_request()
+            except Exception:
+                log.warning("could not bring Open Transfer to the front", exc_info=True)
+                return False  # no confirmation: the other copy opens the browser instead
+            self._shown = True
         try:
             self.path.unlink()
         except FileNotFoundError:
             pass  # the asking copy gave up and removed it already
-        except OSError:  # Windows: still being written; answer on the next tick
+        except OSError:  # Windows: still being written; confirm (only) on the next tick
             return False
+        self._shown = False
         return True
 
     def _run(self) -> None:

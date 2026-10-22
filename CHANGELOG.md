@@ -11,6 +11,9 @@ All notable changes are documented here. The format follows [Keep a Changelog](h
 - A command-line build for Intel Macs (`open-transfer-macos-x64-cli.tar.gz`), as there already was for Apple silicon.
 - Homebrew: `brew install --cask itsonu/tap/open-transfer` (desktop app) or `brew install itsonu/tap/open-transfer` (command line).
 
+### Fixed
+- Windows: opening the app while it was already running could bring its window forward twice.
+
 ## [3.2.4] — 2026-10-18
 
 ### Fixed
