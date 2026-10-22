@@ -27,8 +27,8 @@ android {
         applicationId = "io.github.itsonu.opentransfer"
         minSdk = 29
         targetSdk = 36
-        versionCode = 325
-        versionName = "3.2.5"
+        versionCode = 330
+        versionName = "3.3.0"
 
         ndk {
             abiFilters += listOf("arm64-v8a", "x86_64")

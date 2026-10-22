@@ -4,6 +4,8 @@ All notable changes are documented here. The format follows [Keep a Changelog](h
 
 ## [Unreleased]
 
+## [3.3.0] — 2026-10-22
+
 ### Added
 - **Drop targets:** while you drag files, every nearby device shows "Drop to send", and the one under the pointer is announced to screen readers. Dropping onto a device that isn't around says so instead of quietly staging the files.
 - **Send to several devices with one drop:** drop onto any selected device to send to all the selected ones, or onto the new **Everyone nearby** target (it asks first, like Send).
@@ -161,7 +163,8 @@ The project is now **Open Transfer**: a rewrite of the original Flask "File Tran
 ### Removed
 - Unrelated packet-sniffing and network-scanning scripts (`get.py`, `get2.py`, `scan.py`), the duplicate `backup.py`, the unused Tkinter import and IDE settings.
 
-[Unreleased]: https://github.com/itsonu/open-transfer/compare/v3.2.5...HEAD
+[Unreleased]: https://github.com/itsonu/open-transfer/compare/v3.3.0...HEAD
+[3.3.0]: https://github.com/itsonu/open-transfer/compare/v3.2.5...v3.3.0
 [3.2.5]: https://github.com/itsonu/open-transfer/compare/v3.2.4...v3.2.5
 [3.2.4]: https://github.com/itsonu/open-transfer/compare/v3.2.3...v3.2.4
 [3.2.3]: https://github.com/itsonu/open-transfer/compare/v3.2.2...v3.2.3
