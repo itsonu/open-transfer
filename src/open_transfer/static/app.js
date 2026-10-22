@@ -5,6 +5,7 @@
 
 import { $, addHistory, api, can, chunkLimits, clearHistory, copyText, formatBytes, formatDuration, guessKind, h, icon, loadHistory, newUploadId, plural, pushSample, relativeTime, setLockHandler, shouldChunk, sparklineSVG, state, toast, uploadParallel } from "./lib.js";
 import { announceSelf, busy, fetchState, forgetDirectFile, initNearby, isDeviceMode, mesh, openAddDevice, stageFiles } from "./nearby.js";
+import { canShareFiles, copyImage, initMedia, isImage, isVideo, openMenu, openPreview, previewKind, shareFile, videoThumb } from "./media.js";
 import { collectDropped, zipFiles, zipName } from "./zip.js";
 
 const POLL_MS = 1500;
@@ -13,7 +14,17 @@ const POLL_HIDDEN_MS = 10000;
 const MAX_PARALLEL_UPLOADS = 3;
 const THUMB_MAX_BYTES = 25_000_000;
 const THUMB_MIME = new Set(["image/png", "image/jpeg", "image/gif", "image/webp", "image/avif", "image/bmp"]);
-const PREVIEW_MIME = new Set([...THUMB_MIME, "video/mp4", "video/webm", "audio/mpeg", "audio/mp4", "audio/ogg", "audio/wav"]);
+const FILTERS = {
+  image: (f) => f.kind === "image",
+  video: (f) => f.kind === "video",
+  document: (f) => ["document", "spreadsheet", "presentation"].includes(f.kind),
+  other: (f) => !["image", "video", "document", "spreadsheet", "presentation"].includes(f.kind),
+};
+const SORTS = {
+  newest: (a, b) => b.modified - a.modified,
+  name: (a, b) => a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: "base" }),
+  size: (a, b) => b.size - a.size,
+};
 const KIND_ICON = {
   image: "image", video: "video", audio: "audio", archive: "archive", document: "doc",
   spreadsheet: "table", presentation: "slides", code: "code", app: "app", other: "file",
@@ -34,7 +45,31 @@ Object.assign(state, {
   locked: false,
   sentInBatch: [], // names sent since the last "Sent N files" toast
   started: false,
+  library: loadLibraryPrefs(), // { view: "list" | "grid", filter, sort }
+  visible: [], // files in the list right now, in order (the preview steps through them)
 });
+
+function loadLibraryPrefs() {
+  const defaults = { view: "list", filter: "all", sort: "newest" };
+  try {
+    const saved = JSON.parse(localStorage.getItem("ot-library") || "{}");
+    return {
+      view: saved.view === "grid" ? "grid" : "list",
+      filter: saved.filter in FILTERS ? saved.filter : "all",
+      sort: saved.sort in SORTS ? saved.sort : "newest",
+    };
+  } catch {
+    return defaults; // storage blocked
+  }
+}
+
+function saveLibraryPrefs() {
+  try {
+    localStorage.setItem("ot-library", JSON.stringify(state.library));
+  } catch {
+    /* storage blocked: the choice lasts until the page closes */
+  }
+}
 
 // "owner": this device's own window — its received files.
 // "shared": a visitor in shared-folder mode — the folder everyone sees.
@@ -192,28 +227,27 @@ async function refresh() {
 
 const rows = new Map(); // name -> { el, sig }
 
+// Files received straight from another browser live in this page (a blob: URL).
+const urlFor = (file, inline = false) => file.url || fileUrl(file.name, inline);
+
 function buildFileRow(file) {
-  // Files received straight from another browser live in this page (a blob: URL).
-  const href = file.url || fileUrl(file.name);
-  const previewable = PREVIEW_MIME.has(file.mime);
-  const thumb = h(
-    previewable ? "a" : "span",
-    previewable
-      ? { class: "thumb thumb-link", href: file.url || fileUrl(file.name, true), target: "_blank", rel: "noopener", tabindex: "-1", "aria-hidden": "true" }
-      : { class: "thumb", "aria-hidden": "true" },
-    icon(KIND_ICON[file.kind] || "file"),
-  );
+  const href = urlFor(file);
+  const previewable = Boolean(previewKind(file));
+  const thumb = h("span", { class: `thumb${previewable ? " thumb-link" : ""}`, "aria-hidden": "true" }, icon(KIND_ICON[file.kind] || "file"));
   thumb.style.setProperty("--kind", `var(--k-${file.kind})`);
   if (THUMB_MIME.has(file.mime) && file.size <= THUMB_MAX_BYTES) {
-    const img = h("img", { src: file.url || fileUrl(file.name, true), alt: "", loading: "lazy", decoding: "async" });
+    const img = h("img", { src: urlFor(file, true), alt: "", loading: "lazy", decoding: "async" });
     img.addEventListener("load", () => img.classList.add("is-loaded"), { once: true });
     img.addEventListener("error", () => img.remove(), { once: true });
     thumb.append(img);
+  } else if (isVideo(file)) {
+    thumb.append(videoThumb(urlFor(file, true)));
   }
+  if (previewable) thumb.addEventListener("click", () => showPreview(file, row.querySelector(".row-more")));
   const sub = h("span", { class: "row-sub" });
   if (file.direct) sub.dataset.direct = "1";
   const openNative = nativeApp()?.openFile && libraryMode() === "owner";
-  const copyable = file.mime === "text/plain" && file.size <= 200000 && file.name.toLowerCase().endsWith(".txt");
+  const copyable = file.mime === "text/plain" && file.size <= COPYABLE_TEXT_BYTES && file.name.toLowerCase().endsWith(".txt");
   const actions = h(
     "div",
     { class: "row-actions" },
@@ -228,16 +262,8 @@ function buildFileRow(file) {
           onclick: async (event) => {
             const btn = event.currentTarget;
             btn.disabled = true;
-            try {
-              const res = await fetch(file.url || fileUrl(file.name));
-              const text = await res.text();
-              const ok = await copyText(text.slice(0, 200000));
-              toast(ok ? "Copied to clipboard" : "Couldn’t copy — open the file and copy manually", { icon: "copy" });
-            } catch {
-              toast("Couldn’t copy — open the file and copy manually", { tone: "error", icon: "alert" });
-            } finally {
-              btn.disabled = false;
-            }
+            await copyFileText(file);
+            btn.disabled = false;
           },
         },
         icon("copy"),
@@ -251,6 +277,19 @@ function buildFileRow(file) {
         { class: "icon-btn is-danger", type: "button", "aria-label": `Delete ${file.name}`, title: "Delete", onclick: () => deleteFile(file, row) },
         icon("trash"),
       ),
+    h(
+      "button",
+      {
+        class: "icon-btn row-more",
+        type: "button",
+        "aria-label": `More actions for ${file.name}`,
+        "aria-haspopup": "menu",
+        "aria-expanded": "false",
+        title: "More",
+        onclick: (event) => openMenu(fileActions(file, row), { at: event.currentTarget, label: `Actions for ${file.name}` }),
+      },
+      icon("more"),
+    ),
   );
   const row = h(
     "li",
@@ -273,9 +312,87 @@ function buildFileRow(file) {
       });
     }
   }
+  row.addEventListener("contextmenu", (event) => {
+    if (event.target.closest("input, textarea")) return;
+    event.preventDefault();
+    openMenu(fileActions(file, row), { at: { x: event.clientX, y: event.clientY }, opener: row.querySelector(".row-more"), label: `Actions for ${file.name}` });
+  });
   row._file = file;
   updateRowTime(row);
   return row;
+}
+
+function showPreview(file, trigger) {
+  const list = state.visible.length ? state.visible : [file];
+  const index = Math.max(0, list.findIndex((f) => f.name === file.name));
+  openPreview(list, index, { urlFor, trigger });
+}
+
+const COPYABLE_TEXT_BYTES = 200000;
+
+async function copyFileText(file) {
+  try {
+    const res = await fetch(urlFor(file));
+    const text = await res.text();
+    const ok = await copyText(text.slice(0, COPYABLE_TEXT_BYTES));
+    toast(ok ? "Copied to clipboard" : "Couldn’t copy — open the file and copy manually", { icon: "copy" });
+  } catch {
+    toast("Couldn’t copy — open the file and copy manually", { tone: "error", icon: "alert" });
+  }
+}
+
+function linkFor(file) {
+  // Owners share their LAN address so the link works on other devices.
+  const base = state.info.owner && state.info.share_url ? state.info.share_url : location.origin;
+  return new URL(fileUrl(file.name), base).href;
+}
+
+async function localAction(file, action) {
+  try {
+    await api(`/api/files/${encodeURIComponent(file.name)}/${action}`, { method: "POST" });
+  } catch (err) {
+    toast(err.message, { tone: "error", icon: "alert" });
+  }
+}
+
+/** The quick-actions menu for a file row: only what works here, for this file. */
+function fileActions(file, row) {
+  const kind = previewKind(file);
+  const owner = libraryMode() === "owner";
+  const native = nativeApp()?.openFile && owner;
+  const items = [];
+  if (kind) items.push({ label: "Preview", icon: "eye", run: () => showPreview(file, row.querySelector(".row-more")) });
+  if (native) items.push({ label: "Open", icon: "download", run: () => nativeApp().openFile(file.name) });
+  else if (owner && state.info.local_open && file.kind !== "app") items.push({ label: "Open", icon: "file", run: () => localAction(file, "open") });
+  if (owner && state.info.local_open) items.push({ label: "Show in folder", icon: "folder", run: () => localAction(file, "reveal") });
+  if (kind === "text" && file.size <= COPYABLE_TEXT_BYTES) items.push({ label: "Copy text", icon: "copy", run: () => copyFileText(file) });
+  if (isImage(file) && navigator.clipboard?.write) {
+    items.push({
+      label: "Copy image",
+      icon: "image",
+      run: async () => toast((await copyImage(urlFor(file, true))) ? "Image copied" : "Couldn’t copy the image", { icon: "copy" }),
+    });
+  }
+  if (!file.direct) {
+    items.push({ label: "Copy link", icon: "link", run: async () => toast((await copyText(linkFor(file))) ? "Link copied" : "Couldn’t copy the link", { icon: "link" }) });
+  }
+  items.push({
+    label: "Save",
+    icon: "download",
+    run: () => {
+      const a = h("a", { href: urlFor(file), download: file.name });
+      document.body.append(a);
+      a.click();
+      a.remove();
+      if (file.direct) {
+        file.saved = true;
+        updateRowTime(row);
+      }
+    },
+  });
+  if (canShareFiles()) items.push({ label: "Share…", icon: "share", run: () => shareFile(urlFor(file), file) });
+  if (can("delete") || inInbox()) items.push({ label: "Delete", icon: "trash", danger: true, run: () => deleteFile(file, row) });
+  return items;
 }
 
 function updateRowTime(row) {
@@ -297,7 +414,10 @@ function renderFiles() {
   }
   const all = state.files.filter((f) => !state.hidden.has(f.name));
   const term = state.search.trim().toLowerCase();
-  const visible = term ? all.filter((f) => f.name.toLowerCase().includes(term)) : all;
+  const { view, filter, sort } = state.library;
+  const kindOk = FILTERS[filter] || (() => true);
+  const visible = all.filter((f) => kindOk(f) && (!term || f.name.toLowerCase().includes(term))).sort(SORTS[sort] || SORTS.newest);
+  state.visible = visible;
   const allNames = new Set(all.map((f) => f.name));
 
   let cursor = list.firstElementChild;
@@ -331,8 +451,18 @@ function renderFiles() {
   $("#empty").hidden = all.length > 0;
   $("#dropzone").classList.toggle("is-compact", all.length > 0);
   list.hidden = visible.length === 0;
-  $("#no-results").hidden = !(term && all.length && visible.length === 0);
-  $("#no-results-term").textContent = state.search.trim();
+  list.classList.toggle("is-grid", view === "grid");
+  const narrowed = Boolean(term) || filter !== "all";
+  $("#no-results").hidden = !(narrowed && all.length && visible.length === 0);
+  $("#no-results-text").replaceChildren(
+    term ? "No files match “" : "No files of that kind yet.",
+    ...(term ? [h("span", { id: "no-results-term" }, state.search.trim()), "”."] : []),
+  );
+  $("#library-controls").hidden = all.length < 2;
+  $("#view-list").setAttribute("aria-pressed", String(view === "list"));
+  $("#view-grid").setAttribute("aria-pressed", String(view === "grid"));
+  $("#library-filter").value = filter;
+  $("#library-sort").value = sort;
   $("#search-wrap").hidden = all.length < 6 && !term;
   const download = $("#download-all");
   download.hidden = all.length < 2 || (term && visible.length === 0);
@@ -964,6 +1094,16 @@ function boot() {
     state.search = event.target.value;
     renderFiles();
   });
+  const setLibrary = (change) => {
+    Object.assign(state.library, change);
+    saveLibraryPrefs();
+    renderFiles();
+  };
+  $("#view-list").addEventListener("click", () => setLibrary({ view: "list" }));
+  $("#view-grid").addEventListener("click", () => setLibrary({ view: "grid" }));
+  $("#library-filter").addEventListener("change", (event) => setLibrary({ filter: event.target.value }));
+  $("#library-sort").addEventListener("change", (event) => setLibrary({ sort: event.target.value }));
+  initMedia();
   $("#clear-transfers").addEventListener("click", () => {
     for (const t of [...state.transfers.values()]) if (t.state === "error") removeTransfer(t);
   });
@@ -993,7 +1133,12 @@ function renderHistory() {
       const row = h(
         "li",
         { class: "row history-row" },
-        h("span", { class: "thumb", "aria-hidden": "true" }, icon(e.name?.endsWith(".zip") ? "archive" : guessKind(e.name || ""))),
+        h(
+          "span",
+          { class: "thumb", "aria-hidden": "true" },
+          icon(KIND_ICON[e.name?.endsWith(".zip") ? "archive" : guessKind(e.name || "")] || "file"),
+          typeof e.thumb === "string" && e.thumb.startsWith("data:image/") && h("img", { class: "is-loaded", src: e.thumb, alt: "" }),
+        ),
         h("div", { class: "row-main" }, h("span", { class: "row-title", title: e.name }, e.name), h("span", { class: "row-sub" }, sub)),
         h("span", { class: "history-dir", dataset: { dir: sent ? "up" : "down" } }, sent ? "Sent" : "Received"),
       );

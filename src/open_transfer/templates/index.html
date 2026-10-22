@@ -60,6 +60,11 @@
     <symbol id="i-clock" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></symbol>
     <symbol id="i-edit" viewBox="0 0 24 24"><path d="M4 20h4L19 9l-4-4L4 16v4ZM13.5 6.5l4 4"/></symbol>
     <symbol id="i-star" viewBox="0 0 24 24"><path d="m12 3.5 2.6 5.3 5.9.9-4.3 4.1 1 5.8-5.2-2.7-5.2 2.7 1-5.8-4.3-4.1 5.9-.9z"/></symbol>
+    <symbol id="i-more" viewBox="0 0 24 24"><path d="M5.5 12h.01M12 12h.01M18.5 12h.01" stroke-width="3"/></symbol>
+    <symbol id="i-list" viewBox="0 0 24 24"><path d="M8 6h12M8 12h12M8 18h12M4 6h.01M4 12h.01M4 18h.01"/></symbol>
+    <symbol id="i-left" viewBox="0 0 24 24"><path d="m15 5-7 7 7 7"/></symbol>
+    <symbol id="i-right" viewBox="0 0 24 24"><path d="m9 5 7 7-7 7"/></symbol>
+    <symbol id="i-eye" viewBox="0 0 24 24"><path d="M2.5 12S6 5.5 12 5.5 21.5 12 21.5 12 18 18.5 12 18.5 2.5 12 2.5 12Z"/><circle cx="12" cy="12" r="3"/></symbol>
     <symbol id="i-scan" viewBox="0 0 24 24"><path d="M4 8V5.5A1.5 1.5 0 0 1 5.5 4H8M16 4h2.5A1.5 1.5 0 0 1 20 5.5V8M20 16v2.5a1.5 1.5 0 0 1-1.5 1.5H16M8 20H5.5A1.5 1.5 0 0 1 4 18.5V16M4 12h16"/></symbol>
   </svg>
 
@@ -193,6 +198,33 @@
             </div>
           </div>
 
+          <div class="library-controls" id="library-controls" hidden>
+            <div class="view-toggle" role="group" aria-label="View">
+              <button class="icon-btn" type="button" id="view-list" aria-pressed="true" aria-label="List view" title="List">
+                <svg class="icon" aria-hidden="true"><use href="#i-list"/></svg>
+              </button>
+              <button class="icon-btn" type="button" id="view-grid" aria-pressed="false" aria-label="Grid view" title="Grid">
+                <svg class="icon" aria-hidden="true"><use href="#i-app"/></svg>
+              </button>
+            </div>
+            <label class="select-wrap"><span class="visually-hidden">Show</span>
+              <select id="library-filter">
+                <option value="all">All files</option>
+                <option value="image">Photos</option>
+                <option value="video">Videos</option>
+                <option value="document">Documents</option>
+                <option value="other">Other</option>
+              </select>
+            </label>
+            <label class="select-wrap"><span class="visually-hidden">Sort by</span>
+              <select id="library-sort">
+                <option value="newest">Newest first</option>
+                <option value="name">Name</option>
+                <option value="size">Largest first</option>
+              </select>
+            </label>
+          </div>
+
           <ul class="list card" id="file-list" aria-busy="true">
             <li class="row skeleton" aria-hidden="true"><span class="thumb"></span><span class="lines"><span></span><span></span></span></li>
             <li class="row skeleton" aria-hidden="true"><span class="thumb"></span><span class="lines"><span></span><span></span></span></li>
@@ -211,7 +243,7 @@
 
           <div class="empty card" id="no-results" hidden>
             <h3>No matches</h3>
-            <p class="muted">No files match “<span id="no-results-term"></span>”.</p>
+            <p class="muted" id="no-results-text">No files match “<span id="no-results-term"></span>”.</p>
           </div>
 
           <div class="empty card" id="receive-only" hidden>
@@ -251,6 +283,7 @@
 
   <div class="send-bar" id="send-bar" role="region" aria-label="Send files" hidden>
     <div class="send-bar-inner">
+      <span class="send-bar-thumbs" id="send-bar-thumbs" aria-hidden="true"></span>
       <div class="send-bar-info">
         <span class="send-bar-files" id="send-bar-files"></span>
         <span class="send-bar-to" id="send-bar-to"></span>
@@ -435,6 +468,30 @@
       <button class="btn btn-primary btn-large" type="submit">Save</button>
     </form>
   </dialog>
+
+  <dialog class="preview" id="preview-dialog" aria-labelledby="preview-title">
+    <div class="preview-bar">
+      <div class="preview-info">
+        <h2 id="preview-title"></h2>
+        <span class="preview-meta"><span id="preview-size"></span> <span id="preview-count"></span></span>
+      </div>
+      <a class="icon-btn" id="preview-save" href="#" download title="Save">
+        <svg class="icon" aria-hidden="true"><use href="#i-download"/></svg>
+      </a>
+      <button class="icon-btn" type="button" id="preview-close" aria-label="Close preview" title="Close (Esc)">
+        <svg class="icon" aria-hidden="true"><use href="#i-x"/></svg>
+      </button>
+    </div>
+    <div class="preview-stage" id="preview-stage"></div>
+    <button class="preview-nav is-prev" type="button" id="preview-prev" aria-label="Previous file" title="Previous (←)">
+      <svg class="icon" aria-hidden="true"><use href="#i-left"/></svg>
+    </button>
+    <button class="preview-nav is-next" type="button" id="preview-next" aria-label="Next file" title="Next (→)">
+      <svg class="icon" aria-hidden="true"><use href="#i-right"/></svg>
+    </button>
+  </dialog>
+
+  <div class="menu" id="file-menu" role="menu" aria-label="File actions" hidden></div>
 
   <div class="toasts" id="toasts" aria-live="polite" aria-atomic="false"></div>
   <p class="visually-hidden" id="drop-live" aria-live="assertive"></p>

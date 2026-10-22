@@ -10,7 +10,6 @@ from __future__ import annotations
 import hashlib
 import io
 import json
-import mimetypes
 import time
 from collections.abc import Callable
 from typing import Any
@@ -23,7 +22,6 @@ from flask import (
     abort,
     jsonify,
     request,
-    send_file,
     session,
     stream_with_context,
 )
@@ -33,6 +31,7 @@ from open_transfer.archive import zip_stream
 from open_transfer.devices import clean_form, clean_name, clean_platform, valid_id
 from open_transfer.mesh import P2P, Mesh, MeshError, Viewer
 from open_transfer.security import log_safe
+from open_transfer.serve import serve_file
 from open_transfer.storage import IncompleteUpload, StorageError
 
 PUBLIC_P2P_ENDPOINTS = {
@@ -413,18 +412,7 @@ def register(
     @app.get("/api/inbox/files/<path:name>")
     def ui_inbox_file(name: str) -> Response:
         store = visitor_inbox()
-        path = store.resolve(name)
-        mime = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
-        response = send_file(
-            path,
-            mimetype=mime,
-            as_attachment=True,
-            download_name=path.name,
-            conditional=True,
-            max_age=0,
-        )
-        response.headers["Content-Security-Policy"] = file_csp
-        return response
+        return serve_file(store.resolve(name), inline=request.args.get("inline") == "1")
 
     @app.delete("/api/inbox/files/<path:name>")
     def ui_inbox_delete(name: str) -> Response:

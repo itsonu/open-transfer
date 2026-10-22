@@ -29,11 +29,11 @@ Status legend: **Done** · **Partial** (some of it existed before this plan) · 
 
 | Feature | Before | Steps | Tests |
 |---|---|---|---|
-| **Media Preview** | Partial (opens a new tab) | 1. In-app preview dialog for images, video, audio, PDF and text. 2. ← / → between files, Esc closes, focus returns. 3. Server serves PDFs inline safely (`Content-Disposition: inline`, sandboxed CSP). | Unit: `?inline=1` for PDF/video gives the right headers. E2E: open the preview for an image / text file; arrows move; Esc closes. |
-| **Media Thumbnail Grid** | Partial (images in the file list) | Thumbnails for videos (first frame), and for local files in the send bar and transfer cards (object URLs, revoked after). | Video row shows a `<video>` thumb; staged image shows a thumb. |
-| **Media Gallery View** | New | 1. List ⇄ Grid toggle. 2. Filter: All · Photos · Videos · Documents. 3. Sort: newest · name · size. 4. Click → full-screen preview (Phase B dialog). Choices remembered. | Toggle grid → tiles; filter Photos → only images; sort by name → order. |
-| **Quick Actions** | Partial (copy text, download, delete) | A "⋯" menu (and right-click) per file: Preview, Copy, Save, Share (Web Share where supported), Reveal in folder (desktop/Android owner only). | Menu lists the expected actions per file type; keyboard opens it. |
-| **Cross-Device File Operations** | Partial (Android open) | Owner-only API `POST /api/files/<name>/open` and `/reveal` (local machine only), using the OS opener; the Android bridge for its own. | Unit: owner can call it (opener mocked); visitors get 403; path traversal rejected. |
+| **Media Preview** | ✅ Phase B | 1. In-app preview dialog for images, video, audio, PDF and text. 2. ← / → between files, Esc closes, focus returns. 3. Server serves PDFs inline for the preview only (`Content-Disposition: inline`; the PDF viewer can't run sandboxed, so its CSP allows only the plugin and framing by the app itself). | Unit: `?inline=1` for PDF/video gives the right headers. E2E: open the preview for an image / text file; arrows move; Esc closes. |
+| **Media Thumbnail Grid** | ✅ Phase B | Thumbnails for videos (first frame), and for local files in the send bar and transfer cards (object URLs, revoked after). | Video row shows a `<video>` thumb; staged image shows a thumb. |
+| **Media Gallery View** | ✅ Phase B | 1. List ⇄ Grid toggle. 2. Filter: All · Photos · Videos · Documents. 3. Sort: newest · name · size. 4. Click → full-screen preview (Phase B dialog). Choices remembered. | Toggle grid → tiles; filter Photos → only images; sort by name → order. |
+| **Quick Actions** | ✅ Phase B | A "⋯" menu (and right-click) per file: Preview, Copy, Save, Share (Web Share where supported), Reveal in folder (desktop/Android owner only). | Menu lists the expected actions per file type; keyboard opens it. |
+| **Cross-Device File Operations** | ✅ Phase B | Owner-only API `POST /api/files/<name>/open` and `/reveal` (local machine only), using the OS opener; the Android bridge for its own. Programs and scripts are only ever revealed, never opened; machines without a desktop (servers, containers) don't offer either. | Unit: owner can call it (opener mocked); visitors get 403; path traversal rejected. |
 
 ## Phase C — Clipboard
 

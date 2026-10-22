@@ -4,6 +4,7 @@
 
 import { DIRECT_MAX_BYTES, directSupported, handleSignals, sendDirect } from "./direct.js";
 import { $, ApiError, addHistory, api, chunkLimits, copyText, formatBytes, formatDuration, guessKind, h, icon, newUploadId, plural, pushSample, shouldChunk, sparklineSVG, state, toast, uploadParallel } from "./lib.js";
+import { isImage, makeThumb } from "./media.js";
 import { collectDropped, zipFiles, zipName } from "./zip.js";
 
 const PLATFORM = { windows: "Windows", macos: "Mac", linux: "Linux", android: "Android", ios: "iOS", chromeos: "ChromeOS", unknown: "" };
@@ -26,6 +27,7 @@ export const mesh = {
   incomingRows: new Map(),
   favorites: loadFavorites(), // [{ id, name, form, platform, kind }], first = Alt+1
   quickTarget: null, // device id the quick-send file picker is for
+  stagedUrls: new Map(), // staged image File -> object URL for its thumbnail
 };
 
 let ctx = { requestPoll: () => {}, droppedFiles: () => [], libraryChanged: () => {} };
@@ -630,6 +632,7 @@ function renderSendBar() {
   bar.hidden = !files.length && !ids.length;
   document.body.classList.toggle("has-send-bar", !bar.hidden);
   if (bar.hidden) return;
+  renderStagedThumbs(files);
   const size = files.reduce((sum, f) => sum + f.size, 0);
   $("#send-bar-files").textContent = files.length
     ? files.length === 1
@@ -658,6 +661,27 @@ async function confirmRecipients(ids, files) {
   });
 }
 
+/** Up to three thumbnails of the staged images (object URLs, revoked when unstaged). */
+function renderStagedThumbs(files) {
+  const images = files.filter((f) => isImage(f) && f.size <= 25_000_000).slice(0, 3);
+  for (const [file, url] of mesh.stagedUrls) {
+    if (!images.includes(file)) {
+      URL.revokeObjectURL(url);
+      mesh.stagedUrls.delete(file);
+    }
+  }
+  const box = $("#send-bar-thumbs");
+  const sig = images.map((f) => `${f.name}:${f.size}`).join("|");
+  if (box.dataset.sig === sig) return;
+  box.dataset.sig = sig;
+  box.replaceChildren(
+    ...images.map((file) => {
+      if (!mesh.stagedUrls.has(file)) mesh.stagedUrls.set(file, URL.createObjectURL(file));
+      return h("img", { src: mesh.stagedUrls.get(file), alt: "" });
+    }),
+  );
+}
+
 async function sendStaged() {
   const ids = [...mesh.selected];
   const files = [...mesh.staged];
@@ -679,6 +703,13 @@ async function startSend(ids, files) {
   }
   const job = { id: data.job.id, files, targets: ids, state: "waiting", index: 0, uploaded: 0, speed: 0, xhr: null, finishedAt: 0 };
   mesh.jobs.set(job.id, job);
+  const picture = files.find((f) => isImage(f) && f.size <= 25_000_000);
+  if (picture) {
+    makeThumb(picture).then((thumb) => {
+      job.thumb = thumb;
+      scheduleJobRender();
+    });
+  }
   mesh.staged = [];
   mesh.selected.clear();
   mesh.data.outgoing.push(data.job);
@@ -844,7 +875,7 @@ function finishJob(job, outcome) {
     const secs = job.startedAt ? Math.max(0.1, (performance.now() - job.startedAt) / 1000) : 0;
     const bytes = job.files.reduce((n, f) => n + f.size, 0);
     const title = job.files.length === 1 ? job.files[0].name : plural(job.files.length, "file");
-    addHistory({ name: title, size: bytes, direction: "send", status: "done", speed: secs ? bytes / secs : 0, samples: (job.samples || []).slice(-30) });
+    addHistory({ name: title, size: bytes, direction: "send", status: "done", speed: secs ? bytes / secs : 0, samples: (job.samples || []).slice(-30), thumb: job.thumb || undefined });
     window.dispatchEvent(new CustomEvent("ot-history"));
   } else if (declined.length) {
     toast(declined.length === 1 ? `${declined[0].name} declined — retry to ask again` : `${declined.length} declined — retry to ask again`, {
@@ -1078,7 +1109,7 @@ async function retryJob(job, onlyTarget = null) {
     });
     const files = job.files;
     mesh.jobs.delete(job.id);
-    const fresh = { id: data.job.id, files, targets: ids, state: "waiting", index: 0, uploaded: 0, speed: 0, xhr: null, finishedAt: 0, retried: true };
+    const fresh = { id: data.job.id, files, targets: ids, state: "waiting", index: 0, uploaded: 0, speed: 0, xhr: null, finishedAt: 0, retried: true, thumb: job.thumb };
     mesh.jobs.set(fresh.id, fresh);
     mesh.data.outgoing.push(data.job);
     toast(ids.length === 1 ? `Asking ${deviceName(ids[0])} again…` : `Asking ${ids.length} devices again…`, { icon: "retry" });
@@ -1156,7 +1187,7 @@ function renderJobs() {
       h(
         "div",
         { class: "job-head" },
-        h("span", { class: "thumb", "aria-hidden": "true" }, icon("send")),
+        h("span", { class: "thumb", "aria-hidden": "true" }, job.thumb ? h("img", { class: "is-loaded", src: job.thumb, alt: "" }) : icon("send")),
         mainCol,
         h(
           "div",
@@ -1250,8 +1281,14 @@ function handleIncoming() {
           action: !owner && s.files.length === 1 ? { label: "Save", run: () => saveInboxFile(s.files[0].saved_name || s.files[0].name) } : undefined,
         });
         const title = s.files.length === 1 ? s.files[0].saved_name || s.files[0].name : plural(s.files.length, "file");
-        addHistory({ name: `${title} — from ${from}`, size: s.total, direction: "receive", status: "done", speed: 0 });
-        window.dispatchEvent(new CustomEvent("ot-history"));
+        const entry = { name: `${title} — from ${from}`, size: s.total, direction: "receive", status: "done", speed: 0 };
+        const picture = s.files.find((f) => isImage(f) && f.size <= 25_000_000);
+        const name = picture && (picture.saved_name || picture.name);
+        const url = name && (owner ? `/files/${encodeURIComponent(name)}?inline=1` : `/api/inbox/files/${encodeURIComponent(name)}?inline=1`);
+        (url ? makeThumb(url) : Promise.resolve(null)).then((thumb) => {
+          addHistory({ ...entry, thumb: thumb || undefined });
+          window.dispatchEvent(new CustomEvent("ot-history"));
+        });
         ctx.libraryChanged(null);
       } else if (s.state === "canceled" && before !== "pending") toast(`${from} stopped sending`, { tone: "error", icon: "x" });
       else if (s.state === "failed") toast(`Couldn’t receive files from ${from}`, { tone: "error", icon: "alert" });

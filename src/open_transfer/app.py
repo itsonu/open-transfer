@@ -6,7 +6,6 @@ import hashlib
 import io
 import ipaddress
 import logging
-import mimetypes
 import os
 import secrets
 import time
@@ -25,7 +24,6 @@ from flask import (
     redirect,
     render_template,
     request,
-    send_file,
     send_from_directory,
     session,
     stream_with_context,
@@ -34,7 +32,7 @@ from flask import (
 from werkzeug.exceptions import ClientDisconnected, HTTPException
 from werkzeug.middleware.proxy_fix import ProxyFix
 
-from open_transfer import __version__, network
+from open_transfer import __version__, network, opener
 from open_transfer.archive import zip_stream
 from open_transfer.config import Config
 from open_transfer.mesh import Mesh, Viewer, visitor_identity
@@ -49,29 +47,12 @@ from open_transfer.security import (
     pin_matches,
     same_origin,
 )
+from open_transfer.serve import FILE_CSP, serve_file
 from open_transfer.storage import IncompleteUpload, InvalidName, Storage, StorageError
 
 log = logging.getLogger("open_transfer")
 
 PACKAGE_DIR = Path(__file__).resolve().parent
-INLINE_SAFE_MIME = {
-    "image/png",
-    "image/jpeg",
-    "image/gif",
-    "image/webp",
-    "image/avif",
-    "image/bmp",
-    "video/mp4",
-    "video/webm",
-    "audio/mpeg",
-    "audio/mp4",
-    "audio/ogg",
-    "audio/wav",
-    "audio/webm",
-}
-FILE_CSP = (
-    "default-src 'none'; img-src 'self'; media-src 'self'; style-src 'unsafe-inline'; sandbox"
-)
 PUBLIC_ENDPOINTS = {
     "static",
     "health",
@@ -255,6 +236,8 @@ def create_app(config: Config | None = None) -> Flask:
             "version": __version__,
             "device": mesh.identity.name,
             "owner": owner,
+            # Only the device's own window can open files on it.
+            "local_open": owner and opener.available(),
             "auth": {
                 "required": bool(config.pin),
                 "authenticated": authed,
@@ -641,20 +624,30 @@ def create_app(config: Config | None = None) -> Flask:
     def download(name: str) -> Response:
         require_browse()
         path = storage.resolve(name)
-        info_mime = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
-        inline = request.args.get("inline") == "1" and info_mime in INLINE_SAFE_MIME
-        response = send_file(
-            path,
-            mimetype=info_mime,
-            as_attachment=not inline,
-            download_name=path.name,
-            conditional=True,
-            max_age=0,
-        )
-        response.headers["Content-Security-Policy"] = FILE_CSP
-        if request.method == "GET" and not request.range and not inline:
+        response = serve_file(path, inline=request.args.get("inline") == "1")
+        attachment = response.headers.get("Content-Disposition", "").startswith("attachment")
+        if request.method == "GET" and not request.range and attachment:
             log.info("Sent %s to %s", log_safe(path.name), client_id())
         return response
+
+    @app.post("/api/files/<path:name>/<any(open, reveal):action>")
+    def open_locally(name: str, action: str) -> Response:
+        """Open a file with its default app, or show it in its folder, on this machine."""
+        if not is_owner():
+            return error(403, "owner_only", "Only the person using this device can do that.")
+        if not opener.available():
+            return error(501, "no_opener", "Files can’t be opened on this device.")
+        path = storage.resolve(name)
+        if not path.is_file():
+            return error(404, "not_found", "That file isn’t here anymore.")
+        if action == "open" and opener.unsafe_to_open(path.name):
+            return error(
+                400,
+                "unsafe_to_open",
+                "Programs and scripts aren’t opened from here. Show it in its folder instead.",
+            )
+        (opener.open_file if action == "open" else opener.reveal)(path)
+        return jsonify({"ok": True})
 
     register_mesh_routes(
         app,

@@ -178,6 +178,7 @@ Any device can send to any other — there's no host or server role. A phone wit
 - Clean, native-feeling interface with automatic **dark mode**, fluid motion that respects **Reduce Motion**, and layouts tuned for phones, tablets and desktops
 - Native windows on Windows and macOS, a native shell on Android (file picker, QR scanner, notifications)
 - Clear states everywhere: looking-for-devices radar, waiting / accepted / sending / delivered per device, reconnecting indicator, errors with reasons
+- Preview photos, videos, audio, PDFs and text in the app; a grid view with filters; a ⋯ menu per file (copy, share, open, show in folder)
 - Accessible: keyboard operable, visible focus, screen-reader labels, live regions
 - Works fully **offline on a LAN** — no CDNs, fonts or trackers
 

@@ -10,6 +10,10 @@ All notable changes are documented here. The format follows [Keep a Changelog](h
 - **Favorites:** star a device to keep it first in the list, even while it's away.
 - **Quick send:** a favorite gets a send button that goes straight to the file picker and sends to it, no Send bar step. **Alt+1…9** does the same for your first nine favorites.
 - Bigger device tiles on tablets (iPad, Galaxy Tab), and the star is always visible on touch screens.
+- **Preview** photos, videos, audio, PDFs and text files without leaving the app: ← and → step through the list, Esc closes. Text is always shown as plain text.
+- **Thumbnails** for videos (their first frame), for photos waiting in the Send bar, on transfer cards and in Recent.
+- **Gallery view:** switch the file list to a grid, show only photos, videos or documents, and sort by date, name or size. Your choice is remembered.
+- **Quick actions:** a ⋯ menu (or right-click) on every file: Preview, Copy text / image / link, Save, Share, Delete, and on the device itself **Open** and **Show in folder**. Programs and scripts are only ever shown in their folder, never opened from here.
 
 ## [3.2.5] — 2026-10-22
 
