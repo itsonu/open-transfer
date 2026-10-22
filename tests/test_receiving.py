@@ -161,3 +161,23 @@ def test_a_damaged_file_is_removed_and_reported(
     received = next(s for s in bob.state()["incoming"] if s["id"] == session["id"])
     assert received["state"] == "failed"
     assert "damaged" in received["files"][0]["error"]
+
+
+def test_a_stale_view_of_kept_files_is_rechecked(make_node: NodeFactory) -> None:
+    # The sender's poll can lag behind the receiver's answer: it must ask again
+    # before saying nobody accepted.
+    a, b = make_node("Alpha"), make_node("Bravo")
+    connect(a, b)
+    big = b"k" * (5 * 1024 * 1024)
+    (Path(b.config.storage_dir) / "movie.mp4").write_bytes(big)
+    alice, bob = owner(a), owner(b)
+    job, _ = offer_and_accept(
+        alice, bob, [("movie.mp4", big), ("new.txt", b"x")], duplicates="skip"
+    )
+    wait_for(lambda: target_states(alice, job) == {"Bravo": "accepted"})
+    for delivery in a.mesh._jobs[job].deliveries.values():
+        delivery.skip.clear()
+    send_in_chunks(alice, job, big, "u-stale")
+    assert upload(alice, job, 1, b"x")[0] == 200
+    wait_for(lambda: target_states(alice, job) == {"Bravo": "done"})
+    assert received_files(Path(b.config.storage_dir)) == ["movie.mp4", "new.txt"]

@@ -24,9 +24,11 @@ All notable changes are documented here. The format follows [Keep a Changelog](h
 - **Files already here:** when someone sends a file you already have (same name and size), the Accept prompt says so and lets you **keep both**, **skip** it or **replace** yours.
 - **Every file is checked:** apps compare a SHA-256 checksum of what was sent with what was written. A file that arrives damaged is removed and the sender is told to retry.
 - **Notifications:** turn them on with the bell, and you'll get a system notification while the window is in the background when someone wants to send you files, a transfer finishes or fails, or a clipboard arrives.
+- **Keyboard shortcuts:** `Ctrl/⌘+O` choose files, `Ctrl/⌘+Enter` send, `/` search, `Esc` clear what's waiting to be sent, and `?` lists them all.
 
 ### Fixed
 - Two "Are you sure?" questions in a row could get the first one's answer (Cancel), or both get the second one's.
+- Accepting with "skip the ones I have" could, for a moment, look to the sender like an ordinary accept; the receiver now settles which files it keeps before it says yes, and a sender with nobody left to send to asks once more before giving up.
 
 ## [3.2.5] — 2026-10-22
 

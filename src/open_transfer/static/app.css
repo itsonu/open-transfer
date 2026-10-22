@@ -3318,3 +3318,43 @@ body.has-send-bar .toasts {
 #notify-button {
   color: var(--text-2);
 }
+
+/* ------------------------------------------------------- keyboard shortcuts */
+
+.shortcuts-sheet {
+  text-align: left;
+}
+
+.shortcuts {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 10px 16px;
+  margin: 18px 0 0;
+  font-size: 14px;
+}
+
+.shortcuts dt {
+  white-space: nowrap;
+}
+
+.shortcuts dd {
+  margin: 0;
+  color: var(--text-2);
+}
+
+kbd {
+  display: inline-block;
+  min-width: 22px;
+  padding: 1px 6px;
+  border-radius: 6px;
+  background: var(--surface-2);
+  box-shadow: inset 0 -1px 0 var(--separator);
+  color: var(--text);
+  font: 600 12px/1.6 inherit;
+  text-align: center;
+}
+
+.shortcuts-note {
+  margin-top: 16px;
+  font-size: 13px;
+}

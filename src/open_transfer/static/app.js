@@ -1043,6 +1043,38 @@ async function copyFocusedFile(row) {
 
 function setupShortcuts() {
   document.addEventListener("keydown", (event) => {
+    if (event.defaultPrevented || document.querySelector("dialog[open]") || $("#main-view").hidden) return;
+    const typing = event.target.closest?.("input, textarea, select, [contenteditable]");
+    const mod = event.ctrlKey || event.metaKey;
+    if (!mod && !event.altKey && !typing) {
+      if (event.key === "?") {
+        event.preventDefault();
+        $("#shortcuts-dialog").showModal();
+      } else if (event.key === "/") {
+        const search = [$("#search"), $("#history-search"), $("#clip-search")].find((el) => el && el.offsetParent);
+        if (search) {
+          event.preventDefault();
+          search.focus();
+        }
+      } else if (event.key === "Escape" && !$("#send-bar").hidden && $("#file-menu").hidden) {
+        $("#send-clear").click(); // nothing chosen to send any more
+      }
+      return;
+    }
+    if (mod && !event.altKey && !event.shiftKey && !typing) {
+      if (event.key.toLowerCase() === "o" && !$("#send-section").hidden) {
+        event.preventDefault();
+        $("#file-input").click();
+        return;
+      }
+      if (event.key === "Enter" && !$("#send-go").disabled && !$("#send-bar").hidden) {
+        event.preventDefault();
+        $("#send-go").click();
+        return;
+      }
+    }
+  });
+  document.addEventListener("keydown", (event) => {
     const mod = event.ctrlKey || event.metaKey;
     if (!mod || event.altKey || document.querySelector("dialog[open]")) return;
     const typing = event.target.closest?.("input, textarea, select, [contenteditable]");

@@ -60,8 +60,15 @@ Status legend: **Done** · **Partial** (some of it existed before this plan) · 
 
 ## Cross-cutting (every phase)
 
-- **Keyboard Shortcuts:** `Ctrl/⌘+O` choose files · `Ctrl/⌘+Enter` send · `/` search · `Esc` close or cancel · `Alt+1–9` quick send (done in Phase A) · `?` shortcut list. Tested per phase as features land.
-- **Accessibility Support:** every control has a name, focus is visible and returns after dialogs, drop targets and progress are announced, nothing needs a mouse. A browser test fails on unnamed buttons or images without `alt`.
+- ✅ **Keyboard Shortcuts:** `Ctrl/⌘+O` choose files · `Ctrl/⌘+Enter` send · `Ctrl/⌘+V` paste to send · `Ctrl/⌘+Shift+V` send what you copied · `Ctrl/⌘+C` copy the file you're on · `Alt+1–9` quick send · `/` search · `←`/`→` in a preview · `Esc` close or clear · `?` the list.
+- ✅ **Accessibility Support:** a browser test audits the whole page (also with the send bar, a menu and the preview open): every visible control has a name, every image an `alt`, every dialog a label; live regions announce toasts, connection changes and drop targets; focus is visible and returns after dialogs and menus; everything works from the keyboard.
+
+## Not yet (follow-ups)
+
+- **Accept / Decline inside the notification:** needs a service worker.
+- **Clipboard from other apps in the background:** needs the native apps (a web page can only read it while focused).
+- **Checking the browser → its own app hop:** the checksum covers app to app; the first hop relies on the connection's own checks.
+- **A configurable queue size** (fixed at 2 for now).
 
 ## Not in scope
 

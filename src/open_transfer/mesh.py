@@ -1039,17 +1039,17 @@ class Mesh:
                 if problem:
                     raise MeshError(507, "insufficient_storage", problem)
                 session.on_duplicate = duplicates
-                self._accept(session)
-                if duplicates == "skip":
-                    for f in session.files:
-                        if f.duplicate:
-                            f.state, f.skipped, f.saved_name, f.received = (
-                                DONE,
-                                True,
-                                f.name,
-                                f.size,
-                            )
+                # Files first, the session's state last: a sender polling the
+                # offer must never see "accepted" without what it can skip.
+                for f in session.files:
+                    f.state = "waiting"
+                    if duplicates == "skip" and f.duplicate:
+                        f.state, f.skipped = DONE, True
+                        f.saved_name, f.received = f.name, f.size
+                if all(f.skipped for f in session.files):
                     self._maybe_finish(session)
+                else:
+                    session.state = ACCEPTED
             else:
                 session.state, session.finished = DECLINED, time.monotonic()
                 session.reason = "Declined"
@@ -1410,6 +1410,8 @@ class Mesh:
             and index not in delivery.files_done
             and not delivery.direct
         ]
+        if not sinks and not kept:
+            kept = self._refresh_kept(job, index)
         if not sinks:
             if kept:  # every receiver already has this one
                 while stream.read(CHUNK):
@@ -1468,6 +1470,29 @@ class Mesh:
                     delivery.state = DONE
                 kept = True
         return kept
+
+    def _refresh_kept(self, job: Job, index: int) -> bool:
+        """Nobody left to send to? Ask the receiving apps once which files they kept:
+        our view of their answer can be a poll behind."""
+        for delivery in job.deliveries.values():
+            if delivery.peer is None or not delivery.remote_id or index in delivery.skip:
+                continue
+            try:
+                status, data = self._http(
+                    delivery.peer,
+                    "GET",
+                    f"{P2P}/offers/{delivery.remote_id}",
+                    headers={"X-OT-Secret": delivery.remote_secret},
+                    timeout=5,
+                )
+            except OSError:
+                continue
+            files = data.get("files") if status == 200 else None
+            if isinstance(files, list):
+                delivery.skip |= {
+                    i for i, f in enumerate(files) if isinstance(f, dict) and f.get("skipped")
+                }
+        return self._mark_kept(job, index)
 
     def _verify_sinks(self, sinks: list[_Sink], index: int, digest: str) -> None:
         for sink in sinks:
@@ -1627,6 +1652,8 @@ class Mesh:
             ]
         except Exception:
             eligible = []
+        if not eligible and not kept:
+            kept = self._refresh_kept(job, index)
         if not eligible and kept:  # every receiver already has this one
             result = self._upload_result(job, index, [])
             self._relay_chunks.discard(upload_id)

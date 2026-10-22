@@ -557,6 +557,28 @@
 
   <div class="menu" id="file-menu" role="menu" aria-label="File actions" hidden></div>
 
+  <dialog class="sheet shortcuts-sheet" id="shortcuts-dialog" aria-labelledby="shortcuts-title">
+    <form method="dialog" class="sheet-close-form">
+      <button class="icon-btn sheet-close" aria-label="Close" value="close">
+        <svg class="icon" aria-hidden="true"><use href="#i-x"/></svg>
+      </button>
+    </form>
+    <h2 id="shortcuts-title">Keyboard shortcuts</h2>
+    <dl class="shortcuts">
+      <dt><kbd>Ctrl</kbd> <kbd>O</kbd></dt><dd>Choose files</dd>
+      <dt><kbd>Ctrl</kbd> <kbd>Enter</kbd></dt><dd>Send to the chosen devices</dd>
+      <dt><kbd>Ctrl</kbd> <kbd>V</kbd></dt><dd>Paste files or text to send</dd>
+      <dt><kbd>Ctrl</kbd> <kbd>Shift</kbd> <kbd>V</kbd></dt><dd>Send what you copied</dd>
+      <dt><kbd>Ctrl</kbd> <kbd>C</kbd></dt><dd>Copy the file you’re on (text, picture or link)</dd>
+      <dt><kbd>Alt</kbd> <kbd>1</kbd>–<kbd>9</kbd></dt><dd>Quick send to a favorite</dd>
+      <dt><kbd>/</kbd></dt><dd>Search</dd>
+      <dt><kbd>←</kbd> <kbd>→</kbd></dt><dd>Previous / next file in a preview</dd>
+      <dt><kbd>Esc</kbd></dt><dd>Close, or clear what’s waiting to be sent</dd>
+      <dt><kbd>?</kbd></dt><dd>This list</dd>
+    </dl>
+    <p class="muted shortcuts-note">On a Mac, use <kbd>⌘</kbd> instead of <kbd>Ctrl</kbd>.</p>
+  </dialog>
+
   <dialog class="sheet clip-sheet" id="clip-dialog" aria-labelledby="clip-dialog-title">
     <form method="dialog" class="sheet-close-form">
       <button class="icon-btn sheet-close" aria-label="Close" value="close">
