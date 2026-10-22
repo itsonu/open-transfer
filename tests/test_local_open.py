@@ -109,18 +109,21 @@ def test_visitors_never_see_local_open(make_app: AppFactory, calls: object) -> N
 # ------------------------------------------------------------ opener commands
 
 
+FILE = Path("/f/a b.txt")  # written with this OS's separators by str()
+
+
 @pytest.mark.parametrize(
     ("platform", "action", "expected"),
     [
-        ("darwin", "open", ["open", "/f/a b.txt"]),
-        ("darwin", "reveal", ["open", "-R", "/f/a b.txt"]),
-        ("linux", "open", ["xdg-open", "/f/a b.txt"]),
-        ("linux", "reveal", ["xdg-open", "/f"]),
-        ("win32", "reveal", ["explorer", "/select,", "/f/a b.txt"]),
+        ("darwin", "open", ["open", str(FILE)]),
+        ("darwin", "reveal", ["open", "-R", str(FILE)]),
+        ("linux", "open", ["xdg-open", str(FILE)]),
+        ("linux", "reveal", ["xdg-open", str(FILE.parent)]),
+        ("win32", "reveal", ["explorer", "/select,", str(FILE)]),
     ],
 )
 def test_opener_commands(platform: str, action: str, expected: list[str]) -> None:
-    assert opener.command(action, Path("/f/a b.txt"), platform) == expected
+    assert opener.command(action, FILE, platform) == expected
 
 
 def test_unsafe_names() -> None:
