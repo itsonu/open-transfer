@@ -4,6 +4,34 @@ All notable changes are documented here. The format follows [Keep a Changelog](h
 
 ## [Unreleased]
 
+## [3.3.0] — 2026-10-22
+
+### Added
+- **Drop targets:** while you drag files, every nearby device shows "Drop to send", and the one under the pointer is announced to screen readers. Dropping onto a device that isn't around says so instead of quietly staging the files.
+- **Send to several devices with one drop:** drop onto any selected device to send to all the selected ones, or onto the new **Everyone nearby** target (it asks first, like Send).
+- **Favorites:** star a device to keep it first in the list, even while it's away.
+- **Quick send:** a favorite gets a send button that goes straight to the file picker and sends to it, no Send bar step. **Alt+1…9** does the same for your first nine favorites.
+- Bigger device tiles on tablets (iPad, Galaxy Tab), and the star is always visible on touch screens.
+- **Preview** photos, videos, audio, PDFs and text files without leaving the app: ← and → step through the list, Esc closes. Text is always shown as plain text.
+- **Thumbnails** for videos (their first frame), for photos waiting in the Send bar, on transfer cards and in Recent.
+- **Gallery view:** switch the file list to a grid, show only photos, videos or documents, and sort by date, name or size. Your choice is remembered.
+- **Quick actions:** a ⋯ menu (or right-click) on every file: Preview, Copy text / image / link, Save, Share, Delete, and on the device itself **Open** and **Show in folder**. Programs and scripts are only ever shown in their folder, never opened from here.
+- **Paste to send:** paste text anywhere (not in a text box) and it's ready to send as a note; **Ctrl/⌘+Shift+V** or **Send what you copied** sends the clipboard (text or a picture).
+- **Ctrl/⌘+C on a file** copies its text, the picture itself, or its link.
+- **Clipboard sharing between paired devices:** a Clipboard panel on each app with **Share clipboard**, an optional auto-share while the window is open, searchable history (keep 20–200 items for 1 day to "as long as they fit"), and per-device switches. Both devices have to switch it on; anything else is refused. Clips travel signed with the pair's key.
+- **Privacy checks:** text that looks like a password, one-time code, card number, private key or API token asks before it's sent or shared, is never auto-shared, is hidden on screen and is never saved to disk.
+- **Activity:** "Recent" is now **Activity**: everything this device sent and received, plus clipboard shares, grouped by day, with search and filters by device and direction. The app keeps it (the last 1,000, private to your user), so it survives reloads and restarts. It records file names, sizes, who and how it ended, never what was in them.
+- **Transfer queue:** two sends run at a time; more wait in line, and you can move them up or down or take them out.
+- **Connection quality:** a dot on each nearby app shows how quick the connection is (round trip in ms), and each transfer says which way it goes: **Direct**, **Via** another device's app, or **Via this device**.
+- **Files already here:** when someone sends a file you already have (same name and size), the Accept prompt says so and lets you **keep both**, **skip** it or **replace** yours.
+- **Every file is checked:** apps compare a SHA-256 checksum of what was sent with what was written. A file that arrives damaged is removed and the sender is told to retry.
+- **Notifications:** turn them on with the bell, and you'll get a system notification while the window is in the background when someone wants to send you files, a transfer finishes or fails, or a clipboard arrives.
+- **Keyboard shortcuts:** `Ctrl/⌘+O` choose files, `Ctrl/⌘+Enter` send, `/` search, `Esc` clear what's waiting to be sent, and `?` lists them all.
+
+### Fixed
+- Two "Are you sure?" questions in a row could get the first one's answer (Cancel), or both get the second one's.
+- Accepting with "skip the ones I have" could, for a moment, look to the sender like an ordinary accept; the receiver now settles which files it keeps before it says yes, and a sender with nobody left to send to asks once more before giving up.
+
 ## [3.2.5] — 2026-10-22
 
 ### Added
@@ -135,7 +163,8 @@ The project is now **Open Transfer**: a rewrite of the original Flask "File Tran
 ### Removed
 - Unrelated packet-sniffing and network-scanning scripts (`get.py`, `get2.py`, `scan.py`), the duplicate `backup.py`, the unused Tkinter import and IDE settings.
 
-[Unreleased]: https://github.com/itsonu/open-transfer/compare/v3.2.5...HEAD
+[Unreleased]: https://github.com/itsonu/open-transfer/compare/v3.3.0...HEAD
+[3.3.0]: https://github.com/itsonu/open-transfer/compare/v3.2.5...v3.3.0
 [3.2.5]: https://github.com/itsonu/open-transfer/compare/v3.2.4...v3.2.5
 [3.2.4]: https://github.com/itsonu/open-transfer/compare/v3.2.3...v3.2.4
 [3.2.3]: https://github.com/itsonu/open-transfer/compare/v3.2.2...v3.2.3

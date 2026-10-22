@@ -3,7 +3,10 @@
 // and renaming this device.
 
 import { DIRECT_MAX_BYTES, directSupported, handleSignals, sendDirect } from "./direct.js";
-import { $, ApiError, addHistory, api, chunkLimits, copyText, formatBytes, formatDuration, guessKind, h, icon, newUploadId, plural, pushSample, shouldChunk, sparklineSVG, state, toast, uploadParallel } from "./lib.js";
+import { $, ApiError, addHistory, api, chunkLimits, copyText, formatBytes, formatDuration, guessKind, h, icon, looksSensitive, newUploadId, plural, pushSample, SENSITIVE_REASONS, shouldChunk, sparklineSVG, state, toast, uploadParallel } from "./lib.js";
+import { saveThumb } from "./activity.js";
+import { isImage, makeThumb } from "./media.js";
+import { notify } from "./notify.js";
 import { collectDropped, zipFiles, zipName } from "./zip.js";
 
 const PLATFORM = { windows: "Windows", macos: "Mac", linux: "Linux", android: "Android", ios: "iOS", chromeos: "ChromeOS", unknown: "" };
@@ -24,7 +27,16 @@ export const mesh = {
   directFiles: [], // files received straight from another browser (kept in memory)
   tiles: new Map(), // device id -> { el, sig }
   incomingRows: new Map(),
+  favorites: loadFavorites(), // [{ id, name, form, platform, kind }], first = Alt+1
+  quickTarget: null, // device id the quick-send file picker is for
+  stagedUrls: new Map(), // staged image File -> object URL for its thumbnail
+  queue: [], // sends waiting their turn: { qid, ids, files }
+  starting: 0, // sends being created right now (they count against the limit)
 };
+
+// Two sends at a time; more wait in line (and can be reordered or removed).
+const MAX_ACTIVE_SENDS = 2;
+let queueSeq = 0;
 
 let ctx = { requestPoll: () => {}, droppedFiles: () => [], libraryChanged: () => {} };
 
@@ -98,7 +110,7 @@ const jobActive = (job) => job.state === "waiting" || job.state === "running";
 
 export function busy() {
   const receiving = (mesh.data?.incoming || []).some((s) => s.state === "accepted" || s.state === "receiving");
-  return [...mesh.jobs.values()].some((j) => jobActive(j) && !j.paused) || mesh.promptQueue.length > 0 || receiving;
+  return [...mesh.jobs.values()].some((j) => jobActive(j) && !j.paused) || mesh.queue.length > 0 || mesh.promptQueue.length > 0 || receiving;
 }
 
 function apply() {
@@ -124,6 +136,7 @@ function apply() {
   renderSendBar();
   if (!state.info.owner) ctx.libraryChanged(inboxFiles());
   if (data.signals) fetchSignals();
+  window.dispatchEvent(new CustomEvent("ot-mesh-state", { detail: data }));
 }
 
 async function fetchSignals() {
@@ -215,6 +228,66 @@ function renderMe() {
   }
 }
 
+// -------------------------------------------------------------- favorites
+
+function loadFavorites() {
+  try {
+    const saved = JSON.parse(localStorage.getItem("ot-favorites") || "[]");
+    return Array.isArray(saved) ? saved.filter((f) => f && typeof f.id === "string" && typeof f.name === "string") : [];
+  } catch {
+    return []; // storage blocked: no favorites
+  }
+}
+
+function saveFavorites() {
+  try {
+    localStorage.setItem("ot-favorites", JSON.stringify(mesh.favorites));
+  } catch {
+    /* storage blocked: favorites last until the page closes */
+  }
+}
+
+const isFavorite = (id) => mesh.favorites.some((f) => f.id === id);
+
+function toggleFavorite(d) {
+  if (isFavorite(d.id)) mesh.favorites = mesh.favorites.filter((f) => f.id !== d.id);
+  else mesh.favorites.push({ id: d.id, name: d.name, form: d.form, platform: d.platform, kind: d.kind });
+  saveFavorites();
+  renderDevices();
+}
+
+/** Nearby devices plus favorites that aren't around: favorites first, online before offline. */
+function gridDevices() {
+  const live = mesh.data.devices;
+  let renamed = false;
+  for (const d of live) {
+    const fav = mesh.favorites.find((f) => f.id === d.id);
+    if (fav && fav.name !== d.name) {
+      Object.assign(fav, { name: d.name, form: d.form, platform: d.platform });
+      renamed = true;
+    }
+  }
+  if (renamed) saveFavorites();
+  const known = new Set(live.map((d) => d.id));
+  const away = mesh.favorites.filter((f) => !known.has(f.id)).map((f) => ({ kind: "app", ...f, online: false }));
+  const rank = (d) => (isFavorite(d.id) ? 0 : 2) + (d.online ? 0 : 1);
+  return [...live, ...away]
+    .map((d, i) => ({ d, i }))
+    .sort((a, b) => rank(a.d) - rank(b.d) || a.i - b.i)
+    .map(({ d }) => d);
+}
+
+/** Online favorites in grid order (Alt+1 is the first). */
+function onlineFavorites() {
+  const online = new Map(onlineDevices().map((d) => [d.id, d]));
+  return gridDevices().filter((d) => isFavorite(d.id) && online.has(d.id));
+}
+
+function quickSend(id) {
+  mesh.quickTarget = id;
+  $("#quick-input").click();
+}
+
 // -------------------------------------------------------------- device grid
 
 function activityFor(deviceId) {
@@ -276,57 +349,115 @@ function buildTile(d) {
       h("span", { class: "device-sub" }),
     ),
     h("span", { class: "device-badge", title: "Paired", "aria-label": "Paired" }, icon("link")),
+    h("span", { class: "device-drop-hint", "aria-hidden": "true" }),
+    h("span", { class: "device-signal", role: "img", hidden: true }),
+    h("button", { class: "icon-btn device-fav", type: "button", "aria-pressed": "false", onclick: () => toggleFavorite(el._device) }, icon("star")),
+    h("button", { class: "icon-btn device-quick", type: "button", hidden: true, onclick: () => quickSend(el.dataset.id) }, icon("send")),
   );
   const button = el.querySelector(".device-button");
-  button.addEventListener("click", () => toggle(d.id));
+  button.addEventListener("click", () => toggle(el.dataset.id));
   // Drop files straight onto a device to send them to it — the AirDrop gesture.
+  // Onto a selected device: to every selected device.
   el.addEventListener("dragover", (event) => {
-    if (!el.dataset.online || ![...(event.dataTransfer?.types || [])].includes("Files")) return;
+    if (!hasFiles(event)) return;
     event.preventDefault();
     event.stopPropagation();
+    if (!el.dataset.online) {
+      event.dataTransfer.dropEffect = "none";
+      return;
+    }
     event.dataTransfer.dropEffect = "copy";
     el.classList.add("is-drop-target");
+    const ids = dropRecipients(el.dataset.id);
+    announceDrop(ids.length > 1 ? `Release to send to ${ids.length} selected devices` : `Release to send to ${deviceName(el.dataset.id)}`);
   });
   el.addEventListener("dragleave", () => el.classList.remove("is-drop-target"));
-  el.addEventListener("drop", async (event) => {
+  el.addEventListener("drop", (event) => {
     el.classList.remove("is-drop-target");
-    if (!el.dataset.online) return;
+    if (!hasFiles(event)) return;
     event.preventDefault();
     event.stopPropagation();
     document.dispatchEvent(new CustomEvent("ot-drop-handled"));
-    // Folders dropped onto a device are zipped on the fly, then sent as one file.
-    try {
-      const { files, folders } = await collectDropped(event);
-      if (!files.length) return;
-      if (folders) {
-        toast(`Zipping ${plural(files.length, "file")} from ${plural(folders, "folder")}…`, { icon: "folder" });
-        const blob = await zipFiles(files);
-        startSend([el.dataset.id], [new File([blob], zipName(files), { type: "application/zip" })]);
-        return;
-      }
-      startSend([el.dataset.id], files.map((entry) => entry.file || entry));
-    } catch {
-      const files = ctx.droppedFiles(event);
-      if (files.length) startSend([el.dataset.id], files);
+    if (!el.dataset.online) {
+      toast(`${el._device.name} isn’t nearby right now — nothing was sent`, { tone: "error", icon: "alert" });
+      return;
     }
+    sendDropped(event, dropRecipients(el.dataset.id));
   });
   return el;
 }
 
+const hasFiles = (event) => [...(event.dataTransfer?.types || [])].includes("Files");
+
+/** Who a drop onto ``id`` goes to: every selected device if ``id`` is one of them. */
+function dropRecipients(id) {
+  const online = new Set(onlineDevices().map((d) => d.id));
+  const selected = [...mesh.selected].filter((s) => online.has(s));
+  return selected.length > 1 && selected.includes(id) ? selected : [id];
+}
+
+function announceDrop(text) {
+  const live = $("#drop-live");
+  if (live && live.textContent !== text) live.textContent = text;
+}
+
+/** Send what was dropped; folders are zipped on the fly and sent as one file. */
+async function sendDropped(event, ids) {
+  let files = [];
+  try {
+    const dropped = await collectDropped(event);
+    if (dropped.folders) {
+      toast(`Zipping ${plural(dropped.files.length, "file")} from ${plural(dropped.folders, "folder")}…`, { icon: "folder" });
+      const blob = await zipFiles(dropped.files);
+      files = [new File([blob], zipName(dropped.files), { type: "application/zip" })];
+    } else {
+      files = dropped.files.map((entry) => entry.file || entry);
+    }
+  } catch {
+    files = ctx.droppedFiles(event);
+  }
+  if (!files.length || !(await confirmRecipients(ids, files))) return;
+  await startSend(ids, files);
+}
+
 function updateTile(el, d) {
+  el._device = d;
   const selected = mesh.selected.has(d.id);
+  const favorite = isFavorite(d.id);
   const status = tileStatus(d);
   el.dataset.online = d.online ? "1" : "";
   el.dataset.kind = d.kind;
   el.classList.toggle("is-selected", selected);
   el.classList.toggle("is-offline", !d.online);
   el.classList.toggle("is-paired", Boolean(d.paired));
+  el.classList.toggle("is-favorite", favorite);
   el.dataset.tone = status.tone;
+  const fav = el.querySelector(".device-fav");
+  fav.setAttribute("aria-pressed", String(favorite));
+  fav.setAttribute("aria-label", favorite ? `Remove ${d.name} from favorites` : `Add ${d.name} to favorites`);
+  fav.title = favorite ? "Favorite" : "Add to favorites";
+  const quick = el.querySelector(".device-quick");
+  quick.hidden = !(favorite && d.online);
+  quick.setAttribute("aria-label", `Quick send to ${d.name}`);
+  quick.title = `Send files to ${d.name}`;
+  const together = selected ? [...mesh.selected].filter((id) => onlineDevices().some((o) => o.id === id)).length : 0;
+  const hint = together > 1 ? `Drop to send to ${together}` : "Drop to send";
+  const hintEl = el.querySelector(".device-drop-hint");
+  if (hintEl.textContent !== hint) hintEl.textContent = hint;
   const button = el.querySelector(".device-button");
   button.disabled = !d.online;
   button.setAttribute("aria-pressed", String(selected));
   button.setAttribute("aria-label", `${d.name}, ${status.text}${d.paired ? ", paired" : ""}${selected ? ", selected" : ""}`);
-  button.title = d.address ? `${d.name} · ${d.address}` : d.name;
+  const signal = el.querySelector(".device-signal");
+  const rtt = d.kind === "app" && d.online && Number.isFinite(d.rtt) ? d.rtt : null;
+  signal.hidden = rtt === null;
+  if (rtt !== null) {
+    const level = rtt < 40 ? "good" : rtt < 150 ? "fair" : "slow";
+    signal.dataset.level = level;
+    signal.setAttribute("aria-label", `Connection: ${level} (${rtt} ms)`);
+    signal.title = `Connection: ${level} · ${rtt} ms round trip`;
+  }
+  button.title = [d.name, d.address, rtt !== null && `${rtt} ms`].filter(Boolean).join(" · ");
   const name = el.querySelector(".device-name");
   if (name.textContent !== d.name) name.textContent = d.name;
   const sub = el.querySelector(".device-sub");
@@ -339,7 +470,7 @@ function updateTile(el, d) {
 
 function renderDevices() {
   const grid = $("#device-grid");
-  const devices = [...mesh.data.devices].sort((a, b) => Number(b.online) - Number(a.online));
+  const devices = gridDevices();
   let cursor = grid.firstElementChild;
   const ids = new Set();
   for (const d of devices) {
@@ -361,6 +492,9 @@ function renderDevices() {
     }
   }
   const online = devices.filter((d) => d.online);
+  const everyone = $("#everyone-target");
+  everyone.dataset.ready = online.length >= 2 ? "1" : "";
+  $("#everyone-count").textContent = plural(online.length, "device");
   $("#nearby-empty").hidden = devices.length > 0;
   grid.hidden = devices.length === 0;
   $("#nearby-meta").textContent = online.length ? plural(online.length, "device") : "";
@@ -517,6 +651,7 @@ function renderSendBar() {
   bar.hidden = !files.length && !ids.length;
   document.body.classList.toggle("has-send-bar", !bar.hidden);
   if (bar.hidden) return;
+  renderStagedThumbs(files);
   const size = files.reduce((sum, f) => sum + f.size, 0);
   $("#send-bar-files").textContent = files.length
     ? files.length === 1
@@ -532,25 +667,88 @@ function renderSendBar() {
   go.querySelector("span").textContent = ids.length > 1 ? `Send to ${ids.length}` : "Send";
 }
 
+/** Sending to 3+ devices, or to everyone nearby, asks first. */
+async function confirmRecipients(ids, files) {
+  const online = onlineDevices();
+  const everyone = ids.length >= 2 && ids.length === online.length;
+  if (ids.length < 3 && !everyone) return true;
+  return confirmDialog({
+    title: everyone ? `Send to everyone nearby?` : `Send to ${ids.length} devices?`,
+    text: `${plural(files.length, "file")} (${formatBytes(files.reduce((s, f) => s + f.size, 0))}) will be offered to:`,
+    items: ids.map(deviceName),
+    confirm: `Send to ${ids.length}`,
+  });
+}
+
+/** Up to three thumbnails of the staged images (object URLs, revoked when unstaged). */
+function renderStagedThumbs(files) {
+  const images = files.filter((f) => isImage(f) && f.size <= 25_000_000).slice(0, 3);
+  for (const [file, url] of mesh.stagedUrls) {
+    if (!images.includes(file)) {
+      URL.revokeObjectURL(url);
+      mesh.stagedUrls.delete(file);
+    }
+  }
+  const box = $("#send-bar-thumbs");
+  const sig = images.map((f) => `${f.name}:${f.size}`).join("|");
+  if (box.dataset.sig === sig) return;
+  box.dataset.sig = sig;
+  box.replaceChildren(
+    ...images.map((file) => {
+      if (!mesh.stagedUrls.has(file)) mesh.stagedUrls.set(file, URL.createObjectURL(file));
+      return h("img", { src: mesh.stagedUrls.get(file), alt: "" });
+    }),
+  );
+}
+
 async function sendStaged() {
   const ids = [...mesh.selected];
   const files = [...mesh.staged];
   if (!ids.length || !files.length) return;
-  const online = onlineDevices();
-  const everyone = ids.length >= 2 && ids.length === online.length;
-  if (ids.length >= 3 || everyone) {
-    const ok = await confirmDialog({
-      title: everyone ? `Send to everyone nearby?` : `Send to ${ids.length} devices?`,
-      text: `${plural(files.length, "file")} (${formatBytes(files.reduce((s, f) => s + f.size, 0))}) will be offered to:`,
-      items: ids.map(deviceName),
-      confirm: `Send to ${ids.length}`,
-    });
-    if (!ok) return;
-  }
+  if (!(await confirmRecipients(ids, files))) return;
   await startSend(ids, files);
 }
 
-async function startSend(ids, files) {
+function activeSends() {
+  return [...mesh.jobs.values()].filter(jobActive).length + mesh.starting;
+}
+
+/** Start the next queued sends while there's room. */
+function pumpQueue() {
+  while (mesh.queue.length && activeSends() < MAX_ACTIVE_SENDS) {
+    const next = mesh.queue.shift();
+    startSend(next.ids, next.files, { queued: true });
+  }
+  renderJobs();
+}
+
+function moveQueued(qid, delta) {
+  const i = mesh.queue.findIndex((q) => q.qid === qid);
+  const j = i + delta;
+  if (i < 0 || j < 0 || j >= mesh.queue.length) return;
+  [mesh.queue[i], mesh.queue[j]] = [mesh.queue[j], mesh.queue[i]];
+  renderJobs();
+  // Keep keyboard focus on the same control after the reorder.
+  $(`#job-list [data-job="q:${qid}"] .queue-${delta < 0 ? "up" : "down"}`)?.focus();
+}
+
+function removeQueued(qid) {
+  mesh.queue = mesh.queue.filter((q) => q.qid !== qid);
+  renderJobs();
+}
+
+async function startSend(ids, files, { queued = false } = {}) {
+  if (!queued && (mesh.queue.length || activeSends() >= MAX_ACTIVE_SENDS)) {
+    mesh.queue.push({ qid: ++queueSeq, ids, files });
+    mesh.staged = [];
+    mesh.selected.clear();
+    renderDevices();
+    renderSendBar();
+    renderJobs();
+    toast(`Queued — it starts when one of the ${MAX_ACTIVE_SENDS} sends in progress is done`, { icon: "clock" });
+    return;
+  }
+  mesh.starting += 1;
   let data;
   try {
     ({ data } = await api("/api/send", {
@@ -559,10 +757,20 @@ async function startSend(ids, files) {
     }));
   } catch (err) {
     toast(err.message, { tone: "error", icon: "alert" });
+    pumpQueue();
     return;
+  } finally {
+    mesh.starting -= 1;
   }
   const job = { id: data.job.id, files, targets: ids, state: "waiting", index: 0, uploaded: 0, speed: 0, xhr: null, finishedAt: 0 };
   mesh.jobs.set(job.id, job);
+  const picture = files.find((f) => isImage(f) && f.size <= 25_000_000);
+  if (picture) {
+    makeThumb(picture).then((thumb) => {
+      job.thumb = thumb;
+      scheduleJobRender();
+    });
+  }
   mesh.staged = [];
   mesh.selected.clear();
   mesh.data.outgoing.push(data.job);
@@ -714,6 +922,10 @@ function finishJob(job, outcome) {
   const declined = targets.filter((t) => t.state === "declined");
   const failed = targets.filter((t) => ["failed", "expired", "canceled"].includes(t.state));
   const done = targets.filter((t) => t.state === "done");
+  if (failed.length || (outcome === "nobody" && declined.length)) {
+    const who = (failed[0] || declined[0]).name;
+    notify(failed.length ? `Couldn’t send to ${who}` : `${who} declined`, { body: (failed[0] || declined[0]).reason || "", tag: `job-${job.id}` });
+  }
   if (outcome === "nobody") {
     if (declined.length === targets.length && targets.length) {
       toast(targets.length === 1 ? `${targets[0].name} declined — you can ask again` : "Everyone declined — you can ask again", {
@@ -724,11 +936,14 @@ function finishJob(job, outcome) {
       });
     } else if (failed.length) toast(failed[0].reason || `Couldn’t send to ${failed[0].name}`, { tone: "error", icon: "alert" });
   } else if (done.length && !failed.length && !declined.length) {
+    notify(done.length === 1 ? `Sent to ${done[0].name}` : `Sent to ${plural(done.length, "device")}`, { tag: `job-${job.id}` });
     toast(done.length === 1 ? `Sent to ${done[0].name}` : `Sent to ${plural(done.length, "device")}`, { tone: "success", icon: "check" });
     const secs = job.startedAt ? Math.max(0.1, (performance.now() - job.startedAt) / 1000) : 0;
     const bytes = job.files.reduce((n, f) => n + f.size, 0);
     const title = job.files.length === 1 ? job.files[0].name : plural(job.files.length, "file");
-    addHistory({ name: title, size: bytes, direction: "send", status: "done", speed: secs ? bytes / secs : 0, samples: (job.samples || []).slice(-30) });
+    // The app records its own window's transfers; a visitor's browser keeps its own list.
+    if (state.info.owner) saveThumb(job.id, job.thumb);
+    else addHistory({ name: title, size: bytes, direction: "send", status: "done", speed: secs ? bytes / secs : 0, samples: (job.samples || []).slice(-30), thumb: job.thumb || undefined });
     window.dispatchEvent(new CustomEvent("ot-history"));
   } else if (declined.length) {
     toast(declined.length === 1 ? `${declined[0].name} declined — retry to ask again` : `${declined.length} declined — retry to ask again`, {
@@ -738,6 +953,7 @@ function finishJob(job, outcome) {
       duration: 6000,
     });
   }
+  setTimeout(pumpQueue, 0); // a slot is free
   // Bound retained jobs (each holds File blobs): keep retryable ones for the
   // user to dismiss, evict the oldest finished beyond 20.
   const finished = [...mesh.jobs.values()].filter((j) => j.state === "finished");
@@ -923,6 +1139,7 @@ async function cancelJob(job) {
   } catch {
     /* already gone */
   }
+  pumpQueue();
   ctx.requestPoll();
 }
 
@@ -962,7 +1179,7 @@ async function retryJob(job, onlyTarget = null) {
     });
     const files = job.files;
     mesh.jobs.delete(job.id);
-    const fresh = { id: data.job.id, files, targets: ids, state: "waiting", index: 0, uploaded: 0, speed: 0, xhr: null, finishedAt: 0, retried: true };
+    const fresh = { id: data.job.id, files, targets: ids, state: "waiting", index: 0, uploaded: 0, speed: 0, xhr: null, finishedAt: 0, retried: true, thumb: job.thumb };
     mesh.jobs.set(fresh.id, fresh);
     mesh.data.outgoing.push(data.job);
     toast(ids.length === 1 ? `Asking ${deviceName(ids[0])} again…` : `Asking ${ids.length} devices again…`, { icon: "retry" });
@@ -985,6 +1202,20 @@ function scheduleJobRender() {
     jobRenderQueued = false;
     renderJobs();
   });
+}
+
+// How each delivery travels (see mesh._path).
+const PATH_HINT = {
+  app: "Straight to that device’s app",
+  direct: "Browser to browser, straight over your network",
+  via: "To a browser, through the app it’s connected to",
+  local: "To a browser connected to this device",
+};
+
+function pathLabel(path, target) {
+  if (path === "via") return `Via ${target.via_name || "its app"}`;
+  if (path === "local") return "Via this device";
+  return "Direct";
 }
 
 const TARGET_TEXT = {
@@ -1040,7 +1271,7 @@ function renderJobs() {
       h(
         "div",
         { class: "job-head" },
-        h("span", { class: "thumb", "aria-hidden": "true" }, icon("send")),
+        h("span", { class: "thumb", "aria-hidden": "true" }, job.thumb ? h("img", { class: "is-loaded", src: job.thumb, alt: "" }) : icon("send")),
         mainCol,
         h(
           "div",
@@ -1073,11 +1304,13 @@ function renderJobs() {
           else if (t.direct === "sending") text = `Directly · ${Math.floor(pct)}%`;
           else if (t.direct === "done") text = "Delivered directly";
           const canRetryTarget = RETRYABLE.has(original.state) && onlineDevices().some((d) => d.id === original.id);
+          const path = t.direct ? "direct" : original.path || "app";
           return h(
             "li",
-            { class: "job-target", dataset: { state: t.state } },
+            { class: "job-target", dataset: { state: t.state, path } },
             h("span", { class: "mini-avatar", "aria-hidden": "true" }, icon(deviceIcon(t))),
             h("span", { class: "job-target-name" }, t.name),
+            h("span", { class: "job-target-path", title: PATH_HINT[path] }, pathLabel(path, original)),
             h("span", { class: "job-target-state" }, text),
             canRetryTarget &&
               h(
@@ -1097,6 +1330,37 @@ function renderJobs() {
       ),
     );
   }
+  mesh.queue.forEach((q, i) => {
+    const key = `q:${q.qid}`;
+    keep.add(key);
+    let row = list.querySelector(`[data-job="${CSS.escape(key)}"]`);
+    if (!row) {
+      row = h("li", { class: "job is-queued is-entering", dataset: { job: key } });
+    }
+    list.append(row); // queued sends always come after the ones in progress, in order
+    const title = q.files.length === 1 ? q.files[0].name : plural(q.files.length, "file");
+    const to = q.ids.map(deviceName);
+    row.replaceChildren(
+      h(
+        "div",
+        { class: "job-head" },
+        h("span", { class: "thumb", "aria-hidden": "true" }, icon("clock")),
+        h(
+          "div",
+          { class: "row-main" },
+          h("span", { class: "row-title", title }, title),
+          h("span", { class: "row-sub" }, `Queued · ${i + 1} of ${mesh.queue.length} · to ${to.length > 2 ? `${to.length} devices` : to.join(" and ")}`),
+        ),
+        h(
+          "div",
+          { class: "row-actions is-visible" },
+          h("button", { class: "icon-btn queue-up", type: "button", disabled: i === 0, title: "Move up", "aria-label": `Move ${title} up`, onclick: () => moveQueued(q.qid, -1) }, icon("up")),
+          h("button", { class: "icon-btn queue-down", type: "button", disabled: i === mesh.queue.length - 1, title: "Move down", "aria-label": `Move ${title} down`, onclick: () => moveQueued(q.qid, 1) }, icon("down")),
+          h("button", { class: "icon-btn", type: "button", title: "Remove", "aria-label": `Remove ${title} from the queue`, onclick: () => removeQueued(q.qid) }, icon("x")),
+        ),
+      ),
+    );
+  });
   for (const row of [...list.children]) if (!keep.has(row.dataset.job)) row.remove();
   renderIncomingRows();
   const any = list.children.length + $("#incoming-list").children.length;
@@ -1123,10 +1387,17 @@ function handleIncoming() {
     if (s.state === "pending" && !mesh.prompted.has(s.id)) {
       mesh.prompted.add(s.id);
       mesh.promptQueue.push(s.id);
+      const count = s.files.length === 1 ? "a file" : `${s.files.length} files`;
+      notify(`${s.from.name} wants to send you ${count}`, {
+        body: s.files.map((f) => f.name).slice(0, 3).join(", ") + (s.files.length > 3 ? "…" : ""),
+        tag: `offer-${s.id}`,
+      });
     }
     if (before && before !== s.state) {
       const from = s.from.name;
       if (s.state === "done") {
+        const what = s.files.length === 1 ? `“${s.files[0].saved_name || s.files[0].name}”` : `${s.files.length} files`;
+        notify(`Received ${what} from ${from}`, { tag: `in-${s.id}` });
         toast(s.files.length === 1 ? `Received “${s.files[0].saved_name || s.files[0].name}” from ${from}` : `Received ${s.files.length} files from ${from}`, {
           tone: "success",
           icon: "check",
@@ -1134,11 +1405,22 @@ function handleIncoming() {
           action: !owner && s.files.length === 1 ? { label: "Save", run: () => saveInboxFile(s.files[0].saved_name || s.files[0].name) } : undefined,
         });
         const title = s.files.length === 1 ? s.files[0].saved_name || s.files[0].name : plural(s.files.length, "file");
-        addHistory({ name: `${title} — from ${from}`, size: s.total, direction: "receive", status: "done", speed: 0 });
-        window.dispatchEvent(new CustomEvent("ot-history"));
+        const entry = { name: `${title} — from ${from}`, size: s.total, direction: "receive", status: "done", speed: 0 };
+        const picture = s.files.find((f) => isImage(f) && f.size <= 25_000_000);
+        const name = picture && (picture.saved_name || picture.name);
+        const url = name && (owner ? `/files/${encodeURIComponent(name)}?inline=1` : `/api/inbox/files/${encodeURIComponent(name)}?inline=1`);
+        if (!owner) {
+          (url ? makeThumb(url) : Promise.resolve(null)).then((thumb) => {
+            addHistory({ ...entry, thumb: thumb || undefined });
+            window.dispatchEvent(new CustomEvent("ot-history"));
+          });
+        }
         ctx.libraryChanged(null);
       } else if (s.state === "canceled" && before !== "pending") toast(`${from} stopped sending`, { tone: "error", icon: "x" });
-      else if (s.state === "failed") toast(`Couldn’t receive files from ${from}`, { tone: "error", icon: "alert" });
+      else if (s.state === "failed") {
+        notify(`Couldn’t receive files from ${from}`, { body: s.files.find((f) => f.error)?.error || s.reason || "", tag: `in-${s.id}` });
+        toast(`Couldn’t receive files from ${from}`, { tone: "error", icon: "alert" });
+      }
     }
     mesh.seen.set(s.id, s.state);
   }
@@ -1197,9 +1479,27 @@ function fillPrompt(s) {
   $("#incoming-sub").textContent = `${formatBytes(s.total)}${via}${s.paired ? " · paired" : ""}`;
   const shown = s.files.slice(0, 5);
   $("#incoming-files").replaceChildren(
-    ...shown.map((f) => h("li", {}, h("span", { class: "incoming-file-name" }, f.name), h("span", { class: "incoming-file-size" }, formatBytes(f.size)))),
+    ...shown.map((f) =>
+      h(
+        "li",
+        {},
+        h("span", { class: "incoming-file-name" }, f.name),
+        f.duplicate && h("span", { class: "incoming-file-dupe" }, "Already here"),
+        h("span", { class: "incoming-file-size" }, formatBytes(f.size)),
+      ),
+    ),
     ...(s.files.length > shown.length ? [h("li", { class: "muted" }, `and ${s.files.length - shown.length} more`)] : []),
   );
+  // Same name and size as a file already on this device: keep both, skip or replace.
+  const dupes = s.files.filter((f) => f.duplicate).length;
+  $("#incoming-dupes").hidden = dupes === 0;
+  if (dupes) {
+    const one = dupes === 1;
+    $("#incoming-dupes-text").textContent = `${one ? "1 of these files is" : `${dupes} of these files are`} already here (same name and size).`;
+    $("#dupes-skip").textContent = one ? "Skip it" : "Skip them";
+    $("#dupes-replace").textContent = one ? "Replace it" : "Replace them";
+    for (const radio of document.querySelectorAll("input[name=dupes]")) radio.checked = radio.value === "rename";
+  }
   $("#incoming-accept").disabled = false;
   $("#incoming-decline").disabled = false;
   updatePromptCountdown(s);
@@ -1217,8 +1517,9 @@ async function decide(accept) {
   if (!id) return;
   $("#incoming-accept").disabled = true;
   $("#incoming-decline").disabled = true;
+  const duplicates = $("#incoming-dupes").hidden ? "rename" : document.querySelector("input[name=dupes]:checked")?.value || "rename";
   try {
-    await api(`/api/incoming/${encodeURIComponent(id)}/${accept ? "accept" : "decline"}`, { method: "POST" });
+    await api(`/api/incoming/${encodeURIComponent(id)}/${accept ? "accept" : "decline"}`, { method: "POST", json: accept ? { duplicates } : {} });
   } catch (err) {
     toast(err.message, { tone: "error", icon: "alert" });
   }
@@ -1287,15 +1588,44 @@ async function stopIncoming(id) {
 
 // ------------------------------------------------------------------ dialogs
 
+let confirmAnswer = null; // resolves the question on screen
+
+function answerConfirm(ok) {
+  const resolve = confirmAnswer;
+  confirmAnswer = null;
+  resolve?.(ok);
+}
+
 export function confirmDialog({ title, text, items = [], confirm = "OK" }) {
   const dialog = $("#confirm-dialog");
+  if (!dialog.dataset.wired) {
+    // Answer from the button press itself (sync): a "close" event arrives later and
+    // could otherwise land on the next question when two come in quick succession.
+    dialog.dataset.wired = "1";
+    dialog.querySelector("form").addEventListener("submit", (event) => answerConfirm(event.submitter?.value === "ok"));
+    dialog.addEventListener("cancel", () => answerConfirm(false));
+    dialog.addEventListener("close", () => !dialog.open && answerConfirm(dialog.returnValue === "ok"));
+  }
+  answerConfirm(false); // a question still waiting (shouldn't happen) is a no
   $("#confirm-title").textContent = title;
   $("#confirm-text").textContent = text;
   $("#confirm-items").replaceChildren(...items.map((name) => h("li", {}, name)));
   $("#confirm-ok").textContent = confirm;
-  dialog.showModal();
+  dialog.returnValue = "";
   return new Promise((resolve) => {
-    dialog.addEventListener("close", () => resolve(dialog.returnValue === "ok"), { once: true });
+    confirmAnswer = resolve;
+    if (!dialog.open) dialog.showModal();
+  });
+}
+
+/** Text that looks like a password, code, card number or key asks first. */
+export async function confirmSensitive(text, { action = "Send" } = {}) {
+  const reason = looksSensitive(text);
+  if (!reason) return true;
+  return confirmDialog({
+    title: `This looks like ${SENSITIVE_REASONS[reason]}`,
+    text: `Make sure you trust everyone who’ll get it. ${action} it anyway?`,
+    confirm: `${action} anyway`,
   });
 }
 
@@ -1612,6 +1942,7 @@ export function initNearby(context) {
     renderSendBar();
   });
   $("#send-go").addEventListener("click", sendStaged);
+  setupQuickSend();
   $("#send-clear").addEventListener("click", () => {
     mesh.staged = [];
     mesh.selected.clear();
@@ -1632,6 +1963,52 @@ export function initNearby(context) {
       renderIncomingRows();
     }
   }, 2000);
+}
+
+function setupQuickSend() {
+  const everyone = $("#everyone-target");
+  everyone.addEventListener("dragover", (event) => {
+    if (!hasFiles(event)) return;
+    event.preventDefault();
+    event.stopPropagation();
+    event.dataTransfer.dropEffect = "copy";
+    everyone.classList.add("is-drop-target");
+    announceDrop(`Release to send to everyone nearby (${plural(onlineDevices().length, "device")})`);
+  });
+  everyone.addEventListener("dragleave", () => everyone.classList.remove("is-drop-target"));
+  everyone.addEventListener("drop", (event) => {
+    everyone.classList.remove("is-drop-target");
+    if (!hasFiles(event)) return;
+    event.preventDefault();
+    event.stopPropagation();
+    document.dispatchEvent(new CustomEvent("ot-drop-handled"));
+    sendDropped(event, onlineDevices().map((d) => d.id));
+  });
+  document.addEventListener("ot-drag-end", () => announceDrop(""));
+
+  const input = $("#quick-input");
+  input.addEventListener("change", () => {
+    const files = [...(input.files || [])];
+    const id = mesh.quickTarget;
+    input.value = "";
+    mesh.quickTarget = null;
+    if (!files.length || !id) return;
+    if (!onlineDevices().some((d) => d.id === id)) {
+      toast(`${deviceName(id)} isn’t nearby right now — nothing was sent`, { tone: "error", icon: "alert" });
+      return;
+    }
+    startSend([id], files);
+  });
+  // Alt+1…9: quick send to the first…ninth favorite that's nearby.
+  document.addEventListener("keydown", (event) => {
+    const digit = /^Digit([1-9])$/.exec(event.code);
+    if (!digit || !event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) return;
+    if (event.target.closest?.("input, textarea, [contenteditable]") || document.querySelector("dialog[open]")) return;
+    const target = onlineFavorites()[Number(digit[1]) - 1];
+    if (!target) return;
+    event.preventDefault();
+    quickSend(target.id);
+  });
 }
 
 export function isDeviceMode() {

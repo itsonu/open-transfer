@@ -10,13 +10,12 @@ from __future__ import annotations
 import json
 import re
 import urllib.request
-from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
 
 from open_transfer import network
-from tests.e2e.test_ui import Server, _start, sync_api
+from tests.e2e.test_ui import Server, sync_api
 
 pytestmark = pytest.mark.e2e
 expect = sync_api.expect
@@ -25,38 +24,6 @@ expect = sync_api.expect
 def _api(server: Server, path: str) -> dict:  # type: ignore[type-arg]
     with urllib.request.urlopen(f"{server.url}{path}", timeout=5) as res:
         return json.loads(res.read())  # type: ignore[no-any-return]
-
-
-@pytest.fixture
-def devices(tmp_path: Path) -> Iterator[list[Server]]:
-    """Three apps: Alpha, then Bravo and Charlie which connect to Alpha."""
-    started: list[Iterator[Server]] = []
-    servers: list[Server] = []
-    gen = _start(tmp_path, name="Alpha", owner=True, host="0.0.0.0")
-    started.append(gen)
-    alpha = next(gen)
-    servers.append(alpha)
-    for name in ("Bravo", "Charlie"):
-        gen = _start(
-            tmp_path, "--peer", f"127.0.0.1:{alpha.url.rsplit(':', 1)[1]}", name=name, owner=True
-        )
-        started.append(gen)
-        servers.append(next(gen))
-    yield servers
-    for gen in started:
-        for _ in gen:  # run each generator's cleanup
-            pass
-
-
-@pytest.fixture
-def second_page(browser):  # type: ignore[no-untyped-def]
-    context = browser.new_context()
-    pg = context.new_page()
-    errors: list[str] = []
-    pg.on("pageerror", lambda exc: errors.append(str(exc)))
-    yield pg
-    context.close()
-    assert errors == [], f"browser errors: {errors}"
 
 
 def tile(pg, name: str):  # type: ignore[no-untyped-def]
@@ -74,7 +41,7 @@ def test_send_to_a_chosen_device_and_accept(
 
     sample = tmp_path / "Holiday photo.jpg"
     sample.write_bytes(b"x" * 300_000)
-    tile(page, "Bravo").locator("button").click()
+    tile(page, "Bravo").locator(".device-button").click()
     expect(tile(page, "Bravo")).to_have_class(re.compile(r"\bis-selected\b"))
     expect(page.locator("#send-bar-to")).to_have_text("To Bravo")
     expect(page.locator("#send-go")).to_be_disabled()
@@ -112,7 +79,7 @@ def test_declining_tells_the_sender(
     second_page.goto(bravo.url)
     sample = tmp_path / "nope.txt"
     sample.write_bytes(b"nope")
-    tile(page, "Bravo").locator("button").click()
+    tile(page, "Bravo").locator(".device-button").click()
     page.set_input_files("#file-input", str(sample))
     page.click("#send-go")
     second_page.locator("#incoming-decline").click(timeout=10_000)
@@ -224,7 +191,7 @@ def test_phone_browser_sends_through_the_app(devices: list[Server], browser, sec
         second_page.goto(bravo.url)
         expect(tile(second_page, "Galaxy phone")).to_be_visible(timeout=15_000)
 
-        tile(phone, "Bravo").locator("button").click()
+        tile(phone, "Bravo").locator(".device-button").click()
         phone.set_input_files(
             "#file-input",
             files=[{"name": "IMG_0001.jpg", "mimeType": "image/jpeg", "buffer": b"jpeg" * 1000}],
@@ -273,7 +240,7 @@ def test_browsers_send_to_each_other_directly(
         ipad.goto(url)
         expect(tile(phone, "iPad")).to_be_visible(timeout=10_000)
         payload = bytes(range(256)) * 4000  # ~1 MB, several data-channel chunks
-        tile(phone, "iPad").locator("button").click()
+        tile(phone, "iPad").locator(".device-button").click()
         phone.set_input_files(
             "#file-input",
             files=[{"name": "photo.heic", "mimeType": "image/heic", "buffer": payload}],

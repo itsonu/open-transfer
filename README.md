@@ -145,7 +145,7 @@ Your browser opens and the terminal shows the address and a QR code:
 ## How it works for your users
 
 1. **Open** Open Transfer on your devices. Each one shows the others under **Nearby devices** within a second or two.
-2. **Pick** who gets the files — tap one device, several, or **Select all** — and choose or drop files. (Or drop files straight onto a device.) Sending to everyone asks you to confirm first.
+2. **Pick** who gets the files — tap one device, several, or **Select all** — and choose or drop files. (Or drop files straight onto a device, onto any selected device to send to all of them, or onto **Everyone nearby**.) Sending to everyone asks you to confirm first. Star the devices you use most: favorites stay first and get a one-tap send button (**Alt+1…9**).
 3. **Accept** on the other side: "Gaming PC wants to send you 3 files". Paired devices skip this step.
 
 Any device can send to any other — there's no host or server role. A phone without the app scans the QR code under **Add device** and joins from its browser.
@@ -178,6 +178,10 @@ Any device can send to any other — there's no host or server role. A phone wit
 - Clean, native-feeling interface with automatic **dark mode**, fluid motion that respects **Reduce Motion**, and layouts tuned for phones, tablets and desktops
 - Native windows on Windows and macOS, a native shell on Android (file picker, QR scanner, notifications)
 - Clear states everywhere: looking-for-devices radar, waiting / accepted / sending / delivered per device, reconnecting indicator, errors with reasons
+- Preview photos, videos, audio, PDFs and text in the app; a grid view with filters; a ⋯ menu per file (copy, share, open, show in folder)
+- Every file checked with SHA-256 between apps; choose to keep both, skip or replace files you already have; notifications in the background
+- Activity: searchable history of what was sent and received, grouped by day; a send queue; connection quality per device
+- Clipboard: paste to send, Ctrl/⌘+Shift+V to send what you copied, and clipboard sharing between paired devices (both sides opt in; passwords and codes are never saved)
 - Accessible: keyboard operable, visible focus, screen-reader labels, live regions
 - Works fully **offline on a LAN** — no CDNs, fonts or trackers
 

@@ -10,7 +10,6 @@ from __future__ import annotations
 import hashlib
 import io
 import json
-import mimetypes
 import time
 from collections.abc import Callable
 from typing import Any
@@ -23,16 +22,18 @@ from flask import (
     abort,
     jsonify,
     request,
-    send_file,
     session,
     stream_with_context,
 )
 from werkzeug.exceptions import ClientDisconnected
 
 from open_transfer.archive import zip_stream
+from open_transfer.clipboard import MAX_IMAGE_BYTES as CLIP_MAX_IMAGE
 from open_transfer.devices import clean_form, clean_name, clean_platform, valid_id
 from open_transfer.mesh import P2P, Mesh, MeshError, Viewer
 from open_transfer.security import log_safe
+from open_transfer.sensitive import REASONS, looks_sensitive
+from open_transfer.serve import serve_file
 from open_transfer.storage import IncompleteUpload, StorageError
 
 PUBLIC_P2P_ENDPOINTS = {
@@ -93,6 +94,11 @@ def register(
             request.path,
             request.get_data(cache=True),
         )
+
+    def too_big_for_clip() -> None:
+        # Base64 of a 10 MB image plus the JSON around it.
+        if (request.content_length or 0) > CLIP_MAX_IMAGE * 4 // 3 + 64 * 1024:
+            raise MeshError(413, "too_large", "That is too big to share (10 MB max).")
 
     def owner_only() -> Viewer:
         current = viewer()
@@ -202,6 +208,15 @@ def register(
             raise
         return jsonify({"file": saved.to_dict()}), 201
 
+    @app.post(f"{P2P}/offers/<session_id>/files/<int:index>/verify")
+    def p2p_offer_verify(session_id: str, index: int) -> Response:
+        claimed = body_json().get("sha256")
+        if not isinstance(claimed, str) or len(claimed) != 64:
+            raise MeshError(400, "bad_request", "Expected a SHA-256 checksum.")
+        return jsonify(
+            mesh.verify_file(session_id, index, request.headers.get("X-OT-Secret", ""), claimed)
+        )
+
     @app.get(f"{P2P}/offers/<session_id>/files/<int:index>/status")
     def p2p_offer_file_status(session_id: str, index: int) -> Response:
         """Bytes staged for one incoming file (lets senders resume mid-file)."""
@@ -219,6 +234,15 @@ def register(
     def p2p_offer_cancel(session_id: str) -> Response:
         mesh.cancel_incoming(session_id, None, secret=request.headers.get("X-OT-Secret", ""))
         return jsonify({"ok": True})
+
+    @app.post(f"{P2P}/clip")
+    def p2p_clip() -> Response:
+        too_big_for_clip()
+        data = body_json()
+        sender = data.get("from")
+        sender_id = str(sender.get("id", "")) if isinstance(sender, dict) else ""
+        verified = request.headers.get("X-OT-From") == sender_id and signed_by(sender_id)
+        return jsonify(mesh.handle_clip(sender_id, verified, data))
 
     @app.post(f"{P2P}/signal")
     def p2p_signal() -> Response:
@@ -241,6 +265,102 @@ def register(
         )
 
     # ================================================================ web UI
+
+    # -------------------------------------------------------------- history
+
+    @app.get("/api/history")
+    def ui_history() -> Response:
+        owner_only()
+        args = request.args
+        try:
+            since = float(args.get("since") or 0)
+            limit = max(1, min(500, int(args.get("limit") or 200)))
+        except ValueError:
+            raise MeshError(400, "bad_request", "since and limit are numbers.") from None
+        entries = mesh.history.query(
+            q=str(args.get("q", ""))[:200],
+            device=str(args.get("device", ""))[:64],
+            direction=str(args.get("direction", ""))[:16],
+            status=str(args.get("status", ""))[:16],
+            kind=str(args.get("kind", ""))[:16],
+            since=since,
+            limit=limit,
+        )
+        return jsonify({"entries": entries, "latest": mesh.history.latest()})
+
+    @app.delete("/api/history")
+    def ui_history_clear() -> Response:
+        owner_only()
+        mesh.history.clear()
+        return jsonify({"ok": True})
+
+    # ------------------------------------------------------------ clipboard
+
+    @app.get("/api/clipboard")
+    def ui_clipboard() -> Response:
+        owner_only()
+        return jsonify(
+            {
+                "items": mesh.clipboard.items(str(request.args.get("q", ""))[:200]),
+                "settings": mesh.clipboard.settings(),
+                "devices": mesh.clipboard_devices(),
+            }
+        )
+
+    @app.put("/api/clipboard/settings")
+    def ui_clipboard_settings() -> Response:
+        owner_only()
+        data = body_json()
+        settings = mesh.set_clipboard_settings(
+            allowed=data.get("allowed"),
+            max_items=data.get("max_items"),
+            max_age_days=data.get("max_age_days"),
+        )
+        return jsonify({"settings": settings, "devices": mesh.clipboard_devices()})
+
+    @app.post("/api/clipboard")
+    def ui_clipboard_share() -> Response:
+        owner_only()
+        too_big_for_clip()
+        data = body_json()
+        from open_transfer.mesh import _clean_clip
+
+        kind, text, raw, mime = _clean_clip(data)
+        reason = looks_sensitive(text) if kind == "text" else None
+        if reason and data.get("confirm_sensitive") is not True:
+            response = jsonify(
+                {
+                    "error": {
+                        "code": "sensitive",
+                        "reason": reason,
+                        "message": f"This looks like {REASONS[reason]}. Share it anyway?",
+                    }
+                }
+            )
+            response.status_code = 409
+            return response
+        return jsonify(mesh.share_clipboard(kind=kind, text=text, data=raw, mime=mime))
+
+    @app.delete("/api/clipboard")
+    def ui_clipboard_clear() -> Response:
+        owner_only()
+        mesh.clipboard.clear()
+        return jsonify({"ok": True})
+
+    @app.delete("/api/clipboard/<item_id>")
+    def ui_clipboard_delete(item_id: str) -> Response:
+        owner_only()
+        if not mesh.clipboard.delete(item_id):
+            raise MeshError(404, "not_found", "That item isn’t in the clipboard history.")
+        return jsonify({"ok": True})
+
+    @app.get("/api/clipboard/<item_id>/image")
+    def ui_clipboard_image(item_id: str) -> Response:
+        owner_only()
+        path = mesh.clipboard.image_path(item_id)
+        if path is None:
+            raise MeshError(404, "not_found", "That image isn’t in the clipboard history.")
+        return serve_file(path, inline=True)
 
     @app.get("/api/state")
     def ui_state() -> Response:
@@ -392,7 +512,11 @@ def register(
     @app.post("/api/incoming/<session_id>/<any(accept, decline):decision>")
     def ui_decide(session_id: str, decision: str) -> Response:
         current = viewer()
-        session = mesh.decide(session_id, current, decision == "accept")
+        choice = request.get_json(silent=True)
+        duplicates = choice.get("duplicates", "rename") if isinstance(choice, dict) else "rename"
+        session = mesh.decide(
+            session_id, current, decision == "accept", duplicates=str(duplicates or "rename")
+        )
         log_name = log_safe(session.origin.get("name"))
         app.logger.debug("%s %s from %s", decision, session_id, log_name)
         return jsonify({"state": session.state})
@@ -413,18 +537,7 @@ def register(
     @app.get("/api/inbox/files/<path:name>")
     def ui_inbox_file(name: str) -> Response:
         store = visitor_inbox()
-        path = store.resolve(name)
-        mime = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
-        response = send_file(
-            path,
-            mimetype=mime,
-            as_attachment=True,
-            download_name=path.name,
-            conditional=True,
-            max_age=0,
-        )
-        response.headers["Content-Security-Policy"] = file_csp
-        return response
+        return serve_file(store.resolve(name), inline=request.args.get("inline") == "1")
 
     @app.delete("/api/inbox/files/<path:name>")
     def ui_inbox_delete(name: str) -> Response:
