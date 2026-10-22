@@ -1949,13 +1949,14 @@ body.has-send-bar .toasts {
 
 .job-target {
   display: grid;
-  grid-template-columns: 24px minmax(0, 1fr) auto;
+  /* avatar · name · path · state · retry (when there is one) */
+  grid-template-columns: 24px minmax(0, 1fr) auto auto auto;
   align-items: center;
   gap: 4px 10px;
 }
 
 .job-target .progress {
-  grid-column: 2 / 4;
+  grid-column: 2 / -1;
   margin: 0;
 }
 
@@ -3187,4 +3188,81 @@ body.has-send-bar .toasts {
 .clip-note {
   margin-top: 14px;
   font-size: 13px;
+}
+
+/* ------------------------------------------------- activity, queue (phase D) */
+
+.history-filters {
+  margin-bottom: 10px;
+}
+
+.history-day {
+  padding: 12px 14px 4px;
+  color: var(--text-2);
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+}
+
+.history-day + .row::before {
+  display: none;
+}
+
+.history-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+}
+
+.history-head .row-title {
+  flex: 0 1 auto;
+}
+
+.history-who {
+  flex: none;
+  color: var(--text-2);
+  font-size: 13px;
+  white-space: nowrap;
+}
+
+.history-empty {
+  padding: 18px;
+  text-align: center;
+}
+
+.job.is-queued {
+  opacity: 0.85;
+}
+
+.job.is-queued .thumb {
+  color: var(--text-2);
+}
+
+.job-target-path {
+  color: var(--text-2);
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+/* Connection quality: a dot on the device's avatar. */
+.device-signal {
+  position: absolute;
+  top: 70px;
+  left: calc(50% - 34px);
+  width: 10px;
+  height: 10px;
+  border: 2px solid var(--surface);
+  border-radius: 50%;
+  background: var(--success);
+  pointer-events: none;
+}
+
+.device-signal[data-level="fair"] {
+  background: var(--warning);
+}
+
+.device-signal[data-level="slow"] {
+  background: var(--danger);
 }

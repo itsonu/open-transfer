@@ -67,6 +67,7 @@ from open_transfer.devices import (
     valid_id,
 )
 from open_transfer.discovery import Discovery
+from open_transfer.history import History
 from open_transfer.security import RateLimiter, log_safe
 from open_transfer.storage import (
     FileInfo,
@@ -154,6 +155,7 @@ class Peer:
     manual: bool = False
     visitors: list[dict[str, str]] = field(default_factory=list)
     accepts: str = "everyone"
+    rtt: float = -1.0  # round trip of the last hellos, in ms (smoothed); -1 = unknown
 
     @property
     def online(self) -> bool:
@@ -207,6 +209,8 @@ class IncomingSession:
     source: str = ""  # address the offer came from (rate limiting)
     job: str = ""  # the sender's job id (to route direct-transfer signals back)
     sender_node: str = ""  # app that made the offer ("" when local)
+    started: float = 0.0  # when the first byte arrived (for the speed in history)
+    recorded: bool = False  # written to history
 
     @property
     def total(self) -> int:
@@ -256,6 +260,8 @@ class Job:
     # staged chunks are gone by then, so this is how a resumed upload learns
     # it has nothing left to send (#44).
     relayed: dict[int, dict[str, Any]] = field(default_factory=dict)
+    started: float = 0.0  # when the first byte went out (for the speed in history)
+    recorded: bool = False  # written to history
 
 
 # ====================================================================== mesh
@@ -275,6 +281,7 @@ class Mesh:
         )
         self.trust = TrustStore(state)
         self.clipboard = ClipboardStore(state)
+        self.history = History(state)
         self._clip_latest = ""  # newest clipboard item received from a paired device
         self._inbox_root = state / "inbox"
         # Big outgoing files are staged here chunk-by-chunk (browser → this app)
@@ -555,7 +562,11 @@ class Mesh:
             said_goodbye = known is not None and known.left_at >= started
         if said_goodbye:
             return False  # they left while we were talking: the answer is stale
-        self._upsert_peer(info, peer.host, manual=peer.manual)
+        updated = self._upsert_peer(info, peer.host, manual=peer.manual)
+        if updated is not None:
+            took = (time.monotonic() - started) * 1000
+            with self._lock:
+                updated.rtt = took if updated.rtt < 0 else updated.rtt * 0.7 + took * 0.3
         return True
 
     def handle_hello(self, info: dict[str, Any], host: str) -> dict[str, Any]:
@@ -860,6 +871,20 @@ class Mesh:
                 {"id": device_id, "name": name, **({"reason": reason} if reason else {})}
             )
         names = ", ".join(d["name"] for d in delivered)
+        self.history.add(
+            {
+                "kind": "clipboard",
+                "direction": "sent",
+                "title": "Image" if kind == "image" else "Text",
+                "files": 0,
+                "size": len(data) if kind == "image" else len(text.encode()),
+                "status": DONE if delivered else "not_sent",
+                "devices": [
+                    *({"id": d["id"], "name": d["name"], "status": DONE} for d in delivered),
+                    *({"id": f["id"], "name": f["name"], "status": FAILED} for f in failed),
+                ],
+            }
+        )
         item = self.clipboard.add(
             kind=kind,
             direction="sent",
@@ -891,6 +916,17 @@ class Mesh:
         )
         with self._lock:
             self._clip_latest = item["id"]
+        self.history.add(
+            {
+                "kind": "clipboard",
+                "direction": "received",
+                "title": "Image" if kind == "image" else "Text",
+                "files": 0,
+                "size": len(raw) if kind == "image" else len(text.encode()),
+                "status": DONE,
+                "devices": [{"id": sender_id, "name": name, "status": DONE}],
+            }
+        )
         log.info("Clipboard %s from %s", kind, log_safe(name))
         return {"ok": True}
 
@@ -1051,6 +1087,7 @@ class Mesh:
                 raise MeshError(400, "size_mismatch", "The file size doesn’t match the offer.")
             item.state, item.received, item.error = RECEIVING, 0, ""
             session.state = RECEIVING
+            session.started = session.started or time.monotonic()
         store = self.storage if session.target == self.id else self.inbox(session.target)
 
         def count(n: int) -> None:
@@ -1277,6 +1314,7 @@ class Mesh:
             raise MeshError(411, "length_required", "Send a Content-Length header.")
         if length != size:
             raise MeshError(400, "size_mismatch", "The file size doesn’t match.")
+        job.started = job.started or time.monotonic()
         sinks = [
             _Sink(self, job, target_id, delivery, index, size)
             for target_id, delivery in job.deliveries.items()
@@ -1382,6 +1420,7 @@ class Mesh:
             raise MeshError(404, "not_found", "No such file in this transfer.")
         if index in job.relayed:  # a resumed upload re-sending a piece: already done
             return dict(job.relayed[index])
+        job.started = job.started or time.monotonic()
         size = int(job.files[index]["size"])
         name = str(job.files[index].get("name", "file"))
         if len(data) > MAX_CHUNK_BYTES:
@@ -1664,6 +1703,7 @@ class Mesh:
             key = _incoming_chunk_key(session_id, index)
             item.state = RECEIVING
             session.state = RECEIVING
+            session.started = session.started or time.monotonic()
         store = self.storage if session.target == self.id else self.inbox(session.target)
         if offset < 0 or offset + len(data) > total:
             raise MeshError(400, "bad_range", "Chunk is outside the file.")
@@ -2048,6 +2088,7 @@ class Mesh:
                     d.view_state() in FINAL for d in job.deliveries.values()
                 ):
                     job.finished = now
+            self._record_finished()
             if now - last_hello >= HELLO_EVERY:
                 last_hello = now
                 for peer in peers:
@@ -2064,6 +2105,84 @@ class Mesh:
     def _jobs_snapshot(self) -> list[Job]:
         with self._lock:
             return list(self._jobs.values())
+
+    # -------------------------------------------------------------- history
+
+    def _record_finished(self) -> None:
+        """Write this device's own finished transfers to its history (once each)."""
+        with self._lock:
+            jobs = [
+                j
+                for j in self._jobs.values()
+                if j.owner == self.id and j.finished and not j.recorded
+            ]
+            sessions = [
+                s
+                for s in self._incoming.values()
+                if s.target == self.id and s.state in FINAL and not s.recorded
+            ]
+            for job in jobs:
+                job.recorded = True
+            for session in sessions:
+                session.recorded = True
+        for job in jobs:
+            self.history.add(self._job_entry(job))
+        for session in sessions:
+            self.history.add(self._session_entry(session))
+
+    def _job_entry(self, job: Job) -> dict[str, Any]:
+        total = sum(int(f["size"]) for f in job.files)
+        devices = [
+            {
+                "id": target_id,
+                "name": str(d.target.get("name", "")),
+                "status": d.view_state(),
+                **({"reason": d.reason} if d.reason else {}),
+            }
+            for target_id, d in job.deliveries.items()
+        ]
+        states = {d["status"] for d in devices}
+        status = states.pop() if len(states) == 1 else "partial" if DONE in states else FAILED
+        took = job.finished - job.started if job.started else 0
+        return {
+            "kind": "transfer",
+            "direction": "sent",
+            "title": _title(job.files),
+            "files": len(job.files),
+            "size": total,
+            "status": status,
+            "devices": devices,
+            "speed": round(total / took) if took > 0 and status in {DONE, "partial"} else 0,
+            "ref": job.id,
+        }
+
+    def _session_entry(self, session: IncomingSession) -> dict[str, Any]:
+        took = session.finished - session.started if session.started else 0
+        files: list[dict[str, Any]] = [
+            {"name": f.saved_name or f.name, "size": f.size} for f in session.files
+        ]
+        return {
+            "kind": "transfer",
+            "direction": "received",
+            "title": _title(files),
+            "files": len(files),
+            "size": session.total,
+            "status": session.state,
+            "devices": [
+                {
+                    "id": str(session.origin.get("id", "")),
+                    "name": str(session.origin.get("name", "")),
+                    "status": session.state,
+                }
+            ],
+            "speed": round(session.total / took) if took > 0 and session.state == DONE else 0,
+            "ref": session.id,
+            **(
+                {"image": files[0]["name"]}
+                if len(files) == 1 and file_kind(str(files[0]["name"])) == "image"
+                else {}
+            ),
+        }
 
     # ---------------------------------------------------------------- views
 
@@ -2093,6 +2212,8 @@ class Mesh:
                     continue
                 entry = _device(p.id, p.name, p.form, p.platform, "app", online=p.online)
                 entry["paired"] = p.id in paired
+                if p.online and p.rtt >= 0:
+                    entry["rtt"] = round(p.rtt)
                 if p.accepts == "paired":
                     entry["accepts"] = "paired"
                 if viewer.is_owner:
@@ -2160,6 +2281,7 @@ class Mesh:
                     "reason": d.reason or (d.session.reason if d.session else ""),
                     "sent": min(sent, total),
                     "direct": d.direct,
+                    "path": _path(d),
                 }
             )
         return {
@@ -2207,6 +2329,7 @@ class Mesh:
         }
         if viewer.is_owner:
             state["pairing"] = {"code": self.pair_code, "expires_in": self.pair_code_expires_in()}
+            state["history"] = {"latest": self.history.latest()}
             state["clipboard"] = {
                 "latest": self._clip_latest,
                 "sharing": len(self.clipboard.settings()["allowed"]),
@@ -2224,6 +2347,20 @@ class Mesh:
 
 
 # =================================================================== helpers
+
+
+def _title(files: list[dict[str, Any]]) -> str:
+    return str(files[0].get("name", "file")) if len(files) == 1 else f"{len(files)} files"
+
+
+def _path(delivery: Delivery) -> str:
+    """How a delivery travels: "direct" (browser to browser), "local" (on this
+    app), "via" (to a browser through its app) or "app" (app to app)."""
+    if delivery.direct:
+        return "direct"
+    if delivery.session is not None:
+        return "local"
+    return "via" if delivery.target.get("kind") == "browser" else "app"
 
 
 def _clean_clip(data: dict[str, Any]) -> tuple[str, str, bytes, str]:

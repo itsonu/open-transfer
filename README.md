@@ -179,6 +179,7 @@ Any device can send to any other — there's no host or server role. A phone wit
 - Native windows on Windows and macOS, a native shell on Android (file picker, QR scanner, notifications)
 - Clear states everywhere: looking-for-devices radar, waiting / accepted / sending / delivered per device, reconnecting indicator, errors with reasons
 - Preview photos, videos, audio, PDFs and text in the app; a grid view with filters; a ⋯ menu per file (copy, share, open, show in folder)
+- Activity: searchable history of what was sent and received, grouped by day; a send queue; connection quality per device
 - Clipboard: paste to send, Ctrl/⌘+Shift+V to send what you copied, and clipboard sharing between paired devices (both sides opt in; passwords and codes are never saved)
 - Accessible: keyboard operable, visible focus, screen-reader labels, live regions
 - Works fully **offline on a LAN** — no CDNs, fonts or trackers

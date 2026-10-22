@@ -182,7 +182,7 @@ def test_quick_send_to_a_favorite_skips_the_send_bar(
     # Alt+1 quick-sends to the first favorite.
     again = tmp_path / "again.txt"
     again.write_text("faster")
-    page.locator("body").click(position={"x": 5, "y": 5})
+    page.evaluate("document.activeElement.blur()")  # (a click could hit the home link)
     with page.expect_file_chooser() as chooser:
         page.keyboard.press("Alt+1")
     chooser.value.set_files(str(again))

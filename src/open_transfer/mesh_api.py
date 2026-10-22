@@ -257,6 +257,34 @@ def register(
 
     # ================================================================ web UI
 
+    # -------------------------------------------------------------- history
+
+    @app.get("/api/history")
+    def ui_history() -> Response:
+        owner_only()
+        args = request.args
+        try:
+            since = float(args.get("since") or 0)
+            limit = max(1, min(500, int(args.get("limit") or 200)))
+        except ValueError:
+            raise MeshError(400, "bad_request", "since and limit are numbers.") from None
+        entries = mesh.history.query(
+            q=str(args.get("q", ""))[:200],
+            device=str(args.get("device", ""))[:64],
+            direction=str(args.get("direction", ""))[:16],
+            status=str(args.get("status", ""))[:16],
+            kind=str(args.get("kind", ""))[:16],
+            since=since,
+            limit=limit,
+        )
+        return jsonify({"entries": entries, "latest": mesh.history.latest()})
+
+    @app.delete("/api/history")
+    def ui_history_clear() -> Response:
+        owner_only()
+        mesh.history.clear()
+        return jsonify({"ok": True})
+
     # ------------------------------------------------------------ clipboard
 
     @app.get("/api/clipboard")

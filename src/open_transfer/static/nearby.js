@@ -4,6 +4,7 @@
 
 import { DIRECT_MAX_BYTES, directSupported, handleSignals, sendDirect } from "./direct.js";
 import { $, ApiError, addHistory, api, chunkLimits, copyText, formatBytes, formatDuration, guessKind, h, icon, looksSensitive, newUploadId, plural, pushSample, SENSITIVE_REASONS, shouldChunk, sparklineSVG, state, toast, uploadParallel } from "./lib.js";
+import { saveThumb } from "./activity.js";
 import { isImage, makeThumb } from "./media.js";
 import { collectDropped, zipFiles, zipName } from "./zip.js";
 
@@ -28,7 +29,13 @@ export const mesh = {
   favorites: loadFavorites(), // [{ id, name, form, platform, kind }], first = Alt+1
   quickTarget: null, // device id the quick-send file picker is for
   stagedUrls: new Map(), // staged image File -> object URL for its thumbnail
+  queue: [], // sends waiting their turn: { qid, ids, files }
+  starting: 0, // sends being created right now (they count against the limit)
 };
+
+// Two sends at a time; more wait in line (and can be reordered or removed).
+const MAX_ACTIVE_SENDS = 2;
+let queueSeq = 0;
 
 let ctx = { requestPoll: () => {}, droppedFiles: () => [], libraryChanged: () => {} };
 
@@ -102,7 +109,7 @@ const jobActive = (job) => job.state === "waiting" || job.state === "running";
 
 export function busy() {
   const receiving = (mesh.data?.incoming || []).some((s) => s.state === "accepted" || s.state === "receiving");
-  return [...mesh.jobs.values()].some((j) => jobActive(j) && !j.paused) || mesh.promptQueue.length > 0 || receiving;
+  return [...mesh.jobs.values()].some((j) => jobActive(j) && !j.paused) || mesh.queue.length > 0 || mesh.promptQueue.length > 0 || receiving;
 }
 
 function apply() {
@@ -342,6 +349,7 @@ function buildTile(d) {
     ),
     h("span", { class: "device-badge", title: "Paired", "aria-label": "Paired" }, icon("link")),
     h("span", { class: "device-drop-hint", "aria-hidden": "true" }),
+    h("span", { class: "device-signal", role: "img", hidden: true }),
     h("button", { class: "icon-btn device-fav", type: "button", "aria-pressed": "false", onclick: () => toggleFavorite(el._device) }, icon("star")),
     h("button", { class: "icon-btn device-quick", type: "button", hidden: true, onclick: () => quickSend(el.dataset.id) }, icon("send")),
   );
@@ -439,7 +447,16 @@ function updateTile(el, d) {
   button.disabled = !d.online;
   button.setAttribute("aria-pressed", String(selected));
   button.setAttribute("aria-label", `${d.name}, ${status.text}${d.paired ? ", paired" : ""}${selected ? ", selected" : ""}`);
-  button.title = d.address ? `${d.name} · ${d.address}` : d.name;
+  const signal = el.querySelector(".device-signal");
+  const rtt = d.kind === "app" && d.online && Number.isFinite(d.rtt) ? d.rtt : null;
+  signal.hidden = rtt === null;
+  if (rtt !== null) {
+    const level = rtt < 40 ? "good" : rtt < 150 ? "fair" : "slow";
+    signal.dataset.level = level;
+    signal.setAttribute("aria-label", `Connection: ${level} (${rtt} ms)`);
+    signal.title = `Connection: ${level} · ${rtt} ms round trip`;
+  }
+  button.title = [d.name, d.address, rtt !== null && `${rtt} ms`].filter(Boolean).join(" · ");
   const name = el.querySelector(".device-name");
   if (name.textContent !== d.name) name.textContent = d.name;
   const sub = el.querySelector(".device-sub");
@@ -691,7 +708,46 @@ async function sendStaged() {
   await startSend(ids, files);
 }
 
-async function startSend(ids, files) {
+function activeSends() {
+  return [...mesh.jobs.values()].filter(jobActive).length + mesh.starting;
+}
+
+/** Start the next queued sends while there's room. */
+function pumpQueue() {
+  while (mesh.queue.length && activeSends() < MAX_ACTIVE_SENDS) {
+    const next = mesh.queue.shift();
+    startSend(next.ids, next.files, { queued: true });
+  }
+  renderJobs();
+}
+
+function moveQueued(qid, delta) {
+  const i = mesh.queue.findIndex((q) => q.qid === qid);
+  const j = i + delta;
+  if (i < 0 || j < 0 || j >= mesh.queue.length) return;
+  [mesh.queue[i], mesh.queue[j]] = [mesh.queue[j], mesh.queue[i]];
+  renderJobs();
+  // Keep keyboard focus on the same control after the reorder.
+  $(`#job-list [data-job="q:${qid}"] .queue-${delta < 0 ? "up" : "down"}`)?.focus();
+}
+
+function removeQueued(qid) {
+  mesh.queue = mesh.queue.filter((q) => q.qid !== qid);
+  renderJobs();
+}
+
+async function startSend(ids, files, { queued = false } = {}) {
+  if (!queued && (mesh.queue.length || activeSends() >= MAX_ACTIVE_SENDS)) {
+    mesh.queue.push({ qid: ++queueSeq, ids, files });
+    mesh.staged = [];
+    mesh.selected.clear();
+    renderDevices();
+    renderSendBar();
+    renderJobs();
+    toast(`Queued — it starts when one of the ${MAX_ACTIVE_SENDS} sends in progress is done`, { icon: "clock" });
+    return;
+  }
+  mesh.starting += 1;
   let data;
   try {
     ({ data } = await api("/api/send", {
@@ -700,7 +756,10 @@ async function startSend(ids, files) {
     }));
   } catch (err) {
     toast(err.message, { tone: "error", icon: "alert" });
+    pumpQueue();
     return;
+  } finally {
+    mesh.starting -= 1;
   }
   const job = { id: data.job.id, files, targets: ids, state: "waiting", index: 0, uploaded: 0, speed: 0, xhr: null, finishedAt: 0 };
   mesh.jobs.set(job.id, job);
@@ -876,7 +935,9 @@ function finishJob(job, outcome) {
     const secs = job.startedAt ? Math.max(0.1, (performance.now() - job.startedAt) / 1000) : 0;
     const bytes = job.files.reduce((n, f) => n + f.size, 0);
     const title = job.files.length === 1 ? job.files[0].name : plural(job.files.length, "file");
-    addHistory({ name: title, size: bytes, direction: "send", status: "done", speed: secs ? bytes / secs : 0, samples: (job.samples || []).slice(-30), thumb: job.thumb || undefined });
+    // The app records its own window's transfers; a visitor's browser keeps its own list.
+    if (state.info.owner) saveThumb(job.id, job.thumb);
+    else addHistory({ name: title, size: bytes, direction: "send", status: "done", speed: secs ? bytes / secs : 0, samples: (job.samples || []).slice(-30), thumb: job.thumb || undefined });
     window.dispatchEvent(new CustomEvent("ot-history"));
   } else if (declined.length) {
     toast(declined.length === 1 ? `${declined[0].name} declined — retry to ask again` : `${declined.length} declined — retry to ask again`, {
@@ -886,6 +947,7 @@ function finishJob(job, outcome) {
       duration: 6000,
     });
   }
+  setTimeout(pumpQueue, 0); // a slot is free
   // Bound retained jobs (each holds File blobs): keep retryable ones for the
   // user to dismiss, evict the oldest finished beyond 20.
   const finished = [...mesh.jobs.values()].filter((j) => j.state === "finished");
@@ -1071,6 +1133,7 @@ async function cancelJob(job) {
   } catch {
     /* already gone */
   }
+  pumpQueue();
   ctx.requestPoll();
 }
 
@@ -1133,6 +1196,20 @@ function scheduleJobRender() {
     jobRenderQueued = false;
     renderJobs();
   });
+}
+
+// How each delivery travels (see mesh._path).
+const PATH_HINT = {
+  app: "Straight to that device’s app",
+  direct: "Browser to browser, straight over your network",
+  via: "To a browser, through the app it’s connected to",
+  local: "To a browser connected to this device",
+};
+
+function pathLabel(path, target) {
+  if (path === "via") return `Via ${target.via_name || "its app"}`;
+  if (path === "local") return "Via this device";
+  return "Direct";
 }
 
 const TARGET_TEXT = {
@@ -1221,11 +1298,13 @@ function renderJobs() {
           else if (t.direct === "sending") text = `Directly · ${Math.floor(pct)}%`;
           else if (t.direct === "done") text = "Delivered directly";
           const canRetryTarget = RETRYABLE.has(original.state) && onlineDevices().some((d) => d.id === original.id);
+          const path = t.direct ? "direct" : original.path || "app";
           return h(
             "li",
-            { class: "job-target", dataset: { state: t.state } },
+            { class: "job-target", dataset: { state: t.state, path } },
             h("span", { class: "mini-avatar", "aria-hidden": "true" }, icon(deviceIcon(t))),
             h("span", { class: "job-target-name" }, t.name),
+            h("span", { class: "job-target-path", title: PATH_HINT[path] }, pathLabel(path, original)),
             h("span", { class: "job-target-state" }, text),
             canRetryTarget &&
               h(
@@ -1245,6 +1324,37 @@ function renderJobs() {
       ),
     );
   }
+  mesh.queue.forEach((q, i) => {
+    const key = `q:${q.qid}`;
+    keep.add(key);
+    let row = list.querySelector(`[data-job="${CSS.escape(key)}"]`);
+    if (!row) {
+      row = h("li", { class: "job is-queued is-entering", dataset: { job: key } });
+    }
+    list.append(row); // queued sends always come after the ones in progress, in order
+    const title = q.files.length === 1 ? q.files[0].name : plural(q.files.length, "file");
+    const to = q.ids.map(deviceName);
+    row.replaceChildren(
+      h(
+        "div",
+        { class: "job-head" },
+        h("span", { class: "thumb", "aria-hidden": "true" }, icon("clock")),
+        h(
+          "div",
+          { class: "row-main" },
+          h("span", { class: "row-title", title }, title),
+          h("span", { class: "row-sub" }, `Queued · ${i + 1} of ${mesh.queue.length} · to ${to.length > 2 ? `${to.length} devices` : to.join(" and ")}`),
+        ),
+        h(
+          "div",
+          { class: "row-actions is-visible" },
+          h("button", { class: "icon-btn queue-up", type: "button", disabled: i === 0, title: "Move up", "aria-label": `Move ${title} up`, onclick: () => moveQueued(q.qid, -1) }, icon("up")),
+          h("button", { class: "icon-btn queue-down", type: "button", disabled: i === mesh.queue.length - 1, title: "Move down", "aria-label": `Move ${title} down`, onclick: () => moveQueued(q.qid, 1) }, icon("down")),
+          h("button", { class: "icon-btn", type: "button", title: "Remove", "aria-label": `Remove ${title} from the queue`, onclick: () => removeQueued(q.qid) }, icon("x")),
+        ),
+      ),
+    );
+  });
   for (const row of [...list.children]) if (!keep.has(row.dataset.job)) row.remove();
   renderIncomingRows();
   const any = list.children.length + $("#incoming-list").children.length;
@@ -1286,10 +1396,12 @@ function handleIncoming() {
         const picture = s.files.find((f) => isImage(f) && f.size <= 25_000_000);
         const name = picture && (picture.saved_name || picture.name);
         const url = name && (owner ? `/files/${encodeURIComponent(name)}?inline=1` : `/api/inbox/files/${encodeURIComponent(name)}?inline=1`);
-        (url ? makeThumb(url) : Promise.resolve(null)).then((thumb) => {
-          addHistory({ ...entry, thumb: thumb || undefined });
-          window.dispatchEvent(new CustomEvent("ot-history"));
-        });
+        if (!owner) {
+          (url ? makeThumb(url) : Promise.resolve(null)).then((thumb) => {
+            addHistory({ ...entry, thumb: thumb || undefined });
+            window.dispatchEvent(new CustomEvent("ot-history"));
+          });
+        }
         ctx.libraryChanged(null);
       } else if (s.state === "canceled" && before !== "pending") toast(`${from} stopped sending`, { tone: "error", icon: "x" });
       else if (s.state === "failed") toast(`Couldn’t receive files from ${from}`, { tone: "error", icon: "alert" });

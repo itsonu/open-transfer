@@ -50,12 +50,12 @@ Status legend: **Done** · **Partial** (some of it existed before this plan) · 
 
 | Feature | Before | Steps | Tests |
 |---|---|---|---|
-| **Transfer Queue** | Partial (cancel per job) | New sends queue behind a running one (configurable, default 2 at once); pending ones can move up/down or be canceled. | E2E: 3 sends → 1 queued; move it up; cancel it. |
-| **Transfer Search and History** | Partial (30 entries in the browser) | 1. App-side history (`history.jsonl` in the state folder, capped). 2. `GET /api/history?q=&device=&direction=&status=&since=`. 3. Search box + filters in Recent. | Unit: filters and cap. E2E: search by name, filter by device. |
-| **Transfer Activity Timeline** | New | One chronological view of transfers and clipboard events from the history API, grouped by day. | E2E: a send and a clipboard event appear in order. |
+| **Transfer Queue** | ✅ Phase D | New sends queue behind the ones in progress (2 at a time); pending ones can move up/down or be removed. | E2E: 3 sends → 1 queued; move it up; cancel it. |
+| **Transfer Search and History** | ✅ Phase D | 1. App-side history (`history.jsonl` in the state folder, capped). 2. `GET /api/history?q=&device=&direction=&status=&since=`. 3. Search box + filters in Recent. | Unit: filters and cap. E2E: search by name, filter by device. |
+| **Transfer Activity Timeline** | ✅ Phase D | One chronological view of transfers and clipboard events from the history API, grouped by day. | E2E: a send and a clipboard event appear in order. |
 | **Duplicate File Detection** | Partial (auto-rename) | 1. The incoming prompt says how many files already exist (same name and size). 2. Choice: Keep both (rename) · Skip duplicates · Replace. | Unit: each policy on disk. E2E: prompt shows "1 already here". |
 | **Transfer Integrity Verification** | New | SHA-256 computed by the sending app as it streams and by the receiving app as it writes; a mismatch fails the file clearly and removes it. | Unit: matching hash → done; tampered bytes → failed with an integrity message. |
-| **Connection Quality Indicator** | Partial (direct flag) | Per device: last seen, round-trip time from hellos, speed of the current transfer, and the path ("Direct" / "Via Mac"). | Unit: RTT recorded. E2E: job target shows the path. |
+| **Connection Quality Indicator** | ✅ Phase D | Per device: last seen, round-trip time from hellos, speed of the current transfer, and the path ("Direct" / "Via Mac"). | Unit: RTT recorded. E2E: job target shows the path. |
 | **Transfer Notifications** | Partial (title + toasts) | System notifications (Notification API, Android bridge) when the window is hidden: incoming request (Accept / Decline), done, failed, clipboard received. Asked for on a user gesture. | E2E: notification permission granted, page hidden → a notification is created (stubbed). |
 
 ## Cross-cutting (every phase)

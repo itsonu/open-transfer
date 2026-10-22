@@ -62,6 +62,8 @@
     <symbol id="i-star" viewBox="0 0 24 24"><path d="m12 3.5 2.6 5.3 5.9.9-4.3 4.1 1 5.8-5.2-2.7-5.2 2.7 1-5.8-4.3-4.1 5.9-.9z"/></symbol>
     <symbol id="i-more" viewBox="0 0 24 24"><path d="M5.5 12h.01M12 12h.01M18.5 12h.01" stroke-width="3"/></symbol>
     <symbol id="i-list" viewBox="0 0 24 24"><path d="M8 6h12M8 12h12M8 18h12M4 6h.01M4 12h.01M4 18h.01"/></symbol>
+    <symbol id="i-up" viewBox="0 0 24 24"><path d="m5 15 7-7 7 7"/></symbol>
+    <symbol id="i-down" viewBox="0 0 24 24"><path d="m5 9 7 7 7-7"/></symbol>
     <symbol id="i-left" viewBox="0 0 24 24"><path d="m15 5-7 7 7 7"/></symbol>
     <symbol id="i-right" viewBox="0 0 24 24"><path d="m9 5 7 7-7 7"/></symbol>
     <symbol id="i-eye" viewBox="0 0 24 24"><path d="M2.5 12S6 5.5 12 5.5 21.5 12 21.5 12 18 18.5 12 18.5 2.5 12 2.5 12Z"/><circle cx="12" cy="12" r="3"/></symbol>
@@ -173,15 +175,33 @@
           <ul class="list card" id="transfer-list"></ul>
         </section>
 
-        <section class="transfers" id="history-section" aria-label="Recent transfers" hidden>
+        <section class="transfers" id="history-section" aria-labelledby="history-title" hidden>
           <div class="section-head">
-            <h2>Recent</h2>
+            <h2 id="history-title">Activity</h2>
             <span class="section-meta" id="history-meta"></span>
             <div class="section-tools">
               <button class="btn btn-plain btn-small" id="clear-history" type="button">Clear</button>
             </div>
           </div>
+          <div class="history-filters library-controls" id="history-filters" hidden>
+            <label class="search">
+              <svg class="icon" aria-hidden="true"><use href="#i-search"/></svg>
+              <span class="visually-hidden">Search activity</span>
+              <input type="search" id="history-search" placeholder="Search" autocomplete="off">
+            </label>
+            <label class="select-wrap"><span class="visually-hidden">Device</span>
+              <select id="history-device"><option value="">All devices</option></select>
+            </label>
+            <label class="select-wrap"><span class="visually-hidden">Direction</span>
+              <select id="history-direction">
+                <option value="">Sent and received</option>
+                <option value="sent">Sent</option>
+                <option value="received">Received</option>
+              </select>
+            </label>
+          </div>
           <ul class="list card" id="history-list"></ul>
+          <p class="muted history-empty" id="history-empty" hidden>Nothing matches.</p>
         </section>
 
         <section class="transfers clipboard" id="clipboard-section" aria-labelledby="clip-title" hidden>

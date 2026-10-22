@@ -3,7 +3,8 @@
 // file list · shared-folder uploads · drag/drop/paste · PIN · boot.
 // lib.js has the helpers, nearby.js the devices, sending and pairing.
 
-import { $, addHistory, api, can, chunkLimits, clearHistory, copyText, formatBytes, formatDuration, guessKind, h, icon, loadHistory, newUploadId, plural, pushSample, relativeTime, setLockHandler, shouldChunk, sparklineSVG, stamp, state, toast, uploadParallel } from "./lib.js";
+import { $, addHistory, api, can, chunkLimits, copyText, formatBytes, formatDuration, guessKind, h, icon, newUploadId, plural, pushSample, relativeTime, setLockHandler, shouldChunk, sparklineSVG, stamp, state, toast, uploadParallel } from "./lib.js";
+import { initActivity } from "./activity.js";
 import { initClipboard, readClipboard } from "./clipboard.js";
 import { announceSelf, busy, confirmSensitive, fetchState, forgetDirectFile, initNearby, isDeviceMode, mesh, openAddDevice, stageFiles } from "./nearby.js";
 import { canShareFiles, copyImage, initMedia, isImage, isVideo, openMenu, openPreview, previewKind, shareFile, videoThumb } from "./media.js";
@@ -690,7 +691,7 @@ async function startChunkedUpload(t) {
     if (t.savedName) state.justAdded.add(t.savedName);
     const secs = Math.max(0.1, (performance.now() - t.startedAt) / 1000);
     addHistory({ name: t.savedName, size: total, direction: "up", status: "done", speed: total / secs, samples: t.samples.slice(-30) });
-    renderHistory();
+    window.dispatchEvent(new CustomEvent("ot-history"));
     setTimeout(() => removeTransfer(t), 3500);
   } catch (err) {
     if (t.wantCancel) {
@@ -1148,12 +1149,7 @@ function boot() {
   });
   for (const button of [$("#connect-button"), $("#empty-connect")]) button.addEventListener("click", () => openAddDevice());
   setupPinForm();
-  renderHistory();
-  window.addEventListener("ot-history", renderHistory);
-  $("#clear-history")?.addEventListener("click", () => {
-    clearHistory();
-    renderHistory();
-  });
+  initActivity();
   $("#search").addEventListener("input", (event) => {
     state.search = event.target.value;
     renderFiles();
@@ -1179,43 +1175,6 @@ function boot() {
   });
   if (state.info.auth.required && !state.info.auth.authenticated) showLock();
   else enterMain();
-}
-
-function renderHistory() {
-  const section = $("#history-section");
-  const list = $("#history-list");
-  if (!section || !list) return;
-  const entries = loadHistory();
-  section.hidden = entries.length === 0;
-  if (!entries.length) return;
-  $("#history-meta").textContent = plural(entries.length, "transfer");
-  list.replaceChildren(
-    ...entries.slice(0, 20).map((e) => {
-      const when = e.when ? relativeTime(e.when / 1000) : "";
-      const sent = e.direction === "up" || e.direction === "send"; // uploads here, or sends to devices
-      const speed = e.speed >= 1000 ? `${formatBytes(e.speed)}/s` : "";
-      const sub = [`${formatBytes(e.size)}`, when, speed, e.status === "done" ? null : e.status].filter(Boolean).join(" · ");
-      const row = h(
-        "li",
-        { class: "row history-row" },
-        h(
-          "span",
-          { class: "thumb", "aria-hidden": "true" },
-          icon(KIND_ICON[e.name?.endsWith(".zip") ? "archive" : guessKind(e.name || "")] || "file"),
-          typeof e.thumb === "string" && e.thumb.startsWith("data:image/") && h("img", { class: "is-loaded", src: e.thumb, alt: "" }),
-        ),
-        h("div", { class: "row-main" }, h("span", { class: "row-title", title: e.name }, e.name), h("span", { class: "row-sub" }, sub)),
-        h("span", { class: "history-dir", dataset: { dir: sent ? "up" : "down" } }, sent ? "Sent" : "Received"),
-      );
-      const graph = e.samples?.length >= 2 ? sparklineSVG(e.samples) : null;
-      if (graph) {
-        const wrap = h("span", { class: "spark-wrap", title: "Speed over time" });
-        wrap.append(graph);
-        row.querySelector(".row-main")?.append(wrap);
-      }
-      return row;
-    }),
-  );
 }
 
 boot();

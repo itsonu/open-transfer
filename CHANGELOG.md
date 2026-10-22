@@ -18,6 +18,9 @@ All notable changes are documented here. The format follows [Keep a Changelog](h
 - **Ctrl/⌘+C on a file** copies its text, the picture itself, or its link.
 - **Clipboard sharing between paired devices:** a Clipboard panel on each app with **Share clipboard**, an optional auto-share while the window is open, searchable history (keep 20–200 items for 1 day to "as long as they fit"), and per-device switches. Both devices have to switch it on; anything else is refused. Clips travel signed with the pair's key.
 - **Privacy checks:** text that looks like a password, one-time code, card number, private key or API token asks before it's sent or shared, is never auto-shared, is hidden on screen and is never saved to disk.
+- **Activity:** "Recent" is now **Activity**: everything this device sent and received, plus clipboard shares, grouped by day, with search and filters by device and direction. The app keeps it (the last 1,000, private to your user), so it survives reloads and restarts. It records file names, sizes, who and how it ended, never what was in them.
+- **Transfer queue:** two sends run at a time; more wait in line, and you can move them up or down or take them out.
+- **Connection quality:** a dot on each nearby app shows how quick the connection is (round trip in ms), and each transfer says which way it goes: **Direct**, **Via** another device's app, or **Via this device**.
 
 ### Fixed
 - Two "Are you sure?" questions in a row could get the first one's answer (Cancel), or both get the second one's.
