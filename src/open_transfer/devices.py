@@ -153,6 +153,8 @@ class TrustedDevice:
     name: str
     key: str  # hex
     paired_at: float
+    form: str = ""  # remembered so an away device keeps its icon ("" = not known yet)
+    platform: str = ""
 
 
 class TrustStore:
@@ -170,6 +172,8 @@ class TrustStore:
                         clean_name(item.get("name")),
                         item["key"],
                         float(item.get("paired_at", 0)),
+                        clean_form(item["form"]) if item.get("form") else "",
+                        clean_platform(item["platform"]) if item.get("platform") else "",
                     )
             except (KeyError, TypeError, ValueError):
                 continue
@@ -186,21 +190,43 @@ class TrustStore:
         with self._lock:
             return list(self._devices.values())
 
-    def add(self, device_id: str, name: str, key: bytes, at: float | None = None) -> TrustedDevice:
+    def add(
+        self,
+        device_id: str,
+        name: str,
+        key: bytes,
+        at: float | None = None,
+        *,
+        form: str = "",
+        platform: str = "",
+    ) -> TrustedDevice:
         """Trust ``device_id``; ``at`` dates the key (introductions use the introducer's time)."""
         device = TrustedDevice(
-            device_id, clean_name(name), key.hex(), time.time() if at is None else at
+            device_id,
+            clean_name(name),
+            key.hex(),
+            time.time() if at is None else at,
+            clean_form(form) if form else "",
+            clean_platform(platform) if platform else "",
         )
         with self._lock:
             self._devices[device_id] = device
             self._save()
         return device
 
-    def rename(self, device_id: str, name: str) -> None:
+    def rename(self, device_id: str, name: str, form: str = "", platform: str = "") -> None:
+        """Keep a paired device's name (and, when known, its kind) up to date."""
         with self._lock:
             device = self._devices.get(device_id)
-            if device and device.name != clean_name(name):
-                device.name = clean_name(name)
+            if device is None:
+                return
+            seen = (
+                clean_name(name),
+                clean_form(form) if form else device.form,
+                clean_platform(platform) if platform else device.platform,
+            )
+            if (device.name, device.form, device.platform) != seen:
+                device.name, device.form, device.platform = seen
                 self._save()
 
     def remove(self, device_id: str) -> bool:
@@ -212,7 +238,13 @@ class TrustStore:
 
     def _save(self) -> None:
         data = {
-            d.id: {"name": d.name, "key": d.key, "paired_at": d.paired_at}
+            d.id: {
+                "name": d.name,
+                "key": d.key,
+                "paired_at": d.paired_at,
+                **({"form": d.form} if d.form else {}),
+                **({"platform": d.platform} if d.platform else {}),
+            }
             for d in self._devices.values()
         }
         try:

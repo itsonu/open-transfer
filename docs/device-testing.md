@@ -187,5 +187,10 @@ It pairs this computer with each Android device if needed, turns sync on, and ch
    answer `{"ok": true…}`; a timeout means the PC's firewall is blocking it.
 3. Pair with **Add device → Enter a code → Not found? Enter its address** using
    the address shown on the other device — this bypasses discovery.
-4. Collect logs: desktop `…/Open Transfer/.open-transfer/open-transfer.log`;
+4. The same device shown several times ("Not nearby")? Each was a pairing with an
+   identity it no longer has — on Android, installing an APK signed with a
+   different key wipes the app. Pair again once: the old ones are removed.
+   CI builds without the release-key secrets are signed with a new key each
+   run; set `ANDROID_KEYSTORE_BASE64` and friends so updates install in place.
+5. Collect logs: desktop `…/Open Transfer/.open-transfer/open-transfer.log`;
    Android `adb logcat -d | grep -iE "python|open_transfer|AndroidRuntime"`.

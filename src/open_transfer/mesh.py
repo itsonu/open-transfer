@@ -514,7 +514,7 @@ class Mesh:
                 peer.visitors = _clean_visitors(info["visitors"])
             if is_new:
                 log.info("Found %s (%s) at %s", log_safe(peer.name), peer.platform, peer.address)
-        self.trust.rename(peer_id, peer.name)
+        self.trust.rename(peer_id, peer.name, peer.form, peer.platform)
         if is_new and self.trust.get(peer_id):
             self._submit(lambda: self.sync.peer_online(peer_id))
         return peer
@@ -740,9 +740,16 @@ class Mesh:
             raise MeshError(403, "wrong_code", "That code isn’t right.")
         self._pair_limiter.reset(f"pair:{client}")
         key = pair_key(code, nonce_a, nonce_b, self.id, device_id)
-        self.trust.add(device_id, clean_name(info.get("name")), key)
+        self.trust.add(
+            device_id,
+            clean_name(info.get("name")),
+            key,
+            form=clean_form(info.get("form")),
+            platform=clean_platform(info.get("platform")),
+        )
         self._rotate_code()
         self._upsert_peer(info, client)
+        self._forget_twins(device_id)
         log.info("Paired with %s", log_safe(clean_name(info.get("name"))))
         self._submit(lambda: self.sync.paired(device_id))
         return {"proof": pair_proof(code, "a", nonce_a, nonce_b, self.id, device_id)}
@@ -781,7 +788,14 @@ class Mesh:
         expected = pair_proof(code, "a", nonce_a, nonce_b, peer.id, self.id)
         if not secrets.compare_digest(expected, str(data.get("proof", ""))):
             raise MeshError(502, "pair_failed", "The other device couldn’t prove it has the code.")
-        self.trust.add(peer.id, peer.name, pair_key(code, nonce_a, nonce_b, peer.id, self.id))
+        self.trust.add(
+            peer.id,
+            peer.name,
+            pair_key(code, nonce_a, nonce_b, peer.id, self.id),
+            form=peer.form,
+            platform=peer.platform,
+        )
+        self._forget_twins(peer.id)
         log.info("Paired with %s", log_safe(peer.name))
         self._submit(lambda: self.sync.paired(peer.id))
         return peer
@@ -827,6 +841,33 @@ class Mesh:
             "code_not_found",
             "No device on this network is showing that code. Check it, or enter its address.",
         )
+
+    def _forget_twins(self, device_id: str) -> None:
+        """A device paired again under a new id replaces its old pairing.
+
+        Reinstalling wipes a device's identity (on Android, any APK signed with another
+        key), so pairing again would add a second tile with the same name. An old pairing
+        with the same name, of the same kind of device, that isn't around is that device.
+        """
+        new = self.trust.get(device_id)
+        if new is None:
+            return
+        with self._lock:
+            around = {p.id for p in self._peers.values() if p.online}
+        for old in self.trust.all():
+            if old.id == device_id or old.id in around:
+                continue
+            if old.name.casefold() != new.name.casefold():
+                continue
+            if old.platform and new.platform and old.platform != new.platform:
+                continue
+            log.info("%s was paired again: forgetting its old pairing", log_safe(new.name))
+            self.unpair(old.id)
+            with self._lock:
+                stale = self._peers.get(old.id)
+                if stale is not None and not stale.online:
+                    del self._peers[old.id]  # an address added by hand stays listed otherwise
+            self._bump()
 
     def unpair(self, device_id: str) -> bool:
         """Forget ``device_id``; with sync on, every member of the network forgets it too."""
@@ -2571,13 +2612,22 @@ class Mesh:
                         out.append(web)
             if viewer.is_owner:
                 known = {d["id"] for d in out}
-                for trusted in self.trust.all():
-                    if trusted.id not in known:
-                        entry = _device(
-                            trusted.id, trusted.name, "computer", "unknown", "app", online=False
-                        )
-                        entry["paired"] = True
-                        out.append(entry)
+                # Old pairings of one device (it was reinstalled) show once: the newest.
+                names = {d["name"].casefold() for d in out if d["kind"] == "app"}
+                for trusted in sorted(self.trust.all(), key=lambda t: -t.paired_at):
+                    if trusted.id in known or trusted.name.casefold() in names:
+                        continue
+                    names.add(trusted.name.casefold())
+                    entry = _device(
+                        trusted.id,
+                        trusted.name,
+                        trusted.form or "computer",
+                        trusted.platform or "unknown",
+                        "app",
+                        online=False,
+                    )
+                    entry["paired"] = True
+                    out.append(entry)
         return out
 
     def _incoming_view(self, s: IncomingSession) -> dict[str, Any]:

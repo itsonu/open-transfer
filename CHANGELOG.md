@@ -27,6 +27,7 @@ All notable changes are documented here. The format follows [Keep a Changelog](h
 - **Pairing with a Windows PC that others can't reach:** a device heard on the Wi‑Fi but not answering now shows **Can’t connect** on its tile, and pairing by code names it and says why (its firewall, usually a Wi‑Fi set to *Public*) instead of "No device on this network is showing that code".
 - **Windows on a Public network:** the PC's own app now warns that other devices can't reach it and how to switch the Wi‑Fi to Private.
 - The "Enter its address" field no longer shows an example address that looks filled in; it says where to find the other device's address.
+- **One device, one tile:** a device that comes back with a new identity (an Android phone reinstalled from an APK signed with another key, which wipes its data) replaces its old pairing when you pair again, instead of showing up two or three times. Old duplicates already saved show once, and away devices keep their phone/tablet/computer icon.
 - Paired apps can share clipboards with a device that has a PIN (the PIN is for people; paired apps sign their requests).
 
 ## [3.3.0] — 2026-10-22
