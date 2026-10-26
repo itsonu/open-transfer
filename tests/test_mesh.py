@@ -644,6 +644,21 @@ def test_hello_answered_after_a_goodbye_does_not_bring_the_device_back(
     assert not peer.online
 
 
+def test_goodbye_from_another_address_is_checked(make_node: NodeFactory) -> None:
+    """Anyone on the Wi-Fi can send a bye with a device's id. One from an address
+    other than the device's (a spoof, or its second network interface) counts only
+    if the device really has gone."""
+    a, c = make_node("Alpha"), make_node("Charlie")
+    connect(a, c)
+    bye = {"type": "bye", "id": c.mesh.id}
+    a.mesh._on_packet(bye, "203.0.113.9")  # spoofed: Charlie is still there
+    time.sleep(1)
+    assert a.mesh._peers[c.mesh.id].online
+    c.stop()
+    a.mesh._on_packet(bye, "203.0.113.9")  # its other interface
+    wait_for(lambda: not a.mesh._peers[c.mesh.id].online, timeout=5)
+
+
 def test_hello_through_a_local_tunnel_keeps_the_real_address(make_node: NodeFactory) -> None:
     # A device added by its LAN address answers through a port forward (adb
     # forward, SSH -L): its hello arrives from loopback. Keep the real address.

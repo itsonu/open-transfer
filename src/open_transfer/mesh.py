@@ -43,6 +43,7 @@ from collections.abc import Callable
 from concurrent.futures import Future, ThreadPoolExecutor
 from concurrent.futures import wait as wait_futures
 from dataclasses import dataclass, field
+from functools import partial
 from typing import Any
 
 from open_transfer import __version__, network
@@ -530,10 +531,14 @@ class Mesh:
         if kind == "bye":
             with self._lock:
                 peer = self._peers.get(packet["id"])
-                if peer:
-                    peer.last_seen = 0.0
-                    peer.left_at = time.monotonic()
-                    peer.visitors = []
+                here = peer is not None and peer.host == src
+            if peer and here:  # from where we know it is
+                self._gone(peer)
+            elif peer:
+                # Another of its addresses (two network interfaces), or someone
+                # else's packet: ask it where we know it is.
+                log.info("bye from %s for %s; checking", src, log_safe(peer.name))
+                self._submit(partial(self._check_gone, peer))
             return
         with self._lock:
             known = self._peers.get(packet["id"])
@@ -557,6 +562,16 @@ class Mesh:
             self._say_hello(peer)
         elif changed:
             self._say_hello(peer)
+
+    def _gone(self, peer: Peer) -> None:
+        with self._lock:
+            peer.last_seen = 0.0
+            peer.left_at = time.monotonic()
+            peer.visitors = []
+
+    def _check_gone(self, peer: Peer) -> None:
+        if not self._hello(peer):
+            self._gone(peer)
 
     def _say_hello(self, peer: Peer) -> None:
         """Say hello in the background, remembering it until it lands (see ``stop``)."""

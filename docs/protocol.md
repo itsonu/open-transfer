@@ -42,7 +42,9 @@ Apps talk to each other directly. A visitor's files travel visitor → its app
 ```
 
 `type` is `announce` | `reply` | `find` | `bye`. The peer's address is the
-datagram's **source IP**, never a field in the packet. `rev` changes when the
+datagram's **source IP**, never a field in the packet. A **bye** counts at once
+only from the address we hold for that device; from any other address we say
+hello to the device there first, and it's gone only if it doesn't answer. `rev` changes when the
 app's visitors or name change, prompting others to fetch its info.
 
 **find** — "whoever is showing this pairing code, answer":
