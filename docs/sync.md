@@ -156,7 +156,7 @@ Forwarding never opens the payload: the source seals it for the final recipient.
 | Phase | Scope | Status |
 |---|---|---|
 | **0** | The audit and capability matrix (this page) | ✅ |
-| **1** | Shared protocol, trusted network, introductions/revocation, policies, engine, P2P + UI API. Tests first | ⏳ |
+| **1** | Shared protocol, trusted network, introductions/revocation, policies, engine, P2P + UI API. Tests first (`tests/test_sync.py`, `tests/test_sync_api.py`) | ✅ |
 | **2** | Desktop agents (macOS, Windows, Linux), `--background` agent, start at login, window = view, settings UI. Mac ↔ Windows with both windows closed | ⏳ |
 | **3** | Android: background clipboard write, Quick Settings tile, Share sheet and text-selection send, send on focus | ⏳ |
 | **4** | iOS/iPadOS via Shortcuts (token enrolment, push/pull, setup guide). ⛔ A native iOS app is blocked on an Apple developer account | ⏳ |

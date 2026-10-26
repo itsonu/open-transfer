@@ -186,8 +186,11 @@ class TrustStore:
         with self._lock:
             return list(self._devices.values())
 
-    def add(self, device_id: str, name: str, key: bytes) -> TrustedDevice:
-        device = TrustedDevice(device_id, clean_name(name), key.hex(), time.time())
+    def add(self, device_id: str, name: str, key: bytes, at: float | None = None) -> TrustedDevice:
+        """Trust ``device_id``; ``at`` dates the key (introductions use the introducer's time)."""
+        device = TrustedDevice(
+            device_id, clean_name(name), key.hex(), time.time() if at is None else at
+        )
         with self._lock:
             self._devices[device_id] = device
             self._save()

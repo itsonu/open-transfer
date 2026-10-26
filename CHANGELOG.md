@@ -4,6 +4,16 @@ All notable changes are documented here. The format follows [Keep a Changelog](h
 
 ## [Unreleased]
 
+### Added
+- **Trusted Sync Network (protocol):** devices that turn on clipboard sync form one network. Pair a new device with any one member and the others are introduced to it automatically (each pair gets its own key). Removing a device removes it from every member.
+- **Sync rules:** each copy becomes an event with a unique id, a sequence number, a hybrid-clock time and an expiry. Duplicates and loops are dropped. An older clip never overwrites a newer one, and when copies happen at the same time on different devices, the newest one wins everywhere. A device that is away gets only the newest clip, and only until it expires (2 minutes by default).
+- **Encrypted clips:** synced text is sealed for each recipient with that pair's key, in addition to the signed request.
+- **Sync settings:** all trusted devices or selected ones; automatic or only when you ask; text and/or links; pause everything or one device; a temporary session; private-looking text and password-manager copies are never synced automatically; blocked apps.
+- Settings API: `/api/sync` ([docs/api.md](docs/api.md)). The design and what each OS allows are in [docs/sync.md](docs/sync.md).
+
+### Fixed
+- Paired apps can share clipboards with a device that has a PIN (the PIN is for people; paired apps sign their requests).
+
 ## [3.3.0] — 2026-10-22
 
 ### Added

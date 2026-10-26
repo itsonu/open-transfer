@@ -35,6 +35,9 @@ from open_transfer.security import log_safe
 from open_transfer.sensitive import REASONS, looks_sensitive
 from open_transfer.serve import serve_file
 from open_transfer.storage import IncompleteUpload, StorageError
+from open_transfer.sync.protocol import MAX_TEXT_BYTES as SYNC_MAX_TEXT
+from open_transfer.sync.protocol import SyncError
+from open_transfer.sync.store import FOREVER
 
 PUBLIC_P2P_ENDPOINTS = {
     "p2p_info",
@@ -47,6 +50,10 @@ PUBLIC_P2P_ENDPOINTS = {
     "p2p_pair",
     "p2p_pair_confirm",
     "p2p_signal",
+    # These check the sender's signature themselves (a PIN is for people, not paired apps).
+    "p2p_clip",
+    "p2p_sync",
+    "p2p_sync_forward",
 }
 MAX_PENDING_PER_CLIENT = 10
 DRAIN_LIMIT = 8 * 1024 * 1024
@@ -67,6 +74,9 @@ def _drain_body(limit: int = DRAIN_LIMIT) -> None:
             pass
     except (ClientDisconnected, ConnectionError, OSError):
         return
+
+
+SYNC_MAX_BODY = SYNC_MAX_TEXT * 4 // 3 + 64 * 1024
 
 
 def register(
@@ -108,6 +118,12 @@ def register(
 
     @app.errorhandler(MeshError)
     def mesh_error(exc: MeshError) -> Response:
+        response = jsonify({"error": {"code": exc.code, "message": str(exc)}})
+        response.status_code = exc.status
+        return response
+
+    @app.errorhandler(SyncError)
+    def sync_error(exc: SyncError) -> Response:
         response = jsonify({"error": {"code": exc.code, "message": str(exc)}})
         response.status_code = exc.status
         return response
@@ -244,6 +260,23 @@ def register(
         verified = request.headers.get("X-OT-From") == sender_id and signed_by(sender_id)
         return jsonify(mesh.handle_clip(sender_id, verified, data))
 
+    def sync_request(kind: str) -> Response:
+        # A sealed clip (1 MB of text, base64) plus the envelope around it.
+        if (request.content_length or 0) > SYNC_MAX_BODY:
+            raise MeshError(413, "too_large", "That is too big to sync.")
+        sender = request.headers.get("X-OT-From", "")
+        if not signed_by(sender):
+            raise MeshError(403, "not_paired", "Only trusted devices can sync.")
+        return jsonify(mesh.sync.handle(sender, kind, body_json()))
+
+    @app.post(f"{P2P}/sync")
+    def p2p_sync() -> Response:
+        return sync_request("sync")
+
+    @app.post(f"{P2P}/sync/forward")
+    def p2p_sync_forward() -> Response:
+        return sync_request("forward")
+
     @app.post(f"{P2P}/signal")
     def p2p_signal() -> Response:
         mesh.handle_signal(body_json())
@@ -293,6 +326,92 @@ def register(
         owner_only()
         mesh.history.clear()
         return jsonify({"ok": True})
+
+    # ----------------------------------------------------------------- sync
+
+    @app.get("/api/sync")
+    def ui_sync() -> Response:
+        owner_only()
+        return jsonify(mesh.sync.status())
+
+    @app.put("/api/sync/policy")
+    def ui_sync_policy() -> Response:
+        owner_only()
+        data = body_json()
+        allowed = {
+            "enabled",
+            "target",
+            "mode",
+            "types",
+            "expiry",
+            "sensitive",
+            "blocked_sources",
+            "accept_introductions",
+            "session_minutes",
+        }
+        unknown = set(data) - allowed
+        if unknown:
+            raise MeshError(400, "bad_request", f"Unknown setting {sorted(unknown)[0]}.")
+        mesh.sync.set_policy(**data)
+        return jsonify(mesh.sync.status())
+
+    @app.post("/api/sync/pause")
+    def ui_sync_pause() -> Response:
+        owner_only()
+        minutes = body_json().get("minutes")
+        if minutes is not None and not (
+            isinstance(minutes, int) and not isinstance(minutes, bool) and 0 < minutes <= 7 * 1440
+        ):
+            raise MeshError(400, "bad_request", "Pause for 1 minute to 7 days, or until resumed.")
+        mesh.sync.pause(None if minutes is None else minutes * 60)
+        return jsonify(mesh.sync.status())
+
+    @app.post("/api/sync/resume")
+    def ui_sync_resume() -> Response:
+        owner_only()
+        mesh.sync.resume()
+        return jsonify(mesh.sync.status())
+
+    @app.put("/api/sync/devices/<device_id>")
+    def ui_sync_device(device_id: str) -> Response:
+        owner_only()
+        data = body_json()
+        excluded = data.get("excluded")
+        if excluded is not None and not isinstance(excluded, bool):
+            raise MeshError(400, "bad_request", "excluded is true or false.")
+        paused_until: float | None = None
+        if "pause_minutes" in data:
+            minutes = data["pause_minutes"]
+            if minutes is None:
+                paused_until = FOREVER
+            elif isinstance(minutes, int) and not isinstance(minutes, bool) and minutes >= 0:
+                paused_until = time.time() + minutes * 60 if minutes else 0.0
+            else:
+                raise MeshError(400, "bad_request", "pause_minutes is a number of minutes.")
+        mesh.sync.set_device(device_id, excluded=excluded, paused_until=paused_until)
+        return jsonify(mesh.sync.status())
+
+    @app.delete("/api/sync/devices/<device_id>")
+    def ui_sync_remove(device_id: str) -> Response:
+        owner_only()
+        if not mesh.trust.get(device_id):
+            raise MeshError(404, "not_paired", "That device isn’t one of your trusted devices.")
+        mesh.unpair(device_id)
+        return jsonify(mesh.sync.status())
+
+    @app.post("/api/sync/send")
+    def ui_sync_send() -> Response:
+        owner_only()
+        data = body_json()
+        text = data.get("text")
+        if not isinstance(text, str):
+            raise MeshError(400, "bad_request", "Expected text.")
+        return jsonify(mesh.sync.copy(text, manual=True, confirm=data.get("confirm") is True))
+
+    @app.post("/api/sync/leave")
+    def ui_sync_leave() -> Response:
+        owner_only()
+        return jsonify(mesh.sync.leave())
 
     # ------------------------------------------------------------ clipboard
 

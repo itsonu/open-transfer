@@ -76,6 +76,9 @@ between **paired** apps carry a signature (§4).
 | `GET /offers/<id>/files/<n>/status` + `X-OT-Secret` | Staged bytes/ranges for one incoming file (sender resumes the missing pieces) |
 | `DELETE /offers/<id>` + `X-OT-Secret` | Sender cancels |
 | `POST /pair`, `POST /pair/confirm` | Pairing (§3) |
+| `POST /clip` (signed) | A clipboard item shared by hand (both sides must allow each other) |
+| `POST /sync` (signed) `{env}` | A [`sync/1` envelope](sync.md#protocol-sync1): clip, introduction, revocation or join, sealed for this device |
+| `POST /sync/forward` (signed) `{to, env}` | Pass a sealed clip on to `to` (one hop) when the sender can't reach it |
 
 ### Offer
 
@@ -182,7 +185,8 @@ auto-accepted; anything else is treated as a stranger (asked first).
 ## Security notes and limits
 
 * **Transport is plain HTTP on the LAN.** Pairing authenticates devices and
-  protects against tampering with *who* is sending, but file contents are not
+  protects against tampering with *who* is sending. Synced clipboard contents
+  are sealed per recipient (see [sync.md](sync.md)); file contents are not
   encrypted in transit — anyone who can capture traffic on your Wi-Fi could
   read them. Use networks you trust, a PIN for the web UI, and paired-only mode
   on shared networks. TLS with pinned per-device certificates is on the roadmap.

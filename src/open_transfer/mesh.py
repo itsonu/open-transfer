@@ -80,6 +80,8 @@ from open_transfer.storage import (
     file_kind,
     safe_filename,
 )
+from open_transfer.sync.engine import SyncEngine
+from open_transfer.sync.store import SyncStore
 
 log = logging.getLogger("open_transfer")
 
@@ -322,6 +324,17 @@ class Mesh:
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self._hellos: set[Future[bool]] = set()
+        self.sync = SyncEngine(
+            me=lambda: self.identity.to_dict(),
+            trust=self.trust,
+            store=SyncStore(state),
+            selected=lambda: set(self.clipboard.settings()["allowed"]),
+            post=self._sync_post,
+            online=self._online_ids,
+            describe=self._describe_peer,
+            submit=self._submit,
+            meet=self._meet,
+        )
 
     # ------------------------------------------------------------- lifecycle
 
@@ -495,6 +508,8 @@ class Mesh:
             if is_new:
                 log.info("Found %s (%s) at %s", log_safe(peer.name), peer.platform, peer.address)
         self.trust.rename(peer_id, peer.name)
+        if is_new and self.trust.get(peer_id):
+            self._submit(lambda: self.sync.peer_online(peer_id))
         return peer
 
     def _on_packet(self, packet: dict[str, Any], src: str) -> None:
@@ -713,6 +728,7 @@ class Mesh:
         self._rotate_code()
         self._upsert_peer(info, client)
         log.info("Paired with %s", log_safe(clean_name(info.get("name"))))
+        self._submit(lambda: self.sync.paired(device_id))
         return {"proof": pair_proof(code, "a", nonce_a, nonce_b, self.id, device_id)}
 
     def pair_with(self, code: str, address: str | None = None) -> Peer:
@@ -751,6 +767,7 @@ class Mesh:
             raise MeshError(502, "pair_failed", "The other device couldn’t prove it has the code.")
         self.trust.add(peer.id, peer.name, pair_key(code, nonce_a, nonce_b, peer.id, self.id))
         log.info("Paired with %s", log_safe(peer.name))
+        self._submit(lambda: self.sync.paired(peer.id))
         return peer
 
     def _find_by_code(self, code: str) -> Peer:
@@ -781,10 +798,75 @@ class Mesh:
         )
 
     def unpair(self, device_id: str) -> bool:
+        """Forget ``device_id``; with sync on, every member of the network forgets it too."""
         allowed = self.clipboard.settings()["allowed"]
         if device_id in allowed:
             self.clipboard.set_settings(allowed=[i for i in allowed if i != device_id])
+        if not self.trust.get(device_id):
+            return False
+        if self.sync.active():
+            self.sync.revoke(device_id)
+            return True
         return self.trust.remove(device_id)
+
+    # ---------------------------------------------------------------- sync
+
+    def _submit(self, fn: Callable[[], Any]) -> Future[Any]:
+        try:
+            return self._executor.submit(fn)
+        except RuntimeError:  # shutting down: do it here instead
+            future: Future[Any] = Future()
+            try:
+                future.set_result(fn())
+            except Exception as exc:
+                future.set_exception(exc)
+            return future
+
+    def _online_ids(self) -> set[str]:
+        with self._lock:
+            return {p.id for p in self._peers.values() if p.online}
+
+    def _describe_peer(self, device_id: str) -> dict[str, Any] | None:
+        with self._lock:
+            peer = self._peers.get(device_id)
+            if peer is None:
+                return None
+            return {
+                "id": peer.id,
+                "name": peer.name,
+                "form": peer.form,
+                "platform": peer.platform,
+                "address": peer.address,
+            }
+
+    def _meet(self, device_id: str, address: str) -> None:
+        """A member introduced us to ``device_id`` at ``address``: find it there if we can't see it."""
+        with self._lock:
+            known = self._peers.get(device_id)
+        if known is not None and known.online:
+            return
+
+        def look() -> None:
+            try:
+                host, port = _parse_address(address)
+                probe = Peer("d-00000000", "", "computer", "unknown", host, port)
+                status, info = self._http(probe, "GET", f"{P2P}/info", timeout=4)
+            except (OSError, MeshError):
+                return
+            if status == 200 and info.get("id") == device_id:
+                peer = self._upsert_peer(info, host, manual=True)
+                if peer is not None:
+                    self._say_hello(peer)
+
+        self._submit(look)
+
+    def _sync_post(self, dst: str, kind: str, body: dict[str, Any]) -> tuple[int, dict[str, Any]]:
+        with self._lock:
+            peer = self._peers.get(dst)
+        if peer is None or not peer.online or self._stop.is_set():
+            raise OSError("not nearby")
+        path = f"{P2P}/sync/forward" if kind == "forward" else f"{P2P}/sync"
+        return self._http(peer, "POST", path, body=body, timeout=10)
 
     # ----------------------------------------------------------- clipboard
 
@@ -2302,6 +2384,10 @@ class Mesh:
                     if now - manual_known.get(address, -1e9) >= HELLO_EVERY * 2:
                         manual_known[address] = now
                         self._executor.submit(self._connect_quietly, address)
+            try:
+                self.sync.tick()
+            except Exception:
+                log.warning("Clipboard sync housekeeping failed", exc_info=True)
 
     def _connect_quietly(self, address: str) -> None:
         with contextlib.suppress(MeshError, ValueError):
