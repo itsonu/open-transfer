@@ -227,6 +227,7 @@ def test_the_native_clipboard_round_trip() -> None:
     agent = real_agent()
     before = agent.change_token()
     text = f"Open Transfer test {time.time()} ✓"
+    wrote = False
     try:
         wrote = agent.write(text, sensitive=False)
     except OSError as exc:
