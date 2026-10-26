@@ -143,6 +143,14 @@ sides, the file opens correctly afterwards, and it's in **Downloads/Open Transfe
 ## 7. Clipboard sync network
 
 Turn on **Clipboard → Clipboard sync** on every device first. Design and limits: [sync.md](sync.md).
+
+**Let the script do most of it** (≈ 2 min): on a Mac or PC with the desktop app open and your Android devices on adb (USB or wireless debugging, as in §0):
+
+```sh
+python scripts/clipboard_check.py                  # add --apk open-transfer-android.zip to install a build first
+```
+
+It pairs this computer with each Android device if needed, turns sync on, and checks with the **real clipboards**: this computer → Android (app in front, in the background, screen off), Android → this computer (share sheet, and the tile reading the phone's own clipboard), private text held back, your other computers (it shows text to copy there and asks what arrived) and syncing with the window closed. Results: `clipboard-check-<time>.md`.
 `tests/test_sync_matrix.py` already runs all ten device pairs, both ways, with a stand-in clipboard; these checks are the real clipboards.
 
 | # | Check | Result |
