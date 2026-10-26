@@ -107,6 +107,13 @@ sides, the file opens correctly afterwards, and it's in **Downloads/Open Transfe
 | Android phone → Samsung Tab | | | |
 | Samsung Tab → Android phone | | | |
 
+**From the share sheet (Android).** In Photos (or Files), share one photo, then
+several photos and a video together, then a PDF from Files: **Open Transfer** is in
+the list each time; the app opens with them ready to send ("N files ready — choose
+who to send to"); tap a device and **Send**; they arrive intact. Sharing *text*
+shows only **Send to my devices** (not Open Transfer twice). Sharing a `.txt` file
+from Files sends the file, not the clipboard.
+
 ## 4. One-to-one, one-to-many, everyone
 
 | # | Check | Result |

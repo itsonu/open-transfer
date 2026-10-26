@@ -150,7 +150,10 @@ function enterMain() {
       if (!document.hidden) poll(true);
     });
     setInterval(updateRelativeTimes, 30_000);
-    announceSelf().then(() => poll(true));
+    window.addEventListener("ot-native-share", () => takeShared());
+    announceSelf()
+      .then(() => poll(true))
+      .finally(() => takeShared());
     return;
   }
   poll(true);
@@ -1013,6 +1016,42 @@ function setupDropAndPaste() {
       sendText(text, "Pasted text");
     }
   });
+}
+
+// Photos and files shared to Open Transfer from another app's share sheet
+// (Android). The app keeps hold of them and serves their bytes on this page's
+// own origin at /__shared/… (SharedFiles.kt); here they become files ready to
+// send, exactly like ones picked or dropped.
+const SHARED_URL = /^\/__shared\/[\w-]+\/\d+$/;
+
+async function takeShared() {
+  const app = nativeApp();
+  if (!app?.takeShared || !state.info.owner || state.locked) return;
+  let shared = null;
+  try {
+    shared = JSON.parse(app.takeShared() || "null");
+  } catch {
+    return;
+  }
+  const items = Array.isArray(shared?.files) ? shared.files : [];
+  if (!items.length) return;
+  const total = items.reduce((n, item) => n + Math.max(0, Number(item.size) || 0), 0);
+  if (total > 20_000_000) toast(`Getting ${plural(items.length, "shared file")} ready…`, { icon: "clock" });
+  const files = [];
+  let failed = 0;
+  for (const item of items) {
+    try {
+      if (!SHARED_URL.test(String(item.url))) throw new Error("not a shared file");
+      const res = await fetch(item.url, { cache: "no-store" });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const blob = await res.blob();
+      files.push(new File([blob], String(item.name || "Shared file"), { type: item.mime || blob.type }));
+    } catch {
+      failed += 1;
+    }
+  }
+  if (failed) toast(`Couldn’t read ${plural(failed, "shared file")}`, { tone: "error", icon: "alert" });
+  enqueueFiles(files, { source: "share" });
 }
 
 /** Text to send, as a .txt file; private-looking text asks first. */

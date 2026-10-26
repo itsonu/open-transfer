@@ -49,4 +49,31 @@ esac
 echo "Real transfer: phone -> CI runner"
 python android/ci/smoke_transfer.py
 
+# The share sheet lists the apps whose activities resolve the intent.
+offered() { # action mime activity
+  adb shell "cmd package query-activities --components -a '$1' -t '$2'" | tr -d '\r' \
+    | grep -E "(^|[[:space:]])$PKG/(\.|$PKG\.)$3([[:space:]]|\$)" >/dev/null
+}
+echo "Share sheet: offered for photos, videos and files"
+for type in image/jpeg image/png video/mp4 audio/mpeg application/pdf application/zip text/csv; do
+  offered android.intent.action.SEND "$type" MainActivity || { echo "Not offered for $type"; exit 1; }
+done
+offered android.intent.action.SEND_MULTIPLE "image/*" MainActivity || { echo "Not offered for several photos"; exit 1; }
+offered android.intent.action.SEND text/plain ClipboardSendActivity || { echo "Not offered for text"; exit 1; }
+if offered android.intent.action.SEND text/plain MainActivity; then
+  echo "Text would show Open Transfer twice in the share sheet"; exit 1
+fi
+
+echo "Sharing a photo hands it to the app"
+adb logcat -c || true
+adb shell am start -W -a android.intent.action.SEND -t image/jpeg \
+  --eu android.intent.extra.STREAM "content://media/external/images/media/1" -n "$PKG/.MainActivity"
+deadline=$((SECONDS + 20))
+until adb logcat -d -s OpenTransfer:I | grep "Shared 1 file" >/dev/null; do
+  if [ "$SECONDS" -ge "$deadline" ]; then echo "The app never took the shared photo"; exit 1; fi
+  sleep 1
+done
+adb shell pidof "$PKG" >/dev/null || { echo "The app died after the share"; exit 1; }
+curl -sf --max-time 5 "http://127.0.0.1:$PORT/api/health" >/dev/null || { echo "Server gone after the share"; exit 1; }
+
 echo "Smoke test passed"

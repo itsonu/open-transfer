@@ -3,10 +3,12 @@ package io.github.itsonu.opentransfer
 import android.app.Activity
 import android.app.AlertDialog
 import android.content.Intent
+import android.net.Uri
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.widget.Toast
+import androidx.core.content.IntentCompat
 import org.json.JSONObject
 import kotlin.concurrent.thread
 
@@ -20,6 +22,9 @@ import kotlin.concurrent.thread
  *
  * Private-looking text (passwords, codes, keys) asks first. A short message says where
  * it went, then the activity closes.
+ *
+ * A *file* shared as text (a .txt from a file manager) isn't a clip: it's copied in and
+ * opened in [MainActivity] to send like any other shared file (see [SharedFiles]).
  */
 class ClipboardSendActivity : Activity() {
     private val main = Handler(Looper.getMainLooper())
@@ -28,7 +33,36 @@ class ClipboardSendActivity : Activity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         handled = savedInstanceState?.getBoolean(KEY_HANDLED) ?: false
+        if (isFile()) {
+            if (!handled) openAsFile()
+            return
+        }
         given()?.let { send(it) }
+    }
+
+    private fun isFile(): Boolean {
+        val share = intent ?: return false
+        val stream = IntentCompat.getParcelableExtra(share, Intent.EXTRA_STREAM, Uri::class.java)
+        val text = share.getCharSequenceExtra(Intent.EXTRA_TEXT)
+        return SharePolicy.isFileShare(share.action, stream != null, !text.isNullOrEmpty())
+    }
+
+    private fun openAsFile() {
+        handled = true
+        val app = applicationContext
+        val share = intent
+        thread(name = "ot-share-copy", isDaemon = true) {
+            // Our access to it ends when this activity closes, so copy it first.
+            val kept = SharedFiles.copyIn(app, share)
+            main.post {
+                if (kept == 0) {
+                    done(getString(R.string.share_nothing))
+                } else {
+                    startActivity(Intent(app, MainActivity::class.java).setAction(MainActivity.ACTION_SHOW_SHARED))
+                    finish()
+                }
+            }
+        }
     }
 
     override fun onSaveInstanceState(outState: Bundle) {

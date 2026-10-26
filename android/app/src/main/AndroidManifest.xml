@@ -46,6 +46,33 @@
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
+            <!-- Photos, videos and files from any app's share sheet (SharedFiles.kt).
+                 text/plain is left to ClipboardSendActivity ("Send to my devices"), which
+                 hands a shared .txt file back here. -->
+            <intent-filter>
+                <action android:name="android.intent.action.SEND" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="image/*" />
+                <data android:mimeType="video/*" />
+                <data android:mimeType="audio/*" />
+                <data android:mimeType="application/*" />
+                <data android:mimeType="font/*" />
+                <data android:mimeType="model/*" />
+                <data android:mimeType="text/calendar" />
+                <data android:mimeType="text/comma-separated-values" />
+                <data android:mimeType="text/csv" />
+                <data android:mimeType="text/html" />
+                <data android:mimeType="text/markdown" />
+                <data android:mimeType="text/rtf" />
+                <data android:mimeType="text/vcard" />
+                <data android:mimeType="text/x-vcard" />
+                <data android:mimeType="text/xml" />
+            </intent-filter>
+            <intent-filter>
+                <action android:name="android.intent.action.SEND_MULTIPLE" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="*/*" />
+            </intent-filter>
         </activity>
 
         <service

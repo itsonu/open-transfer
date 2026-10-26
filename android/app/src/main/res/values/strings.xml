@@ -31,6 +31,7 @@
 
     <string name="tile_label">Send clipboard</string>
     <string name="share_label">Send to my devices</string>
+    <string name="share_nothing">Couldn’t open what was shared.</string>
     <string name="clip_sent_to">Sent to %1$s</string>
     <string name="clip_waiting_for">Will reach %1$s when it’s nearby</string>
     <string name="clip_off">Clipboard sync is off. Turn it on in Open Transfer → Clipboard sync.</string>
