@@ -28,4 +28,20 @@
     <string name="download_started">Downloading to Download…</string>
     <string name="download_failed">Couldn’t download that file.</string>
     <string name="no_file_picker">No file picker is available.</string>
+
+    <string name="tile_label">Send clipboard</string>
+    <string name="share_label">Send to my devices</string>
+    <string name="clip_sent_to">Sent to %1$s</string>
+    <string name="clip_waiting_for">Will reach %1$s when it’s nearby</string>
+    <string name="clip_off">Clipboard sync is off. Turn it on in Open Transfer → Clipboard sync.</string>
+    <string name="clip_paused">Clipboard sync is paused.</string>
+    <string name="clip_no_devices">No devices to sync with yet.</string>
+    <string name="clip_nothing">Nothing copied.</string>
+    <string name="clip_too_large">That’s too big to sync (1 MB of text at most).</string>
+    <string name="clip_type">That kind of clip isn’t synced (see Clipboard sync).</string>
+    <string name="clip_stopped">Open Transfer couldn’t start. Open it to see why.</string>
+    <string name="clip_not_sent">Not sent.</string>
+    <string name="clip_private_title">This looks private</string>
+    <string name="clip_private_text">It looks like a password, code, card number or key. Send it to your devices anyway?</string>
+    <string name="clip_send_anyway">Send anyway</string>
 </resources>

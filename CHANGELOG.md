@@ -14,6 +14,10 @@ All notable changes are documented here. The format follows [Keep a Changelog](h
 - **Runs in the background:** with sync on, closing the window keeps Open Transfer syncing; opening the app shows a window onto it. **Start at login** (a LaunchAgent on macOS that restarts after a crash, the Run key on Windows, autostart on Linux), a **menu-bar item** on macOS (open, pause for an hour, quit), and **Quit** in the page.
 - **Clipboard sync sheet:** turn sync on, see whether it's working, pause it, choose all devices or selected ones, automatic or only when asked, text and links, what to do with passwords and codes, how long a clip waits for a device that's away, apps to leave out, start at login, recent activity (never the contents), remove a device from every device, or leave the network.
 - `open-transfer --clipboard` syncs the clipboard from the command line too.
+- **Clipboard sync on Android:** clips from your other devices go straight onto the phone's or tablet's clipboard in the background. To send, use the new **Send clipboard** Quick Settings tile, **Share → Send to my devices**, the text-selection menu, or just open the app (a new copy goes out as it comes to the front). Android 10+ only lets the app in front read the clipboard, so sending always takes that one step.
+
+### Changed
+- Android: the background service runs as a *connected device* service, so Android 15+ no longer stops it after about 6 hours a day.
 
 ### Fixed
 - Paired apps can share clipboards with a device that has a PIN (the PIN is for people; paired apps sign their requests).

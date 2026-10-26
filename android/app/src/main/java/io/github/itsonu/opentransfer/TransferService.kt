@@ -121,7 +121,7 @@ class TransferService : Service() {
         return START_NOT_STICKY
     }
 
-    /** Android 15+: dataSync services get about 6 hours a day in the background. */
+    /** Android 15+ ends time-limited service types (dataSync); kept for older builds' types. */
     override fun onTimeout(startId: Int, fgsType: Int) {
         Log.w(LOG_TAG, "Android ended the background time for today; stopping")
         restartAfterStop = false
@@ -151,7 +151,9 @@ class TransferService : Service() {
                 this,
                 Notifications.SERVICE_ID,
                 Notifications.service(this),
-                ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC,
+                // Reachable by your other devices (and receiving their clips) for as long
+                // as you keep it on: dataSync would be cut off after ~6 hours on Android 15+.
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE,
             )
             true
         } catch (e: Exception) {

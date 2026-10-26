@@ -150,6 +150,20 @@ Forwarding never opens the payload: the source seals it for the final recipient.
 
 Clips the agent writes carry its own marker (`io.github.itsonu.open-transfer.synced`), so it never reports them back as copies; the engine's echo check is the second guard.
 
+## Using it on Android (phase 3)
+
+| You want to… | Do this | Why this way |
+|---|---|---|
+| **Get** what you copied elsewhere | Nothing: it's on the clipboard. Long-press → Paste | The service writes the clipboard in the background, which Android allows |
+| **Send** what you copied | Swipe down → **Send clipboard** tile (add it once: edit tiles → drag it in) | Android 10+ lets only the app in front read the clipboard; the tile opens an invisible screen for that instant |
+| Send selected text | Select → ⋮ → **Send to my devices** | Text-selection menu (`PROCESS_TEXT`) |
+| Send from any app | Share → **Send to my devices** | Share sheet (`SEND text/plain`) |
+| Send automatically | Just open Open Transfer: a new copy goes out as it comes to the front | Only when sync is on and set to **Every time I copy**. It checks the clip's timestamp first, so Android's "pasted from your clipboard" message appears only for a new copy |
+
+- The service now runs as a **connected device** service, so Android 15+ doesn't stop it after 6 hours a day (that limit applies to `dataSync`). Its prerequisite, `CHANGE_WIFI_MULTICAST_STATE`, was already declared for discovery.
+- Clips marked private are written with `EXTRA_IS_SENSITIVE`: Android 13+ hides them in the "copied" preview, and keyboards don't suggest them.
+- OEM battery savers (Samsung, Xiaomi, OnePlus…) may still stop background apps. If clips stop arriving, set Open Transfer to **Unrestricted** battery use. See the real-device checklist.
+
 ## Policies (per device and global)
 
 | Setting | Default |
@@ -174,7 +188,7 @@ Clips the agent writes carry its own marker (`io.github.itsonu.open-transfer.syn
 | **0** | The audit and capability matrix (this page) | ✅ |
 | **1** | Shared protocol, trusted network, introductions/revocation, policies, engine, P2P + UI API. Tests first (`tests/test_sync.py`, `tests/test_sync_api.py`) | ✅ |
 | **2** | Desktop agents (macOS, Windows, Linux), `--background` agent, start at login, window = view, settings UI. Mac ↔ Windows with both windows closed (`tests/test_clipagent.py`, `tests/test_background.py`, `tests/e2e/test_sync_ui.py`) | ✅ (real-device check pending) |
-| **3** | Android: background clipboard write, Quick Settings tile, Share sheet and text-selection send, send on focus | ⏳ |
+| **3** | Android: background clipboard write, Quick Settings tile, Share sheet and text-selection send, send on focus (`tests/test_android.py`; Kotlin built in CI) | ✅ (real-device check pending) |
 | **4** | iOS/iPadOS via Shortcuts (token enrolment, push/pull, setup guide). ⛔ A native iOS app is blocked on an Apple developer account | ⏳ |
 | **5** | Tests for all ten pairs, both directions, plus fan-out, offline, concurrent copies and revocation; the real-device checklist | ⏳ |
 | **6** | Images, rich content, diagnostics, a cross-network relay. **Only after 1–5 prove reliable on real devices** | ⏳ |
