@@ -303,31 +303,16 @@ class SignatureChecker:
 
 # ------------------------------------------------------------------ pairing
 #
-# Pairing proves both sides know the same short code without sending it:
-#   1. B → A  {nonce_b}            A → B  {nonce_a}
-#   2. B → A  {proof_b}            A → B  {proof_a}
-# proof_x = HMAC(code, role | nonce_a | nonce_b | id_a | id_b), and the shared
-# key is HMAC(code, "key" | nonce_a | nonce_b | id_a | id_b). Each code is
-# short-lived and guesses are rate-limited.
+# Pairing runs SRP over the short code (see srp.py): someone watching learns
+# nothing to test guesses against, and someone pretending gets one guess per
+# attempt. The SRP session key K then gives the pair's long-term key.
 
 
-def _pair_mac(code: str, label: str, nonce_a: str, nonce_b: str, id_a: str, id_b: str) -> bytes:
-    message = f"open-transfer-pair/1\n{label}\n{nonce_a}\n{nonce_b}\n{id_a}\n{id_b}".encode()
-    return hmac.new(code.encode(), message, hashlib.sha256).digest()
-
-
-def pair_proof(code: str, role: str, nonce_a: str, nonce_b: str, id_a: str, id_b: str) -> str:
-    return _pair_mac(code, role, nonce_a, nonce_b, id_a, id_b).hex()
-
-
-def pair_key(code: str, nonce_a: str, nonce_b: str, id_a: str, id_b: str) -> bytes:
-    return _pair_mac(code, "key", nonce_a, nonce_b, id_a, id_b)
+def derive_pair_key(session_key: bytes, id_a: str, id_b: str) -> bytes:
+    """The long-term key for the pair (id_a shows the code, id_b enters it)."""
+    message = f"open-transfer-pair-key/2|{id_a}|{id_b}".encode()
+    return hmac.new(session_key, message, hashlib.sha256).digest()
 
 
 def new_pair_code() -> str:
     return f"{secrets.randbelow(10**6):06d}"
-
-
-def code_hint(code: str) -> str:
-    """What a device broadcasts to find whoever is showing ``code``."""
-    return hashlib.sha256(f"open-transfer-find/1\n{code}".encode()).hexdigest()[:16]

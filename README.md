@@ -159,7 +159,7 @@ Any device can send to any other — there's no host or server role. A phone wit
 - Each device shows its **name, type and platform**; rename yours in one tap
 - Send to **one, several or all** devices; recipients are always shown before you send, and sending to everyone needs a confirmation
 - **Accept / Decline** prompt on the receiver with the sender, file names and sizes; offers expire after 2 minutes
-- **Pairing** with a QR code or 6-digit code (proved with HMAC, never sent in clear); paired devices auto-accept. Owners can also mint a **single-use guest link** (past the PIN, expires in 10 minutes)
+- **Pairing** with a QR code or 6-digit code (SRP: nothing on the Wi‑Fi lets anyone test a guess; it only works while Add device is open); paired devices auto-accept. Owners can also mint a **single-use guest link** (past the PIN, expires in 10 minutes)
 - **Paired-only** mode (like AirDrop's "Contacts only"), and add-by-address where multicast is blocked
 - Browsers without the app join a device's group by QR code and can send and receive too — **browser to browser goes direct** over WebRTC (falls back to the app if the network blocks it). Add the page to the home screen to use it like an app.
 

@@ -142,7 +142,7 @@ def pair_of_apps(tmp_path: Path) -> Iterator[tuple[Server, Server]]:
     second = _start(tmp_path, name="Bravo", owner=True)
     bravo = next(second)
     gens.append(second)
-    code = call(bravo, "GET", "/api/state")["pairing"]["code"]
+    code = call(bravo, "POST", "/api/pair/open")["code"]
     port = bravo.url.rsplit(":", 1)[1]
     call(alpha, "POST", "/api/pair", {"code": code, "address": f"127.0.0.1:{port}"})
     yield alpha, bravo

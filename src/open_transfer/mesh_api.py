@@ -47,8 +47,8 @@ PUBLIC_P2P_ENDPOINTS = {
     "p2p_offer_upload",
     "p2p_offer_file_status",
     "p2p_offer_cancel",
-    "p2p_pair",
-    "p2p_pair_confirm",
+    "p2p_pair_begin",
+    "p2p_pair_prove",
     "p2p_signal",
     # These check the sender's signature themselves (a PIN is for people, not paired apps).
     "p2p_clip",
@@ -286,19 +286,21 @@ def register(
         mesh.handle_signal(body_json())
         return jsonify({"ok": True})
 
-    @app.post(f"{P2P}/pair")
-    def p2p_pair() -> Response:
+    @app.post(f"{P2P}/pair/begin")
+    def p2p_pair_begin() -> Response:
         data = body_json()
         device = data.get("device")
         if not isinstance(device, dict):
             raise MeshError(400, "bad_request", "Missing device.")
-        return jsonify(mesh.pair_begin(device, str(data.get("nonce", "")), client()))
+        return jsonify(mesh.pair_begin(device, client()))
 
-    @app.post(f"{P2P}/pair/confirm")
-    def p2p_pair_confirm() -> Response:
+    @app.post(f"{P2P}/pair/prove")
+    def p2p_pair_prove() -> Response:
         data = body_json()
         return jsonify(
-            mesh.pair_confirm(str(data.get("id", "")), str(data.get("proof", "")), client())
+            mesh.pair_prove(
+                str(data.get("id", "")), str(data.get("a", "")), str(data.get("m1", "")), client()
+            )
         )
 
     # ================================================================ web UI
@@ -850,6 +852,17 @@ def register(
         address = str(data.get("address") or "").strip() or None
         peer = mesh.pair_with(str(data.get("code", "")), address)
         return jsonify({"device": {"id": peer.id, "name": peer.name}})
+
+    @app.post("/api/pair/open")
+    def ui_pair_open() -> Response:
+        owner_only()
+        return jsonify(mesh.open_pairing())
+
+    @app.post("/api/pair/close")
+    def ui_pair_close() -> Response:
+        owner_only()
+        mesh.close_pairing()
+        return jsonify({"ok": True})
 
     @app.post("/api/pair/new-code")
     def ui_new_code() -> Response:

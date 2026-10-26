@@ -24,6 +24,7 @@ export const mesh = {
   promptId: null,
   seen: new Map(), // incoming id -> last state
   paired: null, // ids of paired devices (to notice new pairings)
+  pairTimer: null, // keeps Add device's pairing window open while the sheet shows
   directFiles: [], // files received straight from another browser (kept in memory)
   tiles: new Map(), // device id -> { el, sig }
   incomingRows: new Map(),
@@ -1683,13 +1684,37 @@ function formatCode(code) {
 function fillPairing() {
   const pairing = mesh.data?.pairing;
   if (!pairing) return;
-  $("#pair-code").textContent = formatCode(pairing.code);
-  $("#pair-code").setAttribute("aria-label", `Pairing code ${pairing.code.split("").join(" ")}`);
+  // Until the app says the window is open, the code it has isn't the one that will work.
+  $("#pair-code").textContent = pairing.open ? formatCode(pairing.code) : "––– –––";
+  $("#pair-code").setAttribute("aria-label", pairing.open ? `Pairing code ${pairing.code.split("").join(" ")}` : "Getting a pairing code");
   const qr = $("#qr-image");
-  const src = `/api/pair/qr.svg?c=${encodeURIComponent(pairing.code)}`;
-  if (qr.getAttribute("src") !== src) qr.src = src;
+  const src = pairing.open ? `/api/pair/qr.svg?c=${encodeURIComponent(pairing.code)}` : "";
+  if (!src) qr.removeAttribute("src");
+  else if (qr.getAttribute("src") !== src) qr.src = src;
   const minutes = Math.max(1, Math.round(pairing.expires_in / 60));
   $("#pair-expiry-text").textContent = `Changes in ${minutes} min`;
+}
+
+// A code only works while Add device is open on its device: tell the app when
+// the sheet opens, renew it while it stays open, and say when it closes.
+function holdPairingOpen() {
+  const renew = () =>
+    api("/api/pair/open", { method: "POST" })
+      .then(({ data }) => {
+        if (mesh.data) mesh.data.pairing = { ...data, open: true };
+        fillPairing();
+      })
+      .catch(() => {});
+  clearInterval(mesh.pairTimer);
+  renew();
+  mesh.pairTimer = setInterval(() => ($("#connect-dialog").open ? renew() : releasePairing()), 20000);
+}
+
+function releasePairing() {
+  if (!mesh.pairTimer) return;
+  clearInterval(mesh.pairTimer);
+  mesh.pairTimer = null;
+  api("/api/pair/close", { method: "POST" }).catch(() => {});
 }
 
 export function openAddDevice({ tab = "show" } = {}) {
@@ -1703,8 +1728,10 @@ export function openAddDevice({ tab = "show" } = {}) {
     : "Scan with another phone’s camera, or open the link on any device on the same Wi-Fi.";
   const info = state.info;
   $("#share-url").textContent = info.share_url;
-  if (owner) fillPairing();
-  else $("#qr-image").src = `/api/qr.svg?v=${encodeURIComponent(info.share_url)}`;
+  if (owner) {
+    fillPairing();
+    holdPairingOpen();
+  } else $("#qr-image").src = `/api/qr.svg?v=${encodeURIComponent(info.share_url)}`;
   $("#pin-note").hidden = !info.pin;
   $("#pin-note-value").textContent = info.pin || "";
   $("#share-url-button").hidden = !navigator.share;
@@ -1821,7 +1848,10 @@ function setupConnectSheet() {
   dialog.addEventListener("click", (event) => {
     if (event.target === dialog) dialog.close();
   });
-  dialog.addEventListener("close", stopScanner);
+  dialog.addEventListener("close", () => {
+    stopScanner();
+    releasePairing();
+  });
   for (const tab of document.querySelectorAll("#connect-dialog [role=tab]")) {
     tab.addEventListener("click", () => setTab(tab.dataset.tab));
     tab.addEventListener("keydown", (event) => {

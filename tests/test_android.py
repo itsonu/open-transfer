@@ -67,7 +67,7 @@ def test_sending_from_the_tile_or_share_sheet(phone: Listener, make_node: NodeFa
 
     mac = make_node("Mac")
     owner(mac)("PUT", "/api/sync/policy", {"enabled": True})
-    code = owner(mac).state()["pairing"]["code"]
+    code = owner(mac)("POST", "/api/pair/open")[1]["code"]
     android._node.mesh.pair_with(code, f"127.0.0.1:{mac.port}")
     got: list[str] = []
     mac.mesh.sync.set_writer(lambda text, info: got.append(text) or True)

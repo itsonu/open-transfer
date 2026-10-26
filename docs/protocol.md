@@ -47,10 +47,10 @@ only from the address we hold for that device; from any other address we say
 hello to the device there first, and it's gone only if it doesn't answer. `rev` changes when the
 app's visitors or name change, prompting others to fetch its info.
 
-**find** — "whoever is showing this pairing code, answer":
-`{"type": "find", "id": "d-…", "find": "<hint>"}` where
-`hint = sha256("open-transfer-find/1\n" + code)[:16]`. The app showing that
-code sends a `reply` with `"found": "<hint>"`.
+**find** — "whoever has Add device open, answer": `{"type": "find", "id": "d-…"}`.
+Nothing about the code is sent. An app whose Add device screen is open answers
+with a `reply`, and its announcements and `/info` carry `"pairing": true` while
+it stays open.
 
 Multicast is often blocked (guest Wi-Fi, some routers, Docker). So apps also:
 
@@ -77,7 +77,7 @@ between **paired** apps carry a signature (§4).
 | `PUT /offers/<id>/files/<n>` + `X-OT-Secret`, `Content-Range` | One 2 MiB piece of a big file → `308 {received, ranges}` until complete, then `201`. Pieces may arrive in any order; the receiver stages them sparsely and publishes atomically |
 | `GET /offers/<id>/files/<n>/status` + `X-OT-Secret` | Staged bytes/ranges for one incoming file (sender resumes the missing pieces) |
 | `DELETE /offers/<id>` + `X-OT-Secret` | Sender cancels |
-| `POST /pair`, `POST /pair/confirm` | Pairing (§3) |
+| `POST /pair/begin`, `POST /pair/prove` | Pairing (§3) |
 | `POST /clip` (signed) | A clipboard item shared by hand (both sides must allow each other) |
 | `POST /sync` (signed) `{env}` | A [`sync/1` envelope](sync.md#protocol-sync1): clip, introduction, revocation or join, sealed for this device |
 | `POST /sync/forward` (signed) `{to, env}` | Pass a sealed clip on to `to` (one hop) when the sender can't reach it |
@@ -148,23 +148,33 @@ receiver page → its app      POST /api/signal {session, kind: "answer", sdp}
 
 ## 3. Pairing
 
-Pairing proves both apps know the same short-lived 6-digit code **without
-sending it**, and leaves them with a shared 32-byte key. A is the app showing
-the code, B the one entering it.
+Pairing runs **SRP-6a** (RFC 5054: 2048-bit group, SHA-256) over the
+short-lived 6-digit code, and leaves both apps with a shared 32-byte key. A is
+the app showing the code, B the one entering it; the SRP identity is
+`"<idA>|<idB>"`.
 
 ```
-B → A  POST /pair          {device: B-info, nonce: nb}
-A → B                       {nonce: na, device: A-info}
-B → A  POST /pair/confirm  {id: B, proof: HMAC(code, "b"|na|nb|A|B)}
-A → B                       {proof: HMAC(code, "a"|na|nb|A|B)}
-key = HMAC(code, "key"|na|nb|A|B)
+B → A  POST /pair/begin  {device: B-info}
+A → B                     {salt, b: B (hex), device: A-info}
+B → A  POST /pair/prove  {id: B, a: A (hex), m1: M1}
+A → B                     {m2: M2}
+key = HMAC-SHA256(K, "open-transfer-pair-key/2|<idA>|<idB>")
 ```
 
-(Each HMAC is SHA-256 over `"open-transfer-pair/1\n<label>\n<na>\n<nb>\n<idA>\n<idB>"`.)
-A rate-limits confirmations (5 per minute per address) and shows a new code
-after 10 wrong guesses, after every successful pairing, and every 10 minutes.
-B verifies A's proof too, so both sides authenticate. Keys are stored in
-`<state>/trusted.json` (mode 0600).
+`K` is SRP's session key; `M1` and `M2` prove each side has it. Someone who
+sees every message can't test a guess offline (not even the right code), and
+someone pretending to be A or B gets one guess per attempt.
+
+A accepts the code only while its **Add device** screen is open: the page
+renews a 30-second window while it shows, and opening it shows a fresh code.
+A rate-limits proofs (5 per minute per address) and shows a new code after 10
+wrong guesses, after every successful pairing, and every 10 minutes. Keys are
+stored in `<state>/trusted.json` (mode 0600). An app from before SRP answers
+`/pair/begin` with 404, and B says to update it.
+
+Entering a code without an address: B sends a multicast **find** and asks every
+device it knows for `/info`, then runs SRP with those showing `"pairing": true`
+(devices it isn't paired with first).
 
 The QR code in "Add a device" is `http://<ip>:<port>/?pair=<code>` (+ `&join=<token>` with a PIN set: 10 minutes, never the PIN).
 The Android app scans it and pairs as above; a phone camera simply opens it,

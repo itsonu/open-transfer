@@ -21,6 +21,8 @@ All notable changes are documented here. The format follows [Keep a Changelog](h
 - **Compatibility tests** for all ten device pairs (Mac, Windows, Android phone and tablet, iPhone/iPad), both ways, plus one copy reaching a six-device network, removal, and expiry while a device is away; real-device checks in [docs/device-testing.md](docs/device-testing.md).
 
 ### Changed
+- **Pairing can't be cracked by listening** ⚠️ *pair again after updating; older apps can't pair with this one*: the code is now checked with SRP (a password-authenticated key exchange). Before, someone on the same Wi‑Fi could work out the code, and the pair's key, from the messages alone. Now nothing sent lets anyone test a guess, and each try is one guess. Entering a code no longer broadcasts anything derived from it.
+- **A pairing code only works while Add device is open** on its device, and opening it shows a fresh one. Entering a code finds whichever nearby device has Add device open; pairing with an older app says to update it.
 - Android: the background service runs as a *connected device* service, so Android 15+ no longer stops it after about 6 hours a day.
 
 ### Fixed

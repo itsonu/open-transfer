@@ -263,7 +263,7 @@ def test_desktops_sync_both_ways_with_no_window(make_node: NodeFactory) -> None:
     mac, win = make_node("Mac"), make_node("Windows")
     for node in (mac, win):
         sync_on(node)
-    code = owner(win).state()["pairing"]["code"]
+    code = owner(win)("POST", "/api/pair/open")[1]["code"]
     status, data = owner(mac)(
         "POST", "/api/pair", {"code": code, "address": f"127.0.0.1:{win.port}"}
     )

@@ -46,7 +46,7 @@ from dataclasses import dataclass, field
 from functools import partial
 from typing import Any
 
-from open_transfer import __version__, network
+from open_transfer import __version__, network, srp
 from open_transfer.chunks import CHUNK_SIZE as RESUMABLE_CHUNK_SIZE
 from open_transfer.chunks import ChunkSessions
 from open_transfer.clipboard import IMAGE_MIME as CLIP_IMAGE_MIME
@@ -61,11 +61,9 @@ from open_transfer.devices import (
     clean_form,
     clean_name,
     clean_platform,
-    code_hint,
+    derive_pair_key,
     new_pair_code,
     new_visitor_id,
-    pair_key,
-    pair_proof,
     sign,
     valid_id,
 )
@@ -97,6 +95,7 @@ NETWORK_CHECK_EVERY = 60.0  # how often Windows is asked whether the Wi-Fi is "P
 HELLO_TIMEOUT = 3.0  # seconds a hello may take before we give up on it
 FINISHED_KEEP = 90.0  # finished transfers stay in the UI this long
 PAIR_CODE_TTL = 600.0
+PAIR_WINDOW = 30.0  # a code works this long after the Add device page last renewed it
 STALL_TIMEOUT = 60.0  # a receiver that takes no data for this long is dropped
 CHUNK = 256 * 1024
 MAX_FILES = 1000
@@ -159,6 +158,7 @@ class Peer:
     rev: int = -1
     last_seen: float = 0.0
     left_at: float = 0.0  # when it last said goodbye
+    pairing: bool = False  # it said its Add device screen is open
     manual: bool = False
     visitors: list[dict[str, str]] = field(default_factory=list)
     accepts: str = "everyone"
@@ -318,9 +318,9 @@ class Mesh:
         self._listeners: list[Listener] = []
         self._signatures = SignatureChecker()
         self._pair_limiter = RateLimiter(attempts=5, window=60)
-        self._pair_pending: dict[str, tuple[str, str, dict[str, Any], str, float]] = {}
+        self._pair_pending: dict[str, tuple[srp.Server, dict[str, Any], str, float]] = {}
         self._pair_failures = 0
-        self._find_waiters: dict[str, list[tuple[threading.Event, list[Peer]]]] = {}
+        self._pair_window_until = 0.0
         self._mail: dict[str, list[tuple[float, dict[str, Any]]]] = {}
         self._rotate_code()
         self._rev = 0
@@ -405,6 +405,7 @@ class Mesh:
             "port": self.port,
             "rev": self._rev,
             "ver": __version__,
+            **({"pairing": True} if self.pairing_open else {}),
         }
 
     def self_info(self, *, include_visitors: bool = True) -> dict[str, Any]:
@@ -418,6 +419,7 @@ class Mesh:
             "port": self.port,
             "version": __version__,
             "accepts": "paired" if self.config.paired_only else "everyone",
+            **({"pairing": True} if self.pairing_open else {}),
         }
         if include_visitors:
             with self._lock:
@@ -510,6 +512,7 @@ class Mesh:
             peer.version = str(info.get("version") or info.get("ver") or "")[:20]
             peer.accepts = "paired" if info.get("accepts") == "paired" else "everyone"
             peer.manual = peer.manual or manual
+            peer.pairing = info.get("pairing") is True
             peer.last_seen = time.monotonic()
             if isinstance(info.get("visitors"), list):
                 peer.visitors = _clean_visitors(info["visitors"])
@@ -525,8 +528,8 @@ class Mesh:
             return
         kind = packet["type"]
         if kind == "find":
-            if packet.get("find") == code_hint(self.pair_code) and self.discovery:
-                self.discovery.send({"type": "reply", **self._describe(), "found": packet["find"]})
+            if self.pairing_open and self.discovery:
+                self.discovery.send({"type": "reply", **self._describe()})
             return
         if kind == "bye":
             with self._lock:
@@ -548,12 +551,6 @@ class Mesh:
         if peer is None:
             return
         peer.rev = packet.get("rev", -1) if isinstance(packet.get("rev"), int) else -1
-        found = packet.get("found")
-        if isinstance(found, str):
-            with self._lock:
-                for event, results in self._find_waiters.get(found, []):
-                    results.append(peer)
-                    event.set()
         if fresh:
             # Answer straight away, and say hello over HTTP so they learn about
             # us even if multicast only works in one direction.
@@ -705,12 +702,32 @@ class Mesh:
     def pair_code_expires_in(self) -> int:
         return max(0, round(PAIR_CODE_TTL - (time.monotonic() - self._pair_code_at)))
 
+    @property
+    def pairing_open(self) -> bool:
+        """Is Add device open here? The code only works while it is."""
+        return time.monotonic() < self._pair_window_until
+
+    def open_pairing(self) -> dict[str, Any]:
+        """The owner opened Add device (the page renews this while it stays open)."""
+        opening = not self.pairing_open
+        if opening:
+            self._rotate_code()  # a code seen before the screen opened doesn't work
+        self._pair_window_until = time.monotonic() + PAIR_WINDOW
+        if opening:
+            self._bump()  # announce it, so devices entering the code find us
+        return {"code": self.pair_code, "expires_in": self.pair_code_expires_in()}
+
+    def close_pairing(self) -> None:
+        if self.pairing_open:
+            self._pair_window_until = 0.0
+            self._bump()
+
     def check_visitor_code(self, code: str, client: str) -> bool | float:
         """``True`` if ``code`` is the current pairing code; seconds to wait if rate-limited."""
         wait = self._pair_limiter.attempt(f"visitor:{client}")
         if wait:
             return wait
-        if secrets.compare_digest(str(code).strip(), self.pair_code):
+        if self.pairing_open and secrets.compare_digest(str(code).strip(), self.pair_code):
             self._pair_limiter.reset(f"visitor:{client}")
             self._rotate_code()
             return True
@@ -723,21 +740,43 @@ class Mesh:
             log.warning("Too many wrong pairing codes; showing a new one.")
             self._rotate_code()
 
-    def pair_begin(self, info: dict[str, Any], nonce_b: str, client: str) -> dict[str, Any]:
+    # SRP over the 6-digit code (srp.py): "A" shows the code, "B" enters it.
+    #   1. B → A  {device}             A → B  {salt, B, device}
+    #   2. B → A  {id, A, M1}          A → B  {M2}
+    # Nothing on the wire lets a listener test a guess, and each attempt is one
+    # guess. Both sides derive the pair key from SRP's session key.
+
+    def _not_showing(self) -> MeshError:
+        return MeshError(
+            409,
+            "pairing_not_open",
+            f"{self.identity.name} isn’t showing a pairing code. Open Add device on it first.",
+        )
+
+    def pair_begin(self, info: dict[str, Any], client: str) -> dict[str, Any]:
         """Step 1 on the device showing the code."""
-        if not valid_id(info.get("id")) or not _valid_nonce(nonce_b):
+        device_id = info.get("id")
+        if not valid_id(device_id) or device_id == self.id:
             raise MeshError(400, "bad_request", "Invalid pairing request.")
-        nonce_a = secrets.token_hex(16)
+        if not self.pairing_open:
+            raise self._not_showing()
+        server = srp.Server(f"{self.id}|{device_id}", self.pair_code)
         with self._lock:
             now = time.monotonic()
             for key, pending in list(self._pair_pending.items()):
-                if now - pending[4] > 60:
+                if now - pending[3] > 60:
                     del self._pair_pending[key]
-            self._pair_pending[str(info["id"])] = (nonce_a, nonce_b, info, client, now)
-        return {"nonce": nonce_a, "device": self.self_info(include_visitors=False)}
+            self._pair_pending[str(device_id)] = (server, info, client, now)
+        return {
+            "salt": server.salt.hex(),
+            "b": format(server.b_pub, "x"),
+            "device": self.self_info(include_visitors=False),
+        }
 
-    def pair_confirm(self, device_id: str, proof: str, client: str) -> dict[str, Any]:
+    def pair_prove(self, device_id: str, a_hex: str, m1_hex: str, client: str) -> dict[str, Any]:
         """Step 2 on the device showing the code."""
+        if len(a_hex) > 2 * srp.WIDTH or len(m1_hex) != 64:
+            raise MeshError(400, "bad_request", "Invalid pairing request.")
         wait = self._pair_limiter.attempt(f"pair:{client}")
         if wait:
             raise MeshError(
@@ -745,20 +784,21 @@ class Mesh:
             )
         with self._lock:
             pending = self._pair_pending.pop(device_id, None)
-        if pending is None or pending[3] != client:
+        if pending is None or pending[2] != client:
             raise MeshError(400, "no_pairing", "Start pairing again.")
-        nonce_a, nonce_b, info, _, _ = pending
-        code = self.pair_code
-        expected = pair_proof(code, "b", nonce_a, nonce_b, self.id, device_id)
-        if not secrets.compare_digest(expected, str(proof)):
+        server, info, _, _ = pending
+        if not self.pairing_open:
+            raise self._not_showing()
+        try:
+            m2 = server.verify(int(a_hex, 16), bytes.fromhex(m1_hex))
+        except (srp.SRPError, ValueError):
             self._note_pair_failure()
-            raise MeshError(403, "wrong_code", "That code isn’t right.")
+            raise MeshError(403, "wrong_code", "That code isn’t right.") from None
         self._pair_limiter.reset(f"pair:{client}")
-        key = pair_key(code, nonce_a, nonce_b, self.id, device_id)
         self.trust.add(
             device_id,
             clean_name(info.get("name")),
-            key,
+            derive_pair_key(server.key or b"", self.id, device_id),
             form=clean_form(info.get("form")),
             platform=clean_platform(info.get("platform")),
         )
@@ -767,46 +807,78 @@ class Mesh:
         self._forget_twins(device_id)
         log.info("Paired with %s", log_safe(clean_name(info.get("name"))))
         self._submit(lambda: self.sync.paired(device_id))
-        return {"proof": pair_proof(code, "a", nonce_a, nonce_b, self.id, device_id)}
+        return {"m2": m2.hex()}
 
     def pair_with(self, code: str, address: str | None = None) -> Peer:
-        """Pair with the app showing ``code`` (found on the network, or at ``address``)."""
+        """Pair with the app showing ``code`` (at ``address``, or whichever has Add device open)."""
         code = "".join(ch for ch in str(code) if ch.isdigit())
         if len(code) != 6:
             raise MeshError(400, "bad_code", "Enter the 6-digit code shown on the other device.")
-        found = self.connect(address) if address else self._find_by_code(code)
+        if address:
+            return self._pair_srp(self.connect(address), code)
+        failures: list[MeshError] = []
+        for peer in self._pairing_candidates():
+            try:
+                return self._pair_srp(peer, code)
+            except MeshError as exc:
+                if exc.code == "too_many_attempts":
+                    raise
+                failures.append(exc)
+        wrong = [f for f in failures if f.code == "wrong_code"]
+        raise wrong[0] if wrong else failures[0]
+
+    def _pair_srp(self, found: Peer, code: str) -> Peer:
         # Use one address for both steps: the shared entry's host can change under
         # us (we hear a device on each of its interfaces), and the other side
         # checks that both steps come from the same address.
         peer = dataclasses.replace(found, visitors=[])
-        nonce_b = secrets.token_hex(16)
+        client = srp.Client(f"{peer.id}|{self.id}", code)
         try:
             status, data = self._http(
                 peer,
                 "POST",
-                f"{P2P}/pair",
-                body={"device": self.self_info(include_visitors=False), "nonce": nonce_b},
+                f"{P2P}/pair/begin",
+                body={"device": self.self_info(include_visitors=False)},
             )
-            if status != 200 or not _valid_nonce(data.get("nonce")):
-                raise MeshError(502, "pair_failed", _remote_message(data, "Pairing failed."))
-            nonce_a = str(data["nonce"])
-            proof_b = pair_proof(code, "b", nonce_a, nonce_b, peer.id, self.id)
+            if status == 404:
+                raise MeshError(
+                    409,
+                    "update_needed",
+                    f"{peer.name} runs an older Open Transfer. Update it, then pair again.",
+                )
+            if status != 200:
+                raise _remote_error(status, data, "Pairing failed.")
+            if (data.get("device") or {}).get("id") != peer.id:
+                raise MeshError(
+                    502, "pair_failed", f"The device at {peer.address} isn’t {peer.name}."
+                )
+            m1 = client.respond(bytes.fromhex(str(data["salt"])), int(str(data["b"]), 16))
             status, data = self._http(
-                peer, "POST", f"{P2P}/pair/confirm", body={"id": self.id, "proof": proof_b}
+                peer,
+                "POST",
+                f"{P2P}/pair/prove",
+                body={"id": self.id, "a": format(client.a_pub, "x"), "m1": m1.hex()},
             )
         except OSError as exc:
             raise MeshError(502, "unreachable", f"Lost connection to {peer.name}.") from exc
+        except (KeyError, ValueError, srp.SRPError) as exc:
+            raise MeshError(
+                502, "pair_failed", f"{peer.name} sent an invalid pairing answer."
+            ) from exc
         if status == 403:
             raise MeshError(403, "wrong_code", "That code isn’t right.")
         if status != 200:
-            raise MeshError(status, "pair_failed", _remote_message(data, "Pairing failed."))
-        expected = pair_proof(code, "a", nonce_a, nonce_b, peer.id, self.id)
-        if not secrets.compare_digest(expected, str(data.get("proof", ""))):
-            raise MeshError(502, "pair_failed", "The other device couldn’t prove it has the code.")
+            raise _remote_error(status, data, "Pairing failed.")
+        try:
+            client.check(bytes.fromhex(str(data.get("m2", ""))))
+        except (ValueError, srp.SRPError) as exc:
+            raise MeshError(
+                502, "pair_failed", "The other device couldn’t prove it has the code."
+            ) from exc
         self.trust.add(
             peer.id,
             peer.name,
-            pair_key(code, nonce_a, nonce_b, peer.id, self.id),
+            derive_pair_key(client.key or b"", peer.id, self.id),
             form=peer.form,
             platform=peer.platform,
         )
@@ -815,31 +887,28 @@ class Mesh:
         self._submit(lambda: self.sync.paired(peer.id))
         return peer
 
-    def _find_by_code(self, code: str) -> Peer:
-        if not self.discovery or not self.discovery.working:
-            raise MeshError(
-                400, "no_discovery", "Discovery is off — enter the other device’s address too."
-            )
-        hint = code_hint(code)
-        event = threading.Event()
-        results: list[Peer] = []
+    def _pairing_candidates(self) -> list[Peer]:
+        """Devices with Add device open, ones we aren't paired with first.
+
+        A multicast find reaches devices we haven't heard yet, and every device we
+        know is asked directly: an earlier answer may be stale, and multicast is
+        often blocked.
+        """
+        started = time.monotonic()
+        if self.discovery and self.discovery.working:
+            self.discovery.find()
         with self._lock:
-            self._find_waiters.setdefault(hint, []).append((event, results))
-        try:
-            for _ in range(6):
-                self.discovery.find(hint)
-                if event.wait(0.6):
-                    return results[0]
-        finally:
-            with self._lock:
-                waiters = self._find_waiters.get(hint, [])
-                waiters[:] = [w for w in waiters if w[0] is not event]
-                if not waiters:
-                    self._find_waiters.pop(hint, None)
+            online = [p for p in self._peers.values() if p.online]
+        wait_futures([self._submit(partial(self._refresh_info, p)) for p in online], timeout=2.5)
+        if self.discovery and self.discovery.working:
+            time.sleep(max(0.0, started + 0.6 - time.monotonic()))  # multicast answers
         with self._lock:
+            found = [p for p in self._peers.values() if p.online and p.pairing]
             blocked = sorted(
                 p.name for p in self._peers.values() if p.online and p.reachable is False
             )
+        if found:
+            return sorted(found, key=lambda p: self.trust.get(p.id) is not None)
         if blocked:
             names = " and ".join(blocked) if len(blocked) <= 2 else ", ".join(blocked)
             one = blocked[0] if len(blocked) == 1 else "that device"
@@ -854,8 +923,15 @@ class Mesh:
         raise MeshError(
             404,
             "code_not_found",
-            "No device on this network is showing that code. Check it, or enter its address.",
+            "No device on this network is showing a pairing code. Open Add device on it, "
+            "or enter its address.",
         )
+
+    def _refresh_info(self, peer: Peer) -> None:
+        with contextlib.suppress(OSError):
+            status, info = self._http(peer, "GET", f"{P2P}/info", timeout=2)
+            if status == 200 and info.get("id") == peer.id:
+                self._upsert_peer(info, peer.host)
 
     def _forget_twins(self, device_id: str) -> None:
         """A device paired again under a new id replaces its old pairing.
@@ -2740,7 +2816,11 @@ class Mesh:
             "signals": len(self._mail.get(viewer.id, [])),
         }
         if viewer.is_owner:
-            state["pairing"] = {"code": self.pair_code, "expires_in": self.pair_code_expires_in()}
+            state["pairing"] = {
+                "code": self.pair_code,
+                "expires_in": self.pair_code_expires_in(),
+                "open": self.pairing_open,
+            }
             state["network"] = {"public": list(self.public_networks)}
             state["history"] = {"latest": self.history.latest()}
             state["clipboard"] = {
@@ -3135,11 +3215,14 @@ def _parse_address(address: str) -> tuple[str, int]:
     return host, port
 
 
-def _valid_nonce(value: object) -> bool:
-    return (
-        isinstance(value, str)
-        and 16 <= len(value) <= 128
-        and all(c in "0123456789abcdef" for c in value)
+def _remote_error(status: int, data: dict[str, Any], fallback: str) -> MeshError:
+    """The other device's error, as ours (its code if it gave one)."""
+    error = data.get("error")
+    code = error.get("code") if isinstance(error, dict) else None
+    return MeshError(
+        status if 400 <= status < 500 else 502,
+        str(code)[:40] if isinstance(code, str) else "pair_failed",
+        _remote_message(data, fallback),
     )
 
 

@@ -19,7 +19,8 @@ src/open_transfer/
 ├── desktop.py      desktop app: native window (pywebview), smoke test
 ├── instance.py     one running app per state folder (lock file, bring-to-front)
 ├── android.py      entry points the Android app calls through Chaquopy
-├── devices.py      device identity, paired devices, request signing, pairing proofs
+├── devices.py      device identity, paired devices, request signing, pair keys
+├── srp.py          SRP-6a over the pairing code (RFC 5054, 2048-bit, SHA-256)
 ├── discovery.py    UDP multicast announce / reply / find / bye
 ├── mesh.py         nearby apps, visitors, incoming offers, outgoing fan-out jobs, pairing
 ├── mesh_api.py     HTTP routes: app↔app (/api/p2p/v1) and the UI (/api/state, /api/send…)
@@ -74,7 +75,7 @@ sequenceDiagram
 * **Presence.** Apps are "nearby" for 15 s after the last announce or hello;
   visitors for 25 s after their last poll. Leaving sends `bye`, so others update
   at once. A device dropping out never affects the others' transfers.
-* **Trust.** Pairing (6-digit code, HMAC proofs, never sent in clear) stores a
+* **Trust.** Pairing (SRP over a 6-digit code, only while Add device is open; see `srp.py`) stores a
   shared key; signed requests from a paired app are accepted without asking.
   Everyone else is asked; `--paired-only` refuses strangers outright.
 

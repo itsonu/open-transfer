@@ -21,7 +21,7 @@ expect = sync_api.expect
 def two_apps(tmp_path: Path) -> Iterator[tuple[Server, Server]]:
     gens = [_start(tmp_path, name="Alpha", owner=True), _start(tmp_path, name="Bravo", owner=True)]
     alpha, bravo = (next(g) for g in gens)
-    code = call(bravo, "GET", "/api/state")["pairing"]["code"]
+    code = call(bravo, "POST", "/api/pair/open")["code"]
     port = bravo.url.rsplit(":", 1)[1]
     call(alpha, "POST", "/api/pair", {"code": code, "address": f"127.0.0.1:{port}"})
     yield alpha, bravo

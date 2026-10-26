@@ -140,9 +140,10 @@ def test_pair_with_a_code(devices: list[Server], page, second_page) -> None:  # 
     alpha, bravo, _ = devices
     second_page.goto(bravo.url)
     second_page.click("#connect-button")
+    # The code shows once Bravo's app has opened its pairing window.
+    expect(second_page.locator("#pair-code")).to_have_text(re.compile(r"^\d{3} \d{3}$"))
+    assert _api(bravo, "/api/state")["pairing"]["open"] is True
     code = second_page.locator("#pair-code").inner_text().replace(" ", "")
-    assert code.isdigit()
-    assert len(code) == 6
 
     page.goto(alpha.url)
     page.click("#connect-button")
@@ -158,6 +159,14 @@ def test_pair_with_a_code(devices: list[Server], page, second_page) -> None:  # 
     expect(second_page.locator("#connect-dialog")).to_be_hidden()
     second_page.click("#connect-button")
     expect(second_page.locator("#pair-code")).not_to_have_text(f"{code[:3]} {code[3:]}")
+    # Closing the sheet closes the window: the code stops working at once.
+    second_page.keyboard.press("Escape")
+    expect(second_page.locator("#connect-dialog")).to_be_hidden()
+    for _ in range(50):
+        if not _api(bravo, "/api/state")["pairing"]["open"]:
+            break
+        second_page.wait_for_timeout(100)
+    assert _api(bravo, "/api/state")["pairing"]["open"] is False
 
 
 def test_rename_this_device(devices: list[Server], page) -> None:  # type: ignore[no-untyped-def]

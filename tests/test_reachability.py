@@ -26,7 +26,7 @@ class Discovery:
 
     working = True
 
-    def find(self, hint: str) -> None:
+    def find(self) -> None:
         pass
 
 
@@ -89,5 +89,5 @@ def test_pairing_names_the_device_its_firewall_blocks(
 def test_pairing_without_such_a_device_keeps_the_plain_message(make_node: NodeFactory) -> None:
     mac = make_node("Mac")
     mac.mesh.discovery = Discovery()  # type: ignore[assignment]
-    with pytest.raises(MeshError, match="No device on this network is showing that code"):
+    with pytest.raises(MeshError, match="No device on this network is showing a pairing code"):
         mac.mesh.pair_with("822328")
