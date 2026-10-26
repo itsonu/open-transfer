@@ -112,7 +112,7 @@ Restores a deleted file within `undo_seconds`: `{"file": {…}}`, or `404`.
 Streams a ZIP of all files, or only those given as `?name=a.txt&name=b.jpg`.
 
 ### `GET /api/qr.svg`
-QR code (SVG) for the share URL; includes the PIN when one is set.
+QR code (SVG) for the share URL. With a PIN set it carries a 10-minute join token (`?join=`), never the PIN.
 
 ### `POST /api/logout`
 Clears the session.

@@ -90,6 +90,7 @@ def register(
     client: Callable[[], str],
     file_csp: str,
     share_url: Callable[[], str],
+    join_token: Callable[[], str],
 ) -> None:
     config = mesh.config
 
@@ -868,7 +869,7 @@ def register(
         owner_only()
         url = f"{share_url()}/?pair={mesh.pair_code}"
         if config.pin:
-            url += f"&pin={quote(config.pin)}"
+            url += f"&join={join_token()}"  # never the PIN itself
         buffer = io.BytesIO()
         segno.make(url, error="m").save(
             buffer, kind="svg", scale=8, border=0, dark="#000", light=None

@@ -166,7 +166,7 @@ after 10 wrong guesses, after every successful pairing, and every 10 minutes.
 B verifies A's proof too, so both sides authenticate. Keys are stored in
 `<state>/trusted.json` (mode 0600).
 
-The QR code in "Add a device" is `http://<ip>:<port>/?pair=<code>` (+ `&pin=`).
+The QR code in "Add a device" is `http://<ip>:<port>/?pair=<code>` (+ `&join=<token>` with a PIN set: 10 minutes, never the PIN).
 The Android app scans it and pairs as above; a phone camera simply opens it,
 which signs that browser in as a **trusted visitor** (its sends to the owner
 are accepted automatically).

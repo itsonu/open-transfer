@@ -120,7 +120,13 @@ def test_banner_shows_addresses_pin_and_qr(
 ) -> None:
     monkeypatch.setattr(network, "lan_ips", lambda: ["192.168.1.24"])
     config = Config(storage_dir=tmp_path, pin="4821")
+    import segno
+
+    printed: list[str] = []
+    real = segno.make
+    monkeypatch.setattr(segno, "make", lambda url, **kw: (printed.append(url), real(url, **kw))[1])
     share = cli._print_banner(config, 5001, cli._Style(False), show_qr=True)
+    assert printed == ["http://192.168.1.24:5001"]  # the QR never holds the PIN
     out = capsys.readouterr().out
     assert share == "http://192.168.1.24:5001"
     assert "http://localhost:5001" in out

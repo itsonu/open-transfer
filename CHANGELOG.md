@@ -29,6 +29,7 @@ All notable changes are documented here. The format follows [Keep a Changelog](h
 - The "Enter its address" field no longer shows an example address that looks filled in; it says where to find the other device's address.
 - **One device, one tile:** a device that comes back with a new identity (an Android phone reinstalled from an APK signed with another key, which wipes its data) replaces its old pairing when you pair again, instead of showing up two or three times. Old duplicates already saved show once, and away devices keep their phone/tablet/computer icon.
 - Paired apps can share clipboards with a device that has a PIN (the PIN is for people; paired apps sign their requests).
+- **QR codes never contain the PIN:** with a PIN set, the share and pairing QR codes carry a token that lets a browser in for 10 minutes instead, so a photo of the screen isn't a lasting key. Changing the PIN cancels it. The terminal's QR code is just the address (the PIN is printed beside it). Typed `?pin=` links still work.
 - **A fake goodbye can't hide a device:** a *bye* from an address other than the device's (someone else on the Wi‑Fi, or the device's second network interface) now makes the app check with the device first; it shows as gone only if it doesn't answer.
 
 ## [3.3.0] — 2026-10-22
