@@ -62,9 +62,11 @@ SYNC_WAIT = 15.0
 
 
 class Clipboard(Protocol):
-    def read(self) -> str: ...
+    def read(self) -> str:
+        """This computer's clipboard text."""
 
-    def write(self, text: str) -> None: ...
+    def write(self, text: str) -> None:
+        """Copy ``text`` on this computer, as a person would."""
 
 
 class OsClipboard:

@@ -192,7 +192,8 @@ def test_command_line_clipboards(tmp_path: Path) -> None:
         private_type="x-kde-passwordManagerHint",
     )
     assert agent.change_token() is None  # empty clipboard
-    assert agent.write("héllo 👋", sensitive=False) is True
+    wrote = agent.write("héllo 👋", sensitive=False)
+    assert wrote is True
     first = agent.change_token()
     assert agent.read() == Snapshot("héllo 👋")
     store.write_text("other")
@@ -227,9 +228,10 @@ def test_the_native_clipboard_round_trip() -> None:
     before = agent.change_token()
     text = f"Open Transfer test {time.time()} ✓"
     try:
-        assert agent.write(text, sensitive=False) is True
+        wrote = agent.write(text, sensitive=False)
     except OSError as exc:
         pytest.skip(f"clipboard not writable here: {exc}")
+    assert wrote is True
     snap = agent.read()
     assert snap.text == text
     if agent.name in ("macos", "windows"):

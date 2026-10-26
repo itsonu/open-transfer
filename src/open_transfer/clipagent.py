@@ -63,11 +63,14 @@ class Agent(Protocol):
     #: True when noticing a change means reading the clipboard (no change counter).
     reads_to_detect: bool
 
-    def change_token(self) -> object: ...
+    def change_token(self) -> object:
+        """Changes whenever the clipboard does (cheap to call often)."""
 
-    def read(self) -> Snapshot: ...
+    def read(self) -> Snapshot:
+        """What is on the clipboard now."""
 
-    def write(self, text: str, *, sensitive: bool) -> bool: ...
+    def write(self, text: str, *, sensitive: bool) -> bool:
+        """Put a clip from another device on the clipboard, tagged as ours."""
 
 
 # ===================================================================== macOS
@@ -181,7 +184,9 @@ class WindowsAgent:
 
     def __init__(self) -> None:
         import ctypes
-        from ctypes import wintypes
+        import ctypes.wintypes
+
+        wintypes = ctypes.wintypes
 
         self._ct = ctypes
         user32 = ctypes.WinDLL("user32", use_last_error=True)  # type: ignore[attr-defined]
@@ -301,7 +306,7 @@ class WindowsAgent:
     def _source(self) -> str:
         """The program in front (``notepad.exe``), for the blocked-apps list."""
         ct = self._ct
-        from ctypes import wintypes
+        wintypes = ct.wintypes
 
         with contextlib.suppress(Exception):
             pid = wintypes.DWORD()

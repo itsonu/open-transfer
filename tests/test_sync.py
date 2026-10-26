@@ -107,7 +107,7 @@ def done(fn: Callable[[], Any]) -> Future[Any]:
     future: Future[Any] = Future()
     try:
         future.set_result(fn())
-    except BaseException as exc:  # pragma: no cover - surfaced by .result()
+    except Exception as exc:  # pragma: no cover - surfaced by .result()
         future.set_exception(exc)
     return future
 

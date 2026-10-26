@@ -541,7 +541,11 @@ def register(
         try:
             result = mesh.sync.client_push(found["id"], text, confirm=confirm)
         except SyncError as exc:
-            return jsonify({"error": {"code": exc.code}, "message": str(exc)}), exc.status
+            message = {
+                "sensitive": "This looks private. Run the shortcut with confirm to send it anyway.",
+                "not_paired": "This iPhone or iPad was removed.",
+            }.get(exc.code, "Not sent")
+            return jsonify({"error": {"code": exc.code}, "message": message}), exc.status
         return jsonify({**result, "message": says(result)})
 
     @app.get("/api/sync/client/latest")
