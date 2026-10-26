@@ -263,7 +263,7 @@ def test_without_a_person_those_are_left_to_do(make_node: NodeFactory, tmp_path:
     load("device_check")
     script = load("clipboard_check")
     mac, _pc, phone, clips = three_devices(make_node)
-    checker = checker_for(script, mac, phone, clips, tmp_path, lambda q: pytest.fail(q))
+    checker = checker_for(script, mac, phone, clips, tmp_path, pytest.fail)
     checker.args.no_input = True
     checker.swiped_away(checker.androids[0])
     checker.crossings()
