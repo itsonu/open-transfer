@@ -2316,6 +2316,11 @@ body.has-send-bar .toasts {
   margin-top: 10px;
 }
 
+.pair-address-hint {
+  margin: 6px 2px 0;
+  font-size: 12px;
+}
+
 /* ------------------------------------------------- chunking · history */
 
 .spark-wrap {

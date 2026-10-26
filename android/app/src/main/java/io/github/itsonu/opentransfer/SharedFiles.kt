@@ -249,7 +249,7 @@ object SharePolicy {
     fun isFileShare(action: String?, hasStream: Boolean, hasText: Boolean): Boolean =
         action == "android.intent.action.SEND" && hasStream && !hasText
 
-    /** The content's own type, else the share's if it's a real one (not image/*). */
+    /** The content's own type, else the share's if it's a real one (not a wildcard). */
     fun mime(content: String?, given: String?): String =
         content?.takeIf { it.isNotBlank() && '*' !in it }
             ?: given?.takeIf { it.isNotBlank() && '*' !in it }

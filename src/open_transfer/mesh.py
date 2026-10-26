@@ -45,7 +45,7 @@ from concurrent.futures import wait as wait_futures
 from dataclasses import dataclass, field
 from typing import Any
 
-from open_transfer import __version__
+from open_transfer import __version__, network
 from open_transfer.chunks import CHUNK_SIZE as RESUMABLE_CHUNK_SIZE
 from open_transfer.chunks import ChunkSessions
 from open_transfer.clipboard import IMAGE_MIME as CLIP_IMAGE_MIME
@@ -92,6 +92,7 @@ PEER_FORGET = 120.0  # …and is dropped from the list (paired apps stay, greyed
 VISITOR_STALE = 25.0  # browsers poll every 1.5 s, hidden tabs every 10 s
 VISITOR_FORGET = 24 * 3600.0
 HELLO_EVERY = 6.0
+NETWORK_CHECK_EVERY = 60.0  # how often Windows is asked whether the Wi-Fi is "Public"
 HELLO_TIMEOUT = 3.0  # seconds a hello may take before we give up on it
 FINISHED_KEEP = 90.0  # finished transfers stay in the UI this long
 PAIR_CODE_TTL = 600.0
@@ -161,6 +162,9 @@ class Peer:
     visitors: list[dict[str, str]] = field(default_factory=list)
     accepts: str = "everyone"
     rtt: float = -1.0  # round trip of the last hellos, in ms (smoothed); -1 = unknown
+    # Our last hello got no answer although we hear it on the network: usually its
+    # firewall (Windows on a "Public" network). None until we've tried.
+    reachable: bool | None = None
 
     @property
     def online(self) -> bool:
@@ -319,6 +323,7 @@ class Mesh:
         self._mail: dict[str, list[tuple[float, dict[str, Any]]]] = {}
         self._rotate_code()
         self._rev = 0
+        self.public_networks: list[str] = []  # Windows networks set to Public (see network.py)
         self.port = 0
         self.discovery: Discovery | None = None
         self._executor = ThreadPoolExecutor(max_workers=16, thread_name_prefix="ot-mesh")
@@ -582,6 +587,12 @@ class Mesh:
                 timeout=HELLO_TIMEOUT,
             )
         except OSError:
+            with self._lock:
+                known = self._peers.get(peer.id)
+                if known is not None and known.reachable is not False:
+                    known.reachable = False
+                    log.info("Can't reach %s at %s", log_safe(known.name), known.address)
+                    self._bump()
             return False
         if status != 200:
             return False
@@ -594,6 +605,9 @@ class Mesh:
         if updated is not None:
             took = (time.monotonic() - started) * 1000
             with self._lock:
+                if updated.reachable is not True:
+                    updated.reachable = True
+                    self._bump()
                 updated.rtt = took if updated.rtt < 0 else updated.rtt * 0.7 + took * 0.3
         return True
 
@@ -793,6 +807,21 @@ class Mesh:
                 waiters[:] = [w for w in waiters if w[0] is not event]
                 if not waiters:
                     self._find_waiters.pop(hint, None)
+        with self._lock:
+            blocked = sorted(
+                p.name for p in self._peers.values() if p.online and p.reachable is False
+            )
+        if blocked:
+            names = " and ".join(blocked) if len(blocked) <= 2 else ", ".join(blocked)
+            one = blocked[0] if len(blocked) == 1 else "that device"
+            raise MeshError(
+                404,
+                "code_not_found",
+                f"{names} {'is' if len(blocked) == 1 else 'are'} on this network but not "
+                "answering — usually its firewall. On Windows, set the Wi-Fi to Private "
+                "(Settings → Network → Wi-Fi → your network) and allow Open Transfer on "
+                f"Private networks. Or pair from {one}: enter this device's code there.",
+            )
         raise MeshError(
             404,
             "code_not_found",
@@ -2322,8 +2351,23 @@ class Mesh:
 
     # -------------------------------------------------------- housekeeping
 
+    def check_network(self) -> None:
+        """On Windows, notice a Wi-Fi set to Public: others can't reach this PC then."""
+        found = network.public_networks()
+        with self._lock:
+            if found == self.public_networks:
+                return
+            self.public_networks = found
+        if found:
+            log.warning(
+                "Windows treats %s as a Public network: other devices can't reach this PC",
+                ", ".join(found),
+            )
+        self._bump()
+
     def _housekeeping(self) -> None:
         last_hello = 0.0
+        last_network = -1e9
         manual_known: dict[str, float] = {}
         while not self._stop.wait(2.0):
             now = time.monotonic()
@@ -2378,6 +2422,9 @@ class Mesh:
                 ):
                     job.finished = now
             self._record_finished()
+            if now - last_network >= NETWORK_CHECK_EVERY:
+                last_network = now
+                self._executor.submit(self.check_network)
             if now - last_hello >= HELLO_EVERY:
                 last_hello = now
                 for peer in peers:
@@ -2507,6 +2554,7 @@ class Mesh:
                 entry["paired"] = p.id in paired
                 if p.online and p.rtt >= 0:
                     entry["rtt"] = round(p.rtt)
+                entry["reachable"] = p.reachable is not False
                 if p.accepts == "paired":
                     entry["accepts"] = "paired"
                 if viewer.is_owner:
@@ -2628,6 +2676,7 @@ class Mesh:
         }
         if viewer.is_owner:
             state["pairing"] = {"code": self.pair_code, "expires_in": self.pair_code_expires_in()}
+            state["network"] = {"public": list(self.public_networks)}
             state["history"] = {"latest": self.history.latest()}
             state["clipboard"] = {
                 "latest": self._clip_latest,

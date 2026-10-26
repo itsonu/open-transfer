@@ -219,7 +219,12 @@ function renderMe() {
   $("#me-name-text").textContent = me.name;
   $("#me-icon").replaceChildren(icon(deviceIcon({ ...me, kind: me.kind === "owner" ? "app" : "browser" })));
   const status = $("#me-status");
-  if (me.kind === "owner") {
+  const blocked = mesh.data.network?.public || [];
+  if (me.kind === "owner" && blocked.length) {
+    // Windows Firewall keeps everyone out on a "Public" network, whatever the app allows.
+    status.textContent = `Other devices can’t reach this PC: Windows treats “${blocked[0]}” as a Public network. Set it to Private in Settings → Network & internet → Wi-Fi.`;
+    status.dataset.tone = "warn";
+  } else if (me.kind === "owner") {
     status.textContent = discovery ? "Visible to nearby devices" : "Not discoverable — add devices by code or address";
     status.dataset.tone = discovery ? "ok" : "warn";
   } else {
@@ -329,6 +334,8 @@ function tileStatus(d) {
         break;
     }
   }
+  // Heard on the Wi-Fi but not answering: almost always its firewall.
+  if (d.reachable === false) return { text: "Can’t connect", tone: "danger" };
   return { text: describe(d), tone: "muted" };
 }
 
@@ -457,7 +464,9 @@ function updateTile(el, d) {
     signal.setAttribute("aria-label", `Connection: ${level} (${rtt} ms)`);
     signal.title = `Connection: ${level} · ${rtt} ms round trip`;
   }
-  button.title = [d.name, d.address, rtt !== null && `${rtt} ms`].filter(Boolean).join(" · ");
+  button.title = d.reachable === false
+    ? `${d.name} is on this Wi-Fi but not answering — usually its firewall. On Windows: set the network to Private and allow Open Transfer on Private networks.`
+    : [d.name, d.address, rtt !== null && `${rtt} ms`].filter(Boolean).join(" · ");
   const name = el.querySelector(".device-name");
   if (name.textContent !== d.name) name.textContent = d.name;
   const sub = el.querySelector(".device-sub");

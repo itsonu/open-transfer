@@ -4,10 +4,13 @@ from __future__ import annotations
 
 import ipaddress
 import socket
+import subprocess
 import sys
 import threading
 import time
+from collections.abc import Callable
 from contextlib import closing
+from typing import Any
 
 
 def _is_usable(ip: str) -> bool:
@@ -128,3 +131,30 @@ def find_free_port(host: str, preferred: int, attempts: int = 20) -> int:
         if port_is_free(host, port):
             return port
     raise OSError(f"No free port found between {preferred} and {preferred + attempts - 1}")
+
+
+PUBLIC_NETWORKS = (
+    "Get-NetConnectionProfile | Where-Object NetworkCategory -eq 'Public' | ForEach-Object Name"
+)
+
+
+def public_networks(
+    run: Callable[..., Any] = subprocess.run, platform: str = sys.platform
+) -> list[str]:
+    """Windows networks set to "Public": Windows Firewall keeps other devices from reaching
+    apps on them, even ones allowed on Private networks. Empty elsewhere or on failure."""
+    if platform != "win32":
+        return []
+    try:
+        done = run(
+            ["powershell", "-NoProfile", "-NonInteractive", "-Command", PUBLIC_NETWORKS],
+            capture_output=True,
+            text=True,
+            timeout=15,
+            check=False,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+    except (OSError, subprocess.SubprocessError):
+        return []
+    names = [line.strip() for line in str(done.stdout or "").splitlines() if line.strip()]
+    return names[:4]
