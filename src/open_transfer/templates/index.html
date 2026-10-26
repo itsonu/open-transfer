@@ -218,7 +218,8 @@
                 <span class="visually-hidden">Search clipboard history</span>
                 <input type="search" id="clip-search" placeholder="Search" autocomplete="off">
               </label>
-              <button class="btn btn-plain btn-small" id="clip-settings" type="button">Sync settings</button>
+              <button class="btn btn-plain btn-small" id="sync-open" type="button" aria-describedby="clip-sync-state">Clipboard sync <span class="sync-chip" id="clip-sync-state"></span></button>
+              <button class="btn btn-plain btn-small" id="clip-settings" type="button">Sharing</button>
               <button class="btn btn-plain btn-small" id="clip-clear" type="button" hidden>Clear</button>
             </div>
           </div>
@@ -607,6 +608,17 @@
       </label>
     </div>
     <p class="muted clip-note">Anything that looks like a password, one-time code, card number or key asks before it’s shared and is never saved. A web page can’t see which app copied something, so particular apps can’t be left out here.</p>
+  </dialog>
+
+  <dialog class="sheet clip-sheet sync-sheet" id="sync-dialog" aria-labelledby="sync-dialog-title">
+    <form method="dialog" class="sheet-close-form">
+      <button class="icon-btn sheet-close" aria-label="Close" value="close">
+        <svg class="icon" aria-hidden="true"><use href="#i-x"/></svg>
+      </button>
+    </form>
+    <h2 id="sync-dialog-title">Clipboard sync</h2>
+    <p class="muted">Copy on one device and paste on your others, even with this window closed. Pair a new device with any one of yours and the rest trust it too.</p>
+    <div id="sync-body"><p class="muted">Loading…</p></div>
   </dialog>
 
   <div class="toasts" id="toasts" aria-live="polite" aria-atomic="false"></div>

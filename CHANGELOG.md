@@ -4,6 +4,27 @@ All notable changes are documented here. The format follows [Keep a Changelog](h
 
 ## [Unreleased]
 
+### Added
+- **Trusted Sync Network (protocol):** devices that turn on clipboard sync form one network. Pair a new device with any one member and the others are introduced to it automatically (each pair gets its own key). Removing a device removes it from every member.
+- **Sync rules:** each copy becomes an event with a unique id, a sequence number, a hybrid-clock time and an expiry. Duplicates and loops are dropped. An older clip never overwrites a newer one, and when copies happen at the same time on different devices, the newest one wins everywhere. A device that is away gets only the newest clip, and only until it expires (2 minutes by default).
+- **Encrypted clips:** synced text is sealed for each recipient with that pair's key, in addition to the signed request.
+- **Sync settings:** all trusted devices or selected ones; automatic or only when you ask; text and/or links; pause everything or one device; a temporary session; private-looking text and password-manager copies are never synced automatically; blocked apps.
+- Settings API: `/api/sync` ([docs/api.md](docs/api.md)). The design and what each OS allows are in [docs/sync.md](docs/sync.md).
+- **Clipboard sync on Mac, Windows and Linux with no window open:** the desktop app watches the system clipboard natively (macOS pasteboard, the Windows clipboard, wl-clipboard or xclip on Linux) and writes clips that arrive. Password-manager copies are recognised and never synced automatically; clips it writes are tagged so they never bounce back.
+- **Runs in the background:** with sync on, closing the window keeps Open Transfer syncing; opening the app shows a window onto it. **Start at login** (a LaunchAgent on macOS that restarts after a crash, the Run key on Windows, autostart on Linux), a **menu-bar item** on macOS (open, pause for an hour, quit), and **Quit** in the page.
+- **Clipboard sync sheet:** turn sync on, see whether it's working, pause it, choose all devices or selected ones, automatic or only when asked, text and links, what to do with passwords and codes, how long a clip waits for a device that's away, apps to leave out, start at login, recent activity (never the contents), remove a device from every device, or leave the network.
+- `open-transfer --clipboard` syncs the clipboard from the command line too.
+- **Clipboard sync on Android:** clips from your other devices go straight onto the phone's or tablet's clipboard in the background. To send, use the new **Send clipboard** Quick Settings tile, **Share → Send to my devices**, the text-selection menu, or just open the app (a new copy goes out as it comes to the front). Android 10+ only lets the app in front read the clipboard, so sending always takes that one step.
+- **iPhone and iPad (Shortcuts):** add one in Clipboard sync and it gets a key for two Shortcuts: **Send clipboard** and **Paste from my devices**. Run them from Back Tap, the Action button, a widget or the share sheet. The device it was added on is its hub: it sends the iPhone's clips to the whole network and keeps the newest clip from any of your devices for it. iOS doesn't allow background clipboard sync, so this is the one-tap version.
+
+- **Compatibility tests** for all ten device pairs (Mac, Windows, Android phone and tablet, iPhone/iPad), both ways, plus one copy reaching a six-device network, removal, and expiry while a device is away; real-device checks in [docs/device-testing.md](docs/device-testing.md).
+
+### Changed
+- Android: the background service runs as a *connected device* service, so Android 15+ no longer stops it after about 6 hours a day.
+
+### Fixed
+- Paired apps can share clipboards with a device that has a PIN (the PIN is for people; paired apps sign their requests).
+
 ## [3.3.0] — 2026-10-22
 
 ### Added

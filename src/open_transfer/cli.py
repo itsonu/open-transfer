@@ -140,6 +140,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="only accept files from paired devices",
     )
     nearby.add_argument(
+        "--clipboard",
+        action="store_true",
+        default=None,
+        help="sync this computer's clipboard with your trusted devices (turn sync on in the app)",
+    )
+    nearby.add_argument(
         "--share-folder",
         action="store_true",
         default=None,
@@ -207,6 +213,7 @@ def config_from_args(args: argparse.Namespace) -> Config:
         paired_only=bool(args.paired_only) or env_bool("PAIRED_ONLY"),
         share_folder=bool(args.share_folder) or env_bool("SHARE_FOLDER"),
         owner_loopback=env_bool("OWNER_LOOPBACK", True),
+        clipboard=bool(args.clipboard) or env_bool("CLIPBOARD"),
     )
 
 

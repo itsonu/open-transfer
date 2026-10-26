@@ -66,7 +66,7 @@ Status legend: **Done** · **Partial** (some of it existed before this plan) · 
 ## Not yet (follow-ups)
 
 - **Accept / Decline inside the notification:** needs a service worker.
-- **Clipboard from other apps in the background:** needs the native apps (a web page can only read it while focused).
+- **Clipboard from other apps in the background:** being built as the **[Trusted Sync Network](sync.md)** (native agents, no window needed).
 - **Checking the browser → its own app hop:** the checksum covers app to app; the first hop relies on the connection's own checks.
 - **A configurable queue size** (fixed at 2 for now).
 

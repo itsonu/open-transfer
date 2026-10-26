@@ -253,7 +253,8 @@ def test_sensitive_text_needs_confirming_and_is_never_kept(make_node: NodeFactor
     for node in (a, b):
         for path in node.config.state_path.rglob("*"):
             if path.is_file():
-                assert b"4111" not in path.read_bytes(), path
+                # The whole number: keys, ids and sequence numbers can contain "4111".
+                assert b"4111 1111 1111 1111" not in path.read_bytes(), path
 
 
 def test_images_sync_and_are_capped(paired: tuple[Client, Client, str, str]) -> None:

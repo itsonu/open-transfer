@@ -103,6 +103,9 @@ class Config:
     #: Treat requests from this machine (127.0.0.1) as the device's owner, who
     #: sees everything, needs no PIN and accepts incoming files.
     owner_loopback: bool = True
+    #: Watch this computer's clipboard for the Trusted Sync Network (a native agent:
+    #: AppKit, Win32 or wl-clipboard/xclip). The desktop app turns it on.
+    clipboard: bool = False
 
     def __post_init__(self) -> None:
         self.storage_dir = Path(self.storage_dir).expanduser().resolve()

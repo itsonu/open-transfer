@@ -47,6 +47,8 @@ import java.io.IOException
 import java.net.HttpURLConnection
 import java.net.URL
 import java.util.Locale
+import java.util.concurrent.Callable
+import java.util.concurrent.FutureTask
 import kotlin.concurrent.thread
 
 /**
@@ -151,6 +153,21 @@ class MainActivity : ComponentActivity() {
         Notifications.clearOffers(this)
         if (!waitingForPermission) ensureStarted()
         startMonitor()
+    }
+
+    override fun onWindowFocusChanged(hasFocus: Boolean) {
+        super.onWindowFocusChanged(hasFocus)
+        // Android lets the app in front read the clipboard: send a new copy to your other
+        // devices now (only when sync is on and set to send automatically).
+        if (!hasFocus || TransferService.state != TransferService.State.RUNNING) return
+        thread(name = "ot-clip-focus", isDaemon = true) {
+            if (!ClipSync.wantsAutomatic()) return@thread
+            // Read on the main thread, where the focus is.
+            val read = FutureTask(Callable { ClipSync.readIfNew(this@MainActivity) })
+            main.post(read)
+            val text = read.get()
+            if (text != null) ClipSync.send(text, manual = false)
+        }
     }
 
     override fun onStop() {

@@ -139,6 +139,24 @@ These power the device grid. "Owner" means a request from the device itself
 | `POST /api/devices` `{address}` | owner | Add an app by `host:port` |
 | `DELETE /api/pairs/<id>` · `POST /api/pair/new-code` · `GET /api/pair/qr.svg` | owner | Unpair · new code · QR with the code |
 
+### Clipboard sync ([Trusted Sync Network](sync.md))
+
+| Endpoint | Who | What |
+| -------- | --- | ---- |
+| `GET /api/sync` | owner | `{active, paused, policy, clipboard_access, pending, waiting_messages, recent, devices: [{id, name, platform, online, syncing, excluded, paused_until, last_sent?, last_received?, last_error?}]}`. Never clip contents |
+| `PUT /api/sync/policy` `{enabled?, target?, mode?, types?, expiry?, sensitive?, blocked_sources?, accept_introductions?, session_minutes?}` | owner | Change settings (see the policy table in sync.md) → status |
+| `POST /api/sync/pause` `{minutes: n \| null}` · `POST /api/sync/resume` | owner | Pause everything for n minutes or until resumed |
+| `PUT /api/sync/devices/<id>` `{excluded?, pause_minutes?: n \| null \| 0}` | owner | Per-device: leave out of "all devices", pause (0 = resume) |
+| `DELETE /api/sync/devices/<id>` | owner | Remove the device here **and on every member** (revocation) |
+| `POST /api/sync/send` `{text, confirm?}` | owner | Send now (also in "only when I ask" mode). `409 sensitive` until `confirm: true` for private-looking text |
+| `POST /api/sync/leave` | owner | Leave the network: every reachable member forgets this device → `{told, missed}` |
+| `GET /api/sync/clients` · `POST /api/sync/clients` `{name}` · `DELETE /api/sync/clients/<id>` | owner | iPhones/iPads using this device as their hub. Adding one returns its `token` (once) and the `push_url`/`latest_url` for its Shortcuts |
+| `POST /api/sync/client/push` `{text, confirm?}` (or the text as the body) + `Authorization: Bearer <token>` | an iPhone/iPad | Send its clipboard: applied here and sent to the network → `{status, delivered, queued, refused, message}`; `409 sensitive` until `confirm` |
+| `GET /api/sync/client/latest` + `Authorization: Bearer <token>` | an iPhone/iPad | `{text, from, message}`: the newest clip from any of your devices, until it expires (`text` is empty when there's nothing new) |
+| `GET /api/app` | owner | `{desktop: false}`, or in the desktop app `{desktop, background, can_start_at_login, start_at_login}` |
+| `PUT /api/app` `{start_at_login}` | owner | Start the background copy at login (desktop app) |
+| `POST /api/app/quit` | owner | Quit the background copy (sharing and sync stop) |
+
 Sending from a script, end to end:
 
 ```bash

@@ -7,8 +7,8 @@ import org.json.JSONObject
 
 /**
  * Passed to `open_transfer.android.start()`; Python calls [onEvent] (on its own threads)
- * with `"offer"` and `"received"` events. Must stay a public class with a public method so
- * Chaquopy can call it by reflection.
+ * with `"offer"`, `"received"` and `"clipboard"` events. Must stay a public class with a
+ * public method so Chaquopy can call it by reflection.
  */
 class PythonEvents(context: Context) {
     private val app: Context = context.applicationContext
@@ -17,6 +17,8 @@ class PythonEvents(context: Context) {
         try {
             when (name) {
                 "offer" -> if (!TransferService.isUiVisible) Notifications.showOffer(app, json)
+                // A clip from another of your devices: straight onto the clipboard.
+                "clipboard" -> ClipSync.write(app, json)
                 "received" -> {
                     val path = JSONObject(json).optString("path")
                     if (path.isNotEmpty()) {

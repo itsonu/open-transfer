@@ -140,6 +140,32 @@ sides, the file opens correctly afterwards, and it's in **Downloads/Open Transfe
 | 6.5 | Android: switch apps during a transfer → it keeps going (notification shown) | |
 | 6.6 | Android: incoming offer while the app is in the background → notification | |
 
+## 7. Clipboard sync network
+
+Turn on **Clipboard → Clipboard sync** on every device first. Design and limits: [sync.md](sync.md).
+
+**Let the script do most of it** (≈ 2 min): on a Mac or PC with the desktop app open and your Android devices on adb (USB or wireless debugging, as in §0):
+
+```sh
+python scripts/clipboard_check.py                  # add --apk open-transfer-android.zip to install a build first
+```
+
+It pairs this computer with each Android device if needed, turns sync on, and checks with the **real clipboards**: this computer → Android (app in front, in the background, screen off), Android → this computer (share sheet, and the tile reading the phone's own clipboard), private text held back, your other computers (it shows text to copy there and asks what arrived) and syncing with the window closed. Results: `clipboard-check-<time>.md`.
+`tests/test_sync_matrix.py` already runs all ten device pairs, both ways, with a stand-in clipboard; these checks are the real clipboards.
+
+| # | Check | Result |
+|---|-------|--------|
+| 7.1 | Mac ↔ Windows with **both windows closed**: copy on one, paste on the other, both ways | |
+| 7.2 | Copy on a computer → paste on the Android phone **and** tablet without opening the app | |
+| 7.3 | Android → computer: the **Send clipboard** tile, Share → *Send to my devices*, the selection menu, and opening the app | |
+| 7.4 | iPhone/iPad: *Send clipboard* and *Paste from my devices* Shortcuts (Back Tap) | |
+| 7.5 | Pair a new device with **one** member → it syncs with all of them | |
+| 7.6 | Remove a device on one member → gone on every member, gets nothing | |
+| 7.7 | A password-manager copy and `password: test123` → **not** synced | |
+| 7.8 | Start at login → restart → syncing without opening the app; macOS menu bar ⇄ (pause, open, quit) | |
+| 7.9 | Android locked for an hour+ → clips still arrive (else: battery → Unrestricted; note the brand) | |
+| 7.10 | Battery after a day (Android settings → Battery) | |
+
 ## If devices don't see each other
 
 1. Same Wi‑Fi? Guest networks and many routers isolate devices.

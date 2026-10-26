@@ -13,12 +13,16 @@ or ``node.bind(); node.start_mesh(); node.serve_forever()`` to block.
 from __future__ import annotations
 
 import contextlib
+import logging
 import threading
 from typing import Any
 
-from open_transfer import __version__, network
+from open_transfer import __version__, clipagent, network
+from open_transfer.clipagent import Watcher
 from open_transfer.config import Config
 from open_transfer.mesh import Mesh
+
+log = logging.getLogger("open_transfer")
 
 
 class Node:
@@ -31,6 +35,7 @@ class Node:
         self.port = 0
         self._server: Any = None
         self._thread: threading.Thread | None = None
+        self.watcher: Watcher | None = None
 
     @property
     def local_url(self) -> str:
@@ -57,6 +62,17 @@ class Node:
 
     def start_mesh(self) -> None:
         self.mesh.start(self.port)
+        if self.config.clipboard and self.watcher is None:
+            agent = clipagent.detect()
+            if agent is None:
+                log.warning("Clipboard sync: no clipboard access on this computer")
+            else:
+                self.start_clipboard(agent)
+
+    def start_clipboard(self, agent: clipagent.Agent) -> Watcher:
+        """Sync the clipboard through ``agent`` (a native one, or a stand-in in tests)."""
+        self.watcher = Watcher(agent, self.mesh.sync).start()
+        return self.watcher
 
     def serve_forever(self) -> None:
         try:
@@ -74,6 +90,8 @@ class Node:
         return self.port
 
     def stop(self) -> None:
+        if self.watcher is not None:
+            self.watcher.stop()
         with contextlib.suppress(Exception):
             self.mesh.stop()
         if self._server is not None:
