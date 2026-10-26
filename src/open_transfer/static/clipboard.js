@@ -84,7 +84,7 @@ function render() {
   $("#clip-sync-note").textContent = names.length
     ? `Sharing with ${names.join(", ")}`
     : clip.devices.length
-      ? "Not sharing with any device yet — open Sync settings"
+      ? "Not sharing with any device yet — open Sharing"
       : "Pair a device to share your clipboard with it";
   $("#clip-push").disabled = false;
   $("#clip-meta").textContent = clip.items.length ? plural(clip.items.length, "item") : "";
@@ -177,7 +177,7 @@ function report(result, auto) {
   } else if (!auto && result.failed.length) {
     toast(`Not shared: ${result.failed.map((f) => `${f.name} — ${f.reason}`).join("; ")}`, { tone: "error", icon: "alert", duration: 6000 });
   } else if (!auto) {
-    toast("Saved here. Turn on sharing for a paired device in Sync settings to send it too.", { icon: "copy", duration: 5000 });
+    toast("Saved here. Turn on sharing for a paired device in Sharing to send it too.", { icon: "copy", duration: 5000 });
   }
 }
 

@@ -47,7 +47,12 @@ def available(*modules):
 # its own PyInstaller hook (webview/__pyinstaller) that collects its JavaScript
 # and, on Windows, the WebView2 DLLs in webview/lib. pyinstaller-hooks-contrib's
 # hook-clr / hook-clr_loader add pythonnet's Python.Runtime.dll and ClrLoader DLLs.
-hiddenimports = ["cheroot.ssl.builtin", "open_transfer.desktop", "webview"]
+hiddenimports = [
+    "cheroot.ssl.builtin",
+    "open_transfer.desktop",
+    "open_transfer.menubar",  # imported when the background copy starts on macOS
+    "webview",
+]
 if IS_WIN:
     hiddenimports += available(
         "webview.platforms.winforms",

@@ -8,7 +8,9 @@ is the device's owner, so the window simply loads ``node.local_url``.
 
     python -m open_transfer.desktop [folder] [CLI options] [--no-window] [--smoke-test]
 
-* Closing the window stops sharing and quits.
+* Closing the window stops sharing and quits, unless clipboard sync is on:
+  then a windowless copy (``--background``) takes over and keeps syncing.
+  Opening the app while that copy runs shows a window onto it.
 * Only one copy runs per state folder (two would announce the same device id).
   Starting another one brings the running copy's window to the front, or
   opens its page in the browser, and exits.
@@ -46,7 +48,7 @@ from collections.abc import Callable, Iterator, Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from open_transfer import __version__
+from open_transfer import __version__, background
 from open_transfer.cli import build_parser, config_from_args, is_frozen_app
 from open_transfer.config import Config, env, env_bool
 from open_transfer.instance import (
@@ -96,6 +98,12 @@ def build_desktop_parser() -> argparse.ArgumentParser:
         "--no-window",
         action="store_true",
         help="use the default web browser instead of a native window",
+    )
+    group.add_argument(
+        "--background",
+        action="store_true",
+        help="keep sharing and syncing the clipboard with no window (what starts at login); "
+        "opening the app shows a window onto it",
     )
     group.add_argument(
         "--smoke-test",
@@ -161,12 +169,29 @@ def hand_off(
             )
         time.sleep(0.3)
     _allow_foreground(other.pid)
-    if lock.request_focus(ack_timeout):
+    # The background copy has no window to bring forward: show one onto it here.
+    if not other.background and lock.request_focus(ack_timeout):
         log.info("Open Transfer is already running; asked it to come to the front")
+        return 0
+    if open_url is None and window_client(other.url):
         return 0
     log.info("Open Transfer is already running at %s; opening it in the browser", other.url)
     (open_url or webbrowser.open)(other.url)
     return 0
+
+
+def window_client(url: str) -> bool:
+    """A window onto a copy that is already running (closing it leaves that copy alone)."""
+    webview, why = load_webview()
+    if webview is None:
+        log.info("no native window (%s)", why)
+        return False
+    log.info("Open Transfer is running in the background at %s; opening a window", url)
+    app = WindowApp(webview, url, storage=webview_storage_dir())
+    if app.run():
+        return True
+    log.warning("native window unavailable (%s)", app.error)
+    return False
 
 
 def _allow_foreground(pid: int) -> None:
@@ -570,32 +595,44 @@ class _Stopper:
 
 def main(argv: Sequence[str] | None = None) -> int:
     _ensure_std_streams()
-    args = parse_args(argv)
+    raw = clean_argv(sys.argv[1:] if argv is None else argv)
+    args = parse_args(raw)
     if args.smoke_test:
         return _smoke_main(args)
     try:
         config = config_from_args(args)
     except ValueError as exc:
         return _fatal(str(exc), code=2)
+    # The desktop app syncs the clipboard (once sync is turned on in the app).
+    config = dataclasses.replace(config, clipboard=env_bool("CLIPBOARD", True))
     lock = InstanceLock(config.state_path)
     try:
         acquired = lock.acquire()
     except OSError as exc:
         return _fatal(f"Open Transfer can't use {config.state_path}:\n{exc}")
     if not acquired:
+        if args.background:
+            return 0  # already running, with or without a window
         # Only the copy holding the lock writes the log file.
         with logging_to(None, args.verbose):
             return hand_off(lock)
+    handover = False
     try:
         with logging_to(config.state_path / LOG_FILE, args.verbose) as log_file:
             log.info("Open Transfer %s starting (log: %s)", __version__, log_file)
             try:
-                return _serve(args, config, lock)
+                if args.background:
+                    return _serve_background(config, lock, raw)
+                code, handover = _serve(args, config, lock)
+                return code
             except Exception as exc:
                 log.exception("Open Transfer stopped unexpectedly")
                 return _fatal(f"Open Transfer stopped unexpectedly: {exc}\n\nDetails: {log_file}")
     finally:
         lock.release()
+        if handover:
+            # Clipboard sync is on: keep it going with no window.
+            background.spawn("--background", *[a for a in raw if a != "--no-window"])
 
 
 def _start_node(config: Config) -> Node:
@@ -619,11 +656,22 @@ class _StartError(Exception):
     pass
 
 
-def _serve(args: argparse.Namespace, config: Config, lock: InstanceLock) -> int:
+def _controls(node: Node, *, quit: Callable[[], object] | None = None) -> None:
+    """Let the page offer "Start at login" (and "Quit" in the background copy)."""
+    node.app.extensions["open_transfer"]["desktop"] = background.Controls(
+        background=quit is not None,
+        login=background.LoginItem(background.app_command("--background")),
+        quit=quit,
+    )
+
+
+def _serve(args: argparse.Namespace, config: Config, lock: InstanceLock) -> tuple[int, bool]:
+    """Run with a window (or the browser). Returns (exit code, hand over to --background)."""
     try:
         node = _start_node(config)
     except _StartError as exc:
-        return _fatal(str(exc))
+        return _fatal(str(exc)), False
+    _controls(node)
     url = node.local_url
     log.info(
         "sharing as %r on port %d; files go to %s",
@@ -653,7 +701,7 @@ def _serve(args: argparse.Namespace, config: Config, lock: InstanceLock) -> int:
                 watcher = FocusRequests(lock.focus_path, app.bring_to_front).start()
                 try:
                     if app.run():
-                        return 0
+                        return 0, node.mesh.sync.active()
                 finally:
                     watcher.stop()
                 log.warning("native window unavailable (%s); using the web browser", app.error)
@@ -668,10 +716,59 @@ def _serve(args: argparse.Namespace, config: Config, lock: InstanceLock) -> int:
             wait_until_quit(url, config.storage_dir, open_url)
         finally:
             watcher.stop()
+        return 0, False
+    finally:
+        stopper.stop(wait=5.0)
+        log.info("stopped sharing")
+
+
+def _serve_background(config: Config, lock: InstanceLock, argv: Sequence[str]) -> int:
+    """No window, no Dock icon: share and sync until Quit (menu bar, page or signal)."""
+    try:
+        node = _start_node(config)
+    except _StartError as exc:
+        log.error("%s", exc)
+        return 1
+    stop = threading.Event()
+    _controls(node, quit=stop.set)
+    try:
+        lock.write_info(node.port, background=True)
+    except OSError:
+        log.warning("could not write %s", lock.info_path, exc_info=True)
+    log.info("running in the background as %r on port %d", node.mesh.identity.name, node.port)
+    stopper = _Stopper(node)
+    _stop_on_signals(stop)
+    try:
+        if sys.platform == "darwin":
+            from open_transfer import menubar
+
+            window_args = [a for a in argv if a != "--background"]
+            actions = menubar.Actions(
+                open_window=lambda: background.spawn(*window_args),
+                pause=lambda: node.mesh.sync.pause(3600),
+                resume=node.mesh.sync.resume,
+                paused=node.mesh.sync.paused,
+                stop=stop,
+                cleanup=lambda: (stopper.stop(wait=5.0), lock.release()),
+            )
+            if menubar.available() and menubar.run(actions):
+                return 0
+        while not stop.wait(0.5):
+            pass
         return 0
     finally:
         stopper.stop(wait=5.0)
         log.info("stopped sharing")
+
+
+def _stop_on_signals(stop: threading.Event) -> None:
+    import signal
+
+    for name in ("SIGTERM", "SIGINT", "SIGHUP"):
+        sig = getattr(signal, name, None)
+        if sig is not None:
+            with contextlib.suppress(ValueError, OSError):  # not on the main thread
+                signal.signal(sig, lambda *_: stop.set())
 
 
 # =================================================================== smoke test

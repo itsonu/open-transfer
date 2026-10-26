@@ -41,6 +41,8 @@ class RunningInstance:
 
     pid: int
     port: int
+    #: The windowless copy that keeps syncing (``--background``).
+    background: bool = False
 
     @property
     def url(self) -> str:
@@ -160,10 +162,11 @@ class InstanceLock:
         _unlock(fh)
         fh.close()
 
-    def write_info(self, port: int) -> None:
+    def write_info(self, port: int, *, background: bool = False) -> None:
         data = {
             "pid": os.getpid(),
             "port": port,
+            "background": background,
             "url": f"http://127.0.0.1:{port}",
             "version": __version__,
             "started": round(time.time()),
@@ -182,7 +185,11 @@ class InstanceLock:
     def read_info(self) -> RunningInstance | None:
         try:
             data = json.loads(self.info_path.read_text(encoding="utf-8"))
-            instance = RunningInstance(pid=int(data["pid"]), port=int(data["port"]))
+            instance = RunningInstance(
+                pid=int(data["pid"]),
+                port=int(data["port"]),
+                background=data.get("background") is True,
+            )
         except (OSError, ValueError, KeyError, TypeError):
             return None
         return instance if 0 < instance.port < 65536 else None

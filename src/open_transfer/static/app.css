@@ -3190,6 +3190,198 @@ body.has-send-bar .toasts {
   font-size: 13px;
 }
 
+/* --------------------------------------------------- clipboard sync (network) */
+
+.sync-chip:empty {
+  display: none;
+}
+
+.sync-chip {
+  margin-left: 4px;
+  padding: 1px 7px;
+  border-radius: 999px;
+  background: var(--surface-2);
+  color: var(--text-2);
+  font-size: 12px;
+}
+
+.sync-chip[data-tone="on"] {
+  background: var(--success-soft);
+  color: var(--success);
+}
+
+.sync-chip[data-tone="paused"],
+.sync-chip[data-tone="warn"] {
+  color: var(--warning);
+}
+
+.sync-main {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 16px 0 4px;
+  padding: 14px 16px;
+  border-radius: var(--r-md);
+  background: var(--surface-2);
+}
+
+.sync-switch,
+.sync-check {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 44px;
+  cursor: pointer;
+}
+
+.sync-switch input,
+.sync-check input,
+.sync-device input,
+.sync-types input,
+.sync-target input {
+  width: 18px;
+  height: 18px;
+  accent-color: var(--accent);
+}
+
+.sync-status {
+  margin: 0;
+  color: var(--text-2);
+  font-size: 14px;
+}
+
+.sync-status.tone-on {
+  color: var(--success);
+}
+
+.sync-status.tone-paused,
+.sync-status.tone-warn {
+  color: var(--warning);
+}
+
+.sync-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.sync-heading {
+  margin: 20px 0 8px;
+  font-size: 15px;
+}
+
+.sync-target,
+.sync-types {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 18px;
+  margin: 0 0 10px;
+  padding: 0;
+  border: 0;
+  font-size: 14px;
+}
+
+.sync-types legend {
+  float: left;
+  margin-right: 12px;
+  padding: 0;
+  line-height: 32px;
+}
+
+.sync-target label,
+.sync-types label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 32px;
+  cursor: pointer;
+}
+
+.sync-devices {
+  margin: 0;
+  padding: 4px;
+}
+
+.sync-device {
+  display: flex;
+  align-items: center;
+  gap: 4px 8px;
+  min-height: 48px;
+  padding: 2px 4px 2px 10px;
+}
+
+.sync-device-main {
+  display: grid;
+  flex: 1;
+  grid-template-columns: auto 1fr;
+  align-items: center;
+  gap: 0 12px;
+  min-width: 0;
+  cursor: pointer;
+}
+
+.sync-device-main input {
+  grid-row: span 2;
+}
+
+.sync-device-name {
+  font-weight: 500;
+}
+
+.sync-device-detail {
+  font-size: 13px;
+}
+
+.sync-field {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 6px;
+  margin: 0 0 12px;
+  font-size: 14px;
+}
+
+.sync-field select,
+.sync-field textarea {
+  padding: 6px 8px;
+  border: 0;
+  border-radius: 8px;
+  background: var(--surface-2);
+  color: var(--text);
+  font: inherit;
+}
+
+.sync-blocked {
+  align-items: stretch;
+}
+
+.sync-blocked span {
+  color: var(--text-2);
+  font-size: 13px;
+}
+
+.sync-recent {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  font-size: 13px;
+  list-style: none;
+}
+
+.sync-recent li {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
+.sync-leave {
+  margin-top: 18px;
+  color: var(--danger);
+}
+
 /* ------------------------------------------------- activity, queue (phase D) */
 
 .history-filters {

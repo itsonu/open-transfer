@@ -352,9 +352,11 @@ class SyncEngine:
             self._drop(pending)
             error = reply.get("error")
             code = error.get("code") if isinstance(error, dict) else ""
-            self._stat(pending.dst, last_error=str(code or "refused"))
+            if pending.kind in ("event", "join"):  # what the owner can act on
+                self._stat(pending.dst, last_error=str(code or "refused"))
             return "refused"
-        self._stat(pending.dst, last_error="unreachable")
+        if pending.kind in ("event", "join"):
+            self._stat(pending.dst, last_error="unreachable")
         with self._lock:
             if pending.control:  # it stays in the outbox; back off up to 5 minutes
                 attempts = self._backoff.get(pending.id, (0, 0.0))[0] + 1

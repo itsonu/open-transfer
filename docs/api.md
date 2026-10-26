@@ -150,6 +150,9 @@ These power the device grid. "Owner" means a request from the device itself
 | `DELETE /api/sync/devices/<id>` | owner | Remove the device here **and on every member** (revocation) |
 | `POST /api/sync/send` `{text, confirm?}` | owner | Send now (also in "only when I ask" mode). `409 sensitive` until `confirm: true` for private-looking text |
 | `POST /api/sync/leave` | owner | Leave the network: every reachable member forgets this device → `{told, missed}` |
+| `GET /api/app` | owner | `{desktop: false}`, or in the desktop app `{desktop, background, can_start_at_login, start_at_login}` |
+| `PUT /api/app` `{start_at_login}` | owner | Start the background copy at login (desktop app) |
+| `POST /api/app/quit` | owner | Quit the background copy (sharing and sync stop) |
 
 Sending from a script, end to end:
 

@@ -327,6 +327,52 @@ def register(
         mesh.history.clear()
         return jsonify({"ok": True})
 
+    # ------------------------------------------------------- the desktop app
+
+    def desktop() -> Any:
+        return app.extensions["open_transfer"].get("desktop")
+
+    def app_status() -> dict[str, Any]:
+        controls = desktop()
+        if controls is None:
+            return {"desktop": False}
+        login = controls.login
+        return {
+            "desktop": True,
+            "background": controls.background,
+            "can_start_at_login": bool(login and login.supported),
+            "start_at_login": bool(login and login.supported and login.enabled()),
+        }
+
+    @app.get("/api/app")
+    def ui_app() -> Response:
+        owner_only()
+        return jsonify(app_status())
+
+    @app.put("/api/app")
+    def ui_app_update() -> Response:
+        owner_only()
+        controls = desktop()
+        on = body_json().get("start_at_login")
+        if controls is None or controls.login is None or not controls.login.supported:
+            raise MeshError(404, "not_desktop", "Only the desktop app can start at login.")
+        if not isinstance(on, bool):
+            raise MeshError(400, "bad_request", "start_at_login is true or false.")
+        try:
+            controls.login.set(on)
+        except OSError as exc:
+            raise MeshError(500, "login_item", f"Couldn’t change that: {exc}") from None
+        return jsonify(app_status())
+
+    @app.post("/api/app/quit")
+    def ui_app_quit() -> Response:
+        owner_only()
+        controls = desktop()
+        if controls is None or controls.quit is None:
+            raise MeshError(404, "not_background", "Close the window to quit.")
+        controls.quit()
+        return jsonify({"ok": True})
+
     # ----------------------------------------------------------------- sync
 
     @app.get("/api/sync")

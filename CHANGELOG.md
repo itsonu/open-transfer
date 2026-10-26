@@ -10,6 +10,10 @@ All notable changes are documented here. The format follows [Keep a Changelog](h
 - **Encrypted clips:** synced text is sealed for each recipient with that pair's key, in addition to the signed request.
 - **Sync settings:** all trusted devices or selected ones; automatic or only when you ask; text and/or links; pause everything or one device; a temporary session; private-looking text and password-manager copies are never synced automatically; blocked apps.
 - Settings API: `/api/sync` ([docs/api.md](docs/api.md)). The design and what each OS allows are in [docs/sync.md](docs/sync.md).
+- **Clipboard sync on Mac, Windows and Linux with no window open:** the desktop app watches the system clipboard natively (macOS pasteboard, the Windows clipboard, wl-clipboard or xclip on Linux) and writes clips that arrive. Password-manager copies are recognised and never synced automatically; clips it writes are tagged so they never bounce back.
+- **Runs in the background:** with sync on, closing the window keeps Open Transfer syncing; opening the app shows a window onto it. **Start at login** (a LaunchAgent on macOS that restarts after a crash, the Run key on Windows, autostart on Linux), a **menu-bar item** on macOS (open, pause for an hour, quit), and **Quit** in the page.
+- **Clipboard sync sheet:** turn sync on, see whether it's working, pause it, choose all devices or selected ones, automatic or only when asked, text and links, what to do with passwords and codes, how long a clip waits for a device that's away, apps to leave out, start at login, recent activity (never the contents), remove a device from every device, or leave the network.
+- `open-transfer --clipboard` syncs the clipboard from the command line too.
 
 ### Fixed
 - Paired apps can share clipboards with a device that has a PIN (the PIN is for people; paired apps sign their requests).
