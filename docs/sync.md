@@ -212,5 +212,5 @@ How it fits the network:
 | **2** | Desktop agents (macOS, Windows, Linux), `--background` agent, start at login, window = view, settings UI. Mac ↔ Windows with both windows closed (`tests/test_clipagent.py`, `tests/test_background.py`, `tests/e2e/test_sync_ui.py`) | ✅ (real-device check pending) |
 | **3** | Android: background clipboard write, Quick Settings tile, Share sheet and text-selection send, send on focus (`tests/test_android.py`; Kotlin built in CI) | ✅ (real-device check pending) |
 | **4** | iOS/iPadOS via Shortcuts (token enrolment, push/pull, setup guide; `tests/test_sync_clients.py`). ⛔ A native iOS app is blocked on an Apple developer account | ✅ (real-device check pending) |
-| **5** | Tests for all ten pairs, both directions, plus fan-out, offline, concurrent copies and revocation; the real-device checklist | ⏳ |
+| **5** | Tests for all ten pairs, both directions, plus fan-out, offline, concurrent copies and revocation (`tests/test_sync_matrix.py`, `tests/test_sync.py`); the real-device checklist ([device-testing.md §7](device-testing.md)) | ✅ automated · ⏳ real devices |
 | **6** | Images, rich content, diagnostics, a cross-network relay. **Only after 1–5 prove reliable on real devices** | ⏳ |

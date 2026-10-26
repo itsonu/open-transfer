@@ -17,6 +17,8 @@ All notable changes are documented here. The format follows [Keep a Changelog](h
 - **Clipboard sync on Android:** clips from your other devices go straight onto the phone's or tablet's clipboard in the background. To send, use the new **Send clipboard** Quick Settings tile, **Share → Send to my devices**, the text-selection menu, or just open the app (a new copy goes out as it comes to the front). Android 10+ only lets the app in front read the clipboard, so sending always takes that one step.
 - **iPhone and iPad (Shortcuts):** add one in Clipboard sync and it gets a key for two Shortcuts: **Send clipboard** and **Paste from my devices**. Run them from Back Tap, the Action button, a widget or the share sheet. The device it was added on is its hub: it sends the iPhone's clips to the whole network and keeps the newest clip from any of your devices for it. iOS doesn't allow background clipboard sync, so this is the one-tap version.
 
+- **Compatibility tests** for all ten device pairs (Mac, Windows, Android phone and tablet, iPhone/iPad), both ways, plus one copy reaching a six-device network, removal, and expiry while a device is away; real-device checks in [docs/device-testing.md](docs/device-testing.md).
+
 ### Changed
 - Android: the background service runs as a *connected device* service, so Android 15+ no longer stops it after about 6 hours a day.
 

@@ -140,6 +140,24 @@ sides, the file opens correctly afterwards, and it's in **Downloads/Open Transfe
 | 6.5 | Android: switch apps during a transfer → it keeps going (notification shown) | |
 | 6.6 | Android: incoming offer while the app is in the background → notification | |
 
+## 7. Clipboard sync network
+
+Turn on **Clipboard → Clipboard sync** on every device first. Design and limits: [sync.md](sync.md).
+`tests/test_sync_matrix.py` already runs all ten device pairs, both ways, with a stand-in clipboard; these checks are the real clipboards.
+
+| # | Check | Result |
+|---|-------|--------|
+| 7.1 | Mac ↔ Windows with **both windows closed**: copy on one, paste on the other, both ways | |
+| 7.2 | Copy on a computer → paste on the Android phone **and** tablet without opening the app | |
+| 7.3 | Android → computer: the **Send clipboard** tile, Share → *Send to my devices*, the selection menu, and opening the app | |
+| 7.4 | iPhone/iPad: *Send clipboard* and *Paste from my devices* Shortcuts (Back Tap) | |
+| 7.5 | Pair a new device with **one** member → it syncs with all of them | |
+| 7.6 | Remove a device on one member → gone on every member, gets nothing | |
+| 7.7 | A password-manager copy and `password: test123` → **not** synced | |
+| 7.8 | Start at login → restart → syncing without opening the app; macOS menu bar ⇄ (pause, open, quit) | |
+| 7.9 | Android locked for an hour+ → clips still arrive (else: battery → Unrestricted; note the brand) | |
+| 7.10 | Battery after a day (Android settings → Battery) | |
+
 ## If devices don't see each other
 
 1. Same Wi‑Fi? Guest networks and many routers isolate devices.
