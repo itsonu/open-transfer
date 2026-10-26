@@ -107,6 +107,13 @@ sides, the file opens correctly afterwards, and it's in **Downloads/Open Transfe
 | Android phone → Samsung Tab | | | |
 | Samsung Tab → Android phone | | | |
 
+**From the share sheet (Android).** In Photos (or Files), share one photo, then
+several photos and a video together, then a PDF from Files: **Open Transfer** is in
+the list each time; the app opens with them ready to send ("N files ready — choose
+who to send to"); tap a device and **Send**; they arrive intact. Sharing *text*
+shows only **Send to my devices** (not Open Transfer twice). Sharing a `.txt` file
+from Files sends the file, not the clipboard.
+
 ## 4. One-to-one, one-to-many, everyone
 
 | # | Check | Result |
@@ -170,8 +177,20 @@ It pairs this computer with each Android device if needed, turns sync on, and ch
 
 1. Same Wi‑Fi? Guest networks and many routers isolate devices.
 2. Firewall: Windows → allow *Open Transfer* on **Private** networks; macOS →
-   System Settings → Privacy & Security → **Local Network**.
+   System Settings → Privacy & Security → **Local Network**. A Windows PC whose
+   Wi‑Fi is set to **Public** can be *seen* by others but not *reached* — its
+   own app now says so under its name, and the others show it as **Can’t
+   connect**. Fix: Settings → Network & internet → Wi‑Fi → your network →
+   **Private network**. Until then, pair *from* the PC (enter the other
+   device's code there).
+   Quick test from the Mac: `curl http://<pc-address>:5000/api/health` should
+   answer `{"ok": true…}`; a timeout means the PC's firewall is blocking it.
 3. Pair with **Add device → Enter a code → Not found? Enter its address** using
    the address shown on the other device — this bypasses discovery.
-4. Collect logs: desktop `…/Open Transfer/.open-transfer/open-transfer.log`;
+4. The same device shown several times ("Not nearby")? Each was a pairing with an
+   identity it no longer has — on Android, installing an APK signed with a
+   different key wipes the app. Pair again once: the old ones are removed.
+   CI builds without the release-key secrets are signed with a new key each
+   run; set `ANDROID_KEYSTORE_BASE64` and friends so updates install in place.
+5. Collect logs: desktop `…/Open Transfer/.open-transfer/open-transfer.log`;
    Android `adb logcat -d | grep -iE "python|open_transfer|AndroidRuntime"`.

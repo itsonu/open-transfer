@@ -176,7 +176,7 @@ Any device can send to any other — there's no host or server role. A phone wit
 
 **Experience**
 - Clean, native-feeling interface with automatic **dark mode**, fluid motion that respects **Reduce Motion**, and layouts tuned for phones, tablets and desktops
-- Native windows on Windows and macOS, a native shell on Android (file picker, QR scanner, notifications)
+- Native windows on Windows and macOS, a native shell on Android (file picker, QR scanner, notifications, **Share → Open Transfer** from any app)
 - Clear states everywhere: looking-for-devices radar, waiting / accepted / sending / delivered per device, reconnecting indicator, errors with reasons
 - Preview photos, videos, audio, PDFs and text in the app; a grid view with filters; a ⋯ menu per file (copy, share, open, show in folder)
 - Every file checked with SHA-256 between apps; choose to keep both, skip or replace files you already have; notifications in the background
@@ -297,7 +297,7 @@ flowchart LR
 | `devices.py` | Device identity, paired devices, signatures, pairing proofs |
 | `app.py`, `storage.py`, `security.py` | Flask app, safe streaming storage, host/origin/PIN guards |
 | `static/`, `templates/` | The web UI: vanilla ES modules + CSS, no build step |
-| `android/` | Kotlin shell: WebView, file picker, QR scanner, foreground service |
+| `android/` | Kotlin shell: WebView, file picker, QR scanner, share sheet, foreground service |
 
 Details: **[docs/architecture.md](docs/architecture.md)** · wire format: **[docs/protocol.md](docs/protocol.md)** · real-device checklist: **[docs/device-testing.md](docs/device-testing.md)**.
 
@@ -361,7 +361,8 @@ nginx limits request bodies to 1 MB by default. Set `client_max_body_size 0;` an
 
 - [ ] Encrypted transfers (TLS with per-device certificates, pinned at pairing)
 - [x] Folder transfers (zipped in the browser, structure kept); resumable transfers (chunked, pausable, app-to-app)
-- [ ] "Share to Open Transfer" from other Android apps; iOS app
+- [x] "Share to Open Transfer" from other Android apps (photos, videos, any file)
+- [ ] iOS app
 - [ ] Signed/notarised desktop builds, Play Store / F-Droid
 - [x] Share text snippets and links, not just files
 - [ ] Translations (i18n)

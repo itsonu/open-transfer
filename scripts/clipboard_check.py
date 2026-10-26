@@ -16,8 +16,12 @@ needed), then checks with real clipboards, over your Wi-Fi:
 - Android → this computer: "Send to my devices" (the share sheet) and the Quick
   Settings tile path, and it lands on this computer's real clipboard;
 - private-looking text is not synced;
+- Android with the app swiped away from Recents (you swipe it);
 - this computer ↔ your other computers (it shows a code to copy there, and asks
   you whether one arrived);
+- Android ↔ your other computers, so with a Mac, a Windows PC and a phone all
+  six directions are covered;
+- one copy reaching every device at once;
 - with the window closed (the background copy).
 
 Results go to ``clipboard-check-<time>.md``. Standard library only (it reuses
@@ -283,13 +287,17 @@ class Checker:
             "" if entry.get("applied") else "arrived but wasn't put on the clipboard",
         )
 
-    def from_android_share(self, node: Node) -> bool:
-        text = marker(self.sizes)
+    def share_from(self, node: Node, text: str) -> None:
+        """Share → Send to my devices on the phone (markers are plain words: no quoting)."""
         self.tool.shell(
             node.serial,
             f"am start -a android.intent.action.SEND -t text/plain --es android.intent.extra.TEXT '{text}' "
             f"-n {PKG}/.ClipboardSendActivity",
         )
+
+    def from_android_share(self, node: Node) -> bool:
+        text = marker(self.sizes)
+        self.share_from(node, text)
         clipboard = self.clip
         try:
             wait_for("this computer's clipboard", lambda: clipboard.read() == text, SYNC_WAIT)
@@ -344,6 +352,24 @@ class Checker:
         self.to_android(node, "A5", f"This computer → {node.name}, screen off")
         self.tool.shell(node.serial, "input keyevent KEYCODE_WAKEUP")
 
+    def swiped_away(self, node: Node) -> bool:
+        """Swiped away from Recents, the service keeps the phone in the network."""
+        title = f"This computer → {node.name}, app swiped away from Recents"
+        if self.args.no_input:
+            self.report.manual("A7", title, "Swipe the app away, copy here, paste on the phone.")
+            return False
+        self.ask(
+            f"\n  On {node.name}, open Recents and swipe Open Transfer away, then press Enter… "
+        )
+        if not self.tool.shell(node.serial, f"pidof {PKG} || true").strip():
+            return self.report.add(
+                "A7",
+                title,
+                False,
+                "the app stopped completely (Android or the phone's maker closed it)",
+            )
+        return self.to_android(node, "A7", title)
+
     def private_text(self, node: Node) -> bool:
         text = "password: " + secrets.token_hex(6)
         since = time.time() - 1
@@ -356,15 +382,18 @@ class Checker:
 
     # ------------------------------------------------------- other computers
 
-    def computers(self) -> None:
+    def other_computers(self) -> list[dict[str, Any]]:
         android_ids = {n.id for n in self.androids}
-        others = [
+        return [
             d
             for d in sync_status(self.here)["devices"]
             if d["id"] not in android_ids
             and d.get("platform") in ("macos", "windows", "linux")
             and d["online"]
         ]
+
+    def computers(self) -> None:
+        others = self.other_computers()
         if not others:
             self.report.add(
                 "C0",
@@ -425,6 +454,96 @@ class Checker:
             except CheckError as exc:
                 self.report.add("C3", f"{name} → this computer", False, str(exc))
 
+    # ------------------------------------- Android ↔ the other computers
+
+    def crossings(self) -> None:
+        """The directions this computer isn't part of: each phone ↔ each other computer."""
+        for node in self.androids:
+            for other in self.other_computers():
+                name = other["name"]
+                self._android_to_computer(node, name)
+                self._computer_to_android(node, name)
+
+    def _android_to_computer(self, node: Node, name: str) -> None:
+        title = f"{node.name} → {name}"
+        text = marker(self.sizes)
+        since = time.time() - 1
+        self.share_from(node, text)
+        try:
+            entry = wait_for(
+                f"{name} to accept it",
+                lambda: sent(node, len(text), since),
+                SYNC_WAIT,
+            )
+        except CheckError as exc:
+            self.report.add("W1", title, False, f"{node.name} never sent it: {exc}")
+            return
+        if name not in entry.get("devices", []):
+            self.report.add("W1", title, False, f"{name}'s app didn't accept it")
+            return
+        if self.args.no_input:
+            self.report.add("W1", title, True, f"{name}'s app accepted it (paste there to be sure)")
+            return
+        answer = self.ask(f"\n  On {name}, paste anywhere. Do you see “{text}”? [y/n] ")
+        self.report.add("W1", title, answer.strip().lower().startswith("y"), f"pasted on {name}")
+
+    def _computer_to_android(self, node: Node, name: str) -> None:
+        title = f"{name} → {node.name}"
+        if self.args.no_input:
+            self.report.manual("W2", title, f"Copy on {name}, paste on {node.name}.")
+            return
+        code = marker(self.sizes)
+        since = time.time() - 1
+        print(f"\n  Now on {name}, copy this text (select it and copy):\n\n      {code}\n")
+        try:
+            entry = wait_for(
+                f"{node.name} to get it",
+                lambda: received(node, len(code), since, name),
+                90,
+                every=1,
+            )
+        except CheckError as exc:
+            self.report.add("W2", title, False, str(exc))
+            return
+        applied = bool(entry.get("applied"))
+        self.report.add(
+            "W2",
+            title,
+            applied,
+            "on the phone's clipboard" if applied else "arrived but not applied",
+        )
+
+    # -------------------------------------------------- everyone at once
+
+    def everyone(self) -> bool:
+        """One copy here reaches every phone's clipboard and every other computer's app."""
+        # Every computer that's online counts, also one left out of sync by mistake.
+        computers = [d["name"] for d in self.other_computers()]
+        title = "One copy reaches every device"
+        if not self.androids and not computers:
+            return self.report.add("M1", title, None, "no other devices online")
+        text = marker(self.sizes)
+        since = time.time() - 1
+        self.clip.write(text)
+        pc = self.here
+
+        def missing() -> list[str]:
+            gone = [
+                n.name
+                for n in self.androids
+                if not (received(n, len(text), since) or {}).get("applied")
+            ]
+            accepted = (sent(pc, len(text), since) or {}).get("devices", [])
+            return gone + [c for c in computers if c not in accepted]
+
+        with contextlib.suppress(CheckError):
+            wait_for("every device to get it", lambda: not missing(), SYNC_WAIT)
+        left = missing()
+        everyone = ", ".join([n.name for n in self.androids] + computers)
+        if left:
+            return self.report.add("M1", title, False, f"missing on {', '.join(left)}")
+        return self.report.add("M1", title, True, everyone)
+
     # --------------------------------------------------- with no window
 
     def window_closed(self) -> None:
@@ -463,7 +582,10 @@ class Checker:
             self.from_android_tile(node)
             self.android_background(node)
             self.private_text(node)
+            self.swiped_away(node)
         self.computers()
+        self.crossings()
+        self.everyone()
         self.window_closed()
 
     def logs(self, stamp: str) -> list[Path]:

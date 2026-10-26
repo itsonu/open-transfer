@@ -24,6 +24,7 @@ import android.webkit.ValueCallback
 import android.webkit.WebChromeClient
 import android.webkit.WebResourceError
 import android.webkit.WebResourceRequest
+import android.webkit.WebResourceResponse
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import android.widget.Button
@@ -54,7 +55,8 @@ import kotlin.concurrent.thread
 /**
  * A full-screen WebView showing the UI served by this device's own Python server, plus the
  * few things a web page can't do: pick files from anywhere, scan QR codes, open received
- * files in other apps, and notify while in the background (see [TransferService]).
+ * files in other apps, notify while in the background (see [TransferService]), and take
+ * photos and files shared from other apps' share sheets (see [SharedFiles]).
  */
 class MainActivity : ComponentActivity() {
 
@@ -145,6 +147,14 @@ class MainActivity : ComponentActivity() {
         setUpWebView()
         onBackPressedDispatcher.addCallback(this, backInWebView)
         render(Screen.Loading)
+        // Not on a re-creation: that would add the same share again.
+        if (savedInstanceState == null) receiveShare(intent)
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        receiveShare(intent)
     }
 
     override fun onStart() {
@@ -189,6 +199,32 @@ class MainActivity : ComponentActivity() {
         destroyWebView()
         super.onDestroy()
         // The service (and Python) keep running: this device stays visible to others.
+    }
+
+    // ------------------------------------------------------------------ sharing
+
+    /** Photos and files shared from another app: kept for the page, which stages them. */
+    private fun receiveShare(intent: Intent?) {
+        if (intent == null) return
+        val action = intent.action ?: return
+        // Reopened from Recents after Android closed us: that share was handled already.
+        if (intent.flags and Intent.FLAG_ACTIVITY_LAUNCHED_FROM_HISTORY != 0) return
+        if (action == ACTION_SHOW_SHARED) {
+            sharedArrived() // already kept by ClipboardSendActivity
+            return
+        }
+        if (action != Intent.ACTION_SEND && action != Intent.ACTION_SEND_MULTIPLE) return
+        val app = applicationContext
+        thread(name = "ot-share", isDaemon = true) {
+            val kept = SharedFiles.receive(app, intent)
+            main.post { if (kept == 0) toast(R.string.share_nothing) else sharedArrived() }
+        }
+    }
+
+    /** Tell the page, if it's up; otherwise it asks for them as soon as it loads. */
+    private fun sharedArrived() {
+        if (destroyed || webViewDead || shown !is Screen.Page) return
+        webView.evaluateJavascript("window.dispatchEvent(new Event('ot-native-share'))", null)
     }
 
     // ------------------------------------------------------------------ service
@@ -374,6 +410,9 @@ class MainActivity : ComponentActivity() {
     }
 
     private inner class Client : WebViewClient() {
+        override fun shouldInterceptRequest(view: WebView?, request: WebResourceRequest?): WebResourceResponse? =
+            SharedFiles.serve(applicationContext.contentResolver, request)
+
         override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest?): Boolean {
             if (request == null) return false
             val uri: Uri = request.url ?: return false
@@ -579,6 +618,10 @@ class MainActivity : ComponentActivity() {
             main.post { openOwnFile(name) }
         }
 
+        /** Photos and files shared from other apps since the page last asked (JSON, or ""). */
+        @JavascriptInterface
+        fun takeShared(): String = SharedFiles.take()
+
         @JavascriptInterface
         fun platformInfo(): String =
             JSONObject()
@@ -589,8 +632,10 @@ class MainActivity : ComponentActivity() {
                 .toString()
     }
 
-    private companion object {
-        const val LOG_TAG = "OpenTransfer"
-        const val KEY_ASKED_PERMISSIONS = "asked_permissions"
+    companion object {
+        /** From [ClipboardSendActivity]: files shared as text are waiting in [SharedFiles]. */
+        const val ACTION_SHOW_SHARED = "io.github.itsonu.opentransfer.SHOW_SHARED"
+        private const val LOG_TAG = "OpenTransfer"
+        private const val KEY_ASKED_PERMISSIONS = "asked_permissions"
     }
 }
