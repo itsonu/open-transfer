@@ -5,13 +5,14 @@
 // goes where, pauses it, removes devices and sees what happened (never what
 // was copied).
 
-import { $, api, h, icon, plural, relativeTime, state, toast } from "./lib.js";
+import { $, api, copyText, h, icon, plural, relativeTime, state, toast } from "./lib.js";
 import { confirmDialog } from "./nearby.js";
 
 const sync = {
   status: null,
   app: null,
   loading: null,
+  added: null, // the iPhone/iPad just added: its token is shown once
 };
 
 const TYPE_LABELS = { text: "Text", url: "Links" };
@@ -102,6 +103,101 @@ async function leave() {
     toast(err.message, { tone: "error", icon: "alert" });
   }
   load();
+}
+
+// --------------------------------------------------------- iPhone and iPad
+
+async function addClient(event) {
+  event.preventDefault();
+  const input = $("#sync-client-name");
+  const name = input.value.trim();
+  if (!name) return input.focus();
+  try {
+    const { data } = await api("/api/sync/clients", { method: "POST", json: { name } });
+    sync.added = data;
+    input.value = "";
+  } catch (err) {
+    toast(err.message, { tone: "error", icon: "alert" });
+  }
+  load();
+}
+
+async function removeClient(client) {
+  const ok = await confirmDialog({
+    title: `Remove ${client.name}?`,
+    text: "Its shortcuts stop working right away. Add it again to get a new key.",
+    confirm: "Remove",
+  });
+  if (!ok) return;
+  if (sync.added?.client.id === client.id) sync.added = null;
+  change(`/api/sync/clients/${client.id}`, undefined, "DELETE");
+}
+
+function copyRow(label, value, id) {
+  return h(
+    "div",
+    { class: "sync-copy-row" },
+    h("span", { class: "muted" }, label),
+    h("code", { id }, value),
+    h("button", { class: "btn btn-plain btn-small", type: "button", onclick: () => copyText(value).then(() => toast(`${label} copied`)) }, "Copy"),
+  );
+}
+
+function setupCard(added) {
+  const auth = `Bearer ${added.token}`;
+  return h(
+    "div",
+    { class: "sync-setup card", id: "sync-setup" },
+    h("p", {}, h("strong", {}, `Set up ${added.client.name}`), " — this key is shown only now."),
+    copyRow("Key (Authorization header)", auth, "sync-setup-key"),
+    copyRow("Send address", added.push_url, "sync-setup-push"),
+    copyRow("Paste address", added.latest_url, "sync-setup-latest"),
+    h(
+      "ol",
+      { class: "sync-steps" },
+      h("li", {}, "In the Shortcuts app, make ", h("strong", {}, "Send clipboard"), ": Get Clipboard → Get Contents of URL (the send address, Method POST, Header Authorization = the key, Request Body JSON: text = Clipboard) → Show Notification with its ", h("em", {}, "message"), "."),
+      h("li", {}, "Make ", h("strong", {}, "Paste from my devices"), ": Get Contents of URL (the paste address, the same header) → Get Dictionary Value ", h("em", {}, "text"), " → If it has any value → Copy to Clipboard."),
+      h("li", {}, "Run them from Back Tap (Settings → Accessibility → Touch → Back Tap), the Action button, a widget or the Share sheet."),
+    ),
+    h("p", { class: "muted" }, "iPhone and iPad can’t share their clipboard in the background, so they send and paste when you run a shortcut. The phone talks to this device on your Wi-Fi; keep its address the same (most routers can reserve it)."),
+    h("button", { class: "btn btn-small", type: "button", onclick: () => ((sync.added = null), render()) }, "Done"),
+  );
+}
+
+function clientRow(c) {
+  const paused = c.paused_until > Date.now() / 1000;
+  return h(
+    "li",
+    { class: "sync-device", dataset: { id: c.id } },
+    h(
+      "div",
+      { class: "sync-device-main" },
+      icon("phone"),
+      h("span", { class: "sync-device-name" }, c.name),
+      h("span", { class: "muted sync-device-detail" }, paused ? `Paused ${until(c.paused_until)}` : c.last_seen ? `Last used ${relativeTime(c.last_seen)}` : "Not used yet"),
+    ),
+    h(
+      "button",
+      { class: "btn btn-plain btn-small", type: "button", onclick: () => change(`/api/sync/devices/${c.id}`, { pause_minutes: paused ? 0 : 60 }) },
+      paused ? "Resume" : "Pause 1 h",
+    ),
+    h("button", { class: "icon-btn", type: "button", "aria-label": `Remove ${c.name}`, title: "Remove", onclick: () => removeClient(c) }, icon("trash")),
+  );
+}
+
+function clientsSection(s) {
+  return [
+    h("h3", { class: "sync-heading" }, "iPhone and iPad"),
+    s.clients.length ? h("ul", { class: "sync-devices list card", id: "sync-clients" }, ...s.clients.map(clientRow)) : null,
+    sync.added ? setupCard(sync.added) : null,
+    h(
+      "form",
+      { class: "sync-add-client", onsubmit: addClient },
+      h("label", { class: "visually-hidden", for: "sync-client-name" }, "Name of the iPhone or iPad"),
+      h("input", { id: "sync-client-name", type: "text", maxlength: 40, placeholder: "e.g. Sam’s iPhone", autocomplete: "off" }),
+      h("button", { class: "btn btn-small", type: "submit", id: "sync-client-add" }, "Add iPhone or iPad"),
+    ),
+  ];
 }
 
 // ------------------------------------------------------------- rendering
@@ -220,6 +316,8 @@ function render() {
       ? h("ul", { class: "sync-devices list card", id: "sync-devices" }, ...s.devices.map((d) => deviceRow(d, p.target)))
       : h("p", { class: "muted" }, "No trusted devices yet. Pair one with Add device → Enter a code; your other devices meet it automatically."),
   );
+
+  parts.push(...clientsSection(s));
 
   parts.push(
     h("h3", { class: "sync-heading" }, "What and when"),
@@ -345,7 +443,15 @@ function render() {
   if (s.devices.length) {
     parts.push(h("button", { class: "btn btn-plain btn-small sync-leave", type: "button", onclick: leave }, "Leave the sync network"));
   }
+  // Re-rendering mustn't lose what's being typed (or where the focus was).
+  const typed = [...box.querySelectorAll("input[type=text], textarea")].map((el) => [el.id, el.value]);
+  const focused = document.activeElement?.id;
   box.replaceChildren(...parts.flat().filter(Boolean));
+  for (const [id, value] of typed) {
+    const el = id && document.getElementById(id);
+    if (el && el.value !== value && el.tagName === "INPUT") el.value = value;
+  }
+  if (focused) document.getElementById(focused)?.focus();
 }
 
 export function initSync() {

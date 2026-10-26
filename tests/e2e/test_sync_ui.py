@@ -3,6 +3,8 @@ choosing devices and how, and removing a device from the network."""
 
 from __future__ import annotations
 
+import json
+import urllib.request
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -85,3 +87,30 @@ def test_the_sheet_works_on_a_phone(two_apps: tuple[Server, Server], browser) ->
         assert width <= 390
     finally:
         context.close()
+
+
+def test_adding_an_iphone(two_apps: tuple[Server, Server], page) -> None:  # type: ignore[no-untyped-def]
+    alpha, _ = two_apps
+    call(alpha, "PUT", "/api/sync/policy", {"enabled": True})
+    page.goto(alpha.url)
+    expect(page.locator("#clipboard-section")).to_be_visible(timeout=10_000)
+    page.click("#sync-open")
+    page.fill("#sync-client-name", "Sam’s iPhone")
+    page.click("#sync-client-add")
+    setup = page.locator("#sync-setup")
+    expect(setup).to_contain_text("Set up Sam’s iPhone")
+    expect(page.locator("#sync-setup-key")).to_contain_text("Bearer ")
+    expect(page.locator("#sync-setup-push")).to_contain_text("/api/sync/client/push")
+    token = page.locator("#sync-setup-key").inner_text().removeprefix("Bearer ")
+    request = urllib.request.Request(
+        alpha.url + "/api/sync/client/latest", headers={"Authorization": f"Bearer {token}"}
+    )
+    with urllib.request.urlopen(request, timeout=10) as res:
+        assert json.loads(res.read())["message"] == "Nothing new to paste"
+    setup.get_by_role("button", name="Done").click()
+    expect(setup).to_have_count(0)
+    row = page.locator("#sync-clients li", has_text="Sam’s iPhone")
+    expect(row).to_contain_text("Last used")
+    row.get_by_role("button", name="Remove Sam’s iPhone").click()
+    page.click("#confirm-ok")
+    expect(page.locator("#sync-clients")).to_have_count(0)

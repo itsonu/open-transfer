@@ -31,7 +31,7 @@ from open_transfer.archive import zip_stream
 from open_transfer.clipboard import MAX_IMAGE_BYTES as CLIP_MAX_IMAGE
 from open_transfer.devices import clean_form, clean_name, clean_platform, valid_id
 from open_transfer.mesh import P2P, Mesh, MeshError, Viewer
-from open_transfer.security import log_safe
+from open_transfer.security import RateLimiter, log_safe
 from open_transfer.sensitive import REASONS, looks_sensitive
 from open_transfer.serve import serve_file
 from open_transfer.storage import IncompleteUpload, StorageError
@@ -54,6 +54,9 @@ PUBLIC_P2P_ENDPOINTS = {
     "p2p_clip",
     "p2p_sync",
     "p2p_sync_forward",
+    # iPhone/iPad Shortcuts: a per-device token instead of the PIN.
+    "sync_client_push",
+    "sync_client_latest",
 }
 MAX_PENDING_PER_CLIENT = 10
 DRAIN_LIMIT = 8 * 1024 * 1024
@@ -453,6 +456,103 @@ def register(
         if not isinstance(text, str):
             raise MeshError(400, "bad_request", "Expected text.")
         return jsonify(mesh.sync.copy(text, manual=True, confirm=data.get("confirm") is True))
+
+    # ---------------------------------------------- iPhone and iPad (Shortcuts)
+
+    client_failures = RateLimiter(attempts=10, window=60)
+
+    def shortcut_client() -> dict[str, Any]:
+        """The iPhone/iPad whose token this request carries (``Authorization: Bearer``)."""
+        wait = client_failures.attempt(f"client:{client()}")
+        if wait:
+            raise MeshError(429, "too_many_attempts", "Too many tries. Wait a minute.")
+        header = request.headers.get("Authorization", "")
+        token = header[7:].strip() if header[:7].lower() == "bearer " else ""
+        found = mesh.sync.clients.authenticate(token) if mesh.sync.clients else None
+        if found is None:
+            raise MeshError(
+                401, "bad_token", "This iPhone or iPad isn’t set up here (or was removed)."
+            )
+        client_failures.reset(f"client:{client()}")
+        return found
+
+    def client_urls() -> dict[str, str]:
+        base = share_url().rstrip("/")
+        return {
+            "push_url": f"{base}/api/sync/client/push",
+            "latest_url": f"{base}/api/sync/client/latest",
+        }
+
+    @app.get("/api/sync/clients")
+    def ui_sync_clients() -> Response:
+        owner_only()
+        assert mesh.sync.clients is not None  # noqa: S101 - always set by Mesh
+        return jsonify({"clients": mesh.sync.clients.all(), **client_urls()})
+
+    @app.post("/api/sync/clients")
+    def ui_sync_client_add() -> Response:
+        owner_only()
+        name = body_json().get("name")
+        if not isinstance(name, str) or not name.strip():
+            raise MeshError(400, "bad_request", "Give it a name, like “Sam’s iPhone”.")
+        assert mesh.sync.clients is not None  # noqa: S101
+        try:
+            added, token = mesh.sync.clients.add(name)
+        except ValueError as exc:
+            raise MeshError(400, "too_many", str(exc)) from None
+        return jsonify({"client": added, "token": token, **client_urls()})
+
+    @app.delete("/api/sync/clients/<client_id>")
+    def ui_sync_client_remove(client_id: str) -> Response:
+        owner_only()
+        if not mesh.sync.remove_client(client_id):
+            raise MeshError(404, "not_found", "That iPhone or iPad isn’t set up here.")
+        return jsonify(mesh.sync.status())
+
+    def says(result: dict[str, Any]) -> str:
+        me = str(mesh.identity.name)
+        names = [me if d == mesh.id else mesh.sync._name(d) for d in result.get("delivered", [])]
+        if names:
+            return "Sent to " + ", ".join(names)
+        if result.get("queued"):
+            return "It will arrive when your devices are nearby"
+        return {
+            "off": "Clipboard sync is off on " + me,
+            "paused": "Clipboard sync is paused",
+            "not_allowed": "This iPhone or iPad is paused or left out",
+            "type": "That kind of clip isn’t synced",
+            "too_large": "That’s too big to sync",
+            "empty": "Nothing copied",
+            "no_devices": "No devices to send to",
+        }.get(str(result.get("reason")), "Not sent")
+
+    @app.post("/api/sync/client/push")
+    def sync_client_push() -> tuple[Response, int] | Response:
+        if (request.content_length or 0) > SYNC_MAX_BODY:
+            raise MeshError(413, "too_large", "That’s too big to sync.")
+        found = shortcut_client()
+        data = request.get_json(silent=True)
+        text = data.get("text") if isinstance(data, dict) else None
+        if text is None:  # Shortcuts can also send the text as the request body
+            text = request.get_data(as_text=True)
+        if not isinstance(text, str):
+            raise MeshError(400, "bad_request", "Expected the text to send.")
+        confirm = isinstance(data, dict) and data.get("confirm") is True
+        try:
+            result = mesh.sync.client_push(found["id"], text, confirm=confirm)
+        except SyncError as exc:
+            return jsonify({"error": {"code": exc.code}, "message": str(exc)}), exc.status
+        return jsonify({**result, "message": says(result)})
+
+    @app.get("/api/sync/client/latest")
+    def sync_client_latest() -> Response:
+        found = shortcut_client()
+        clip = mesh.sync.client_latest(found["id"])
+        if clip is None:
+            return jsonify({"text": "", "from": "", "message": "Nothing new to paste"})
+        return jsonify(
+            {"text": clip["text"], "from": clip["from"], "message": f"Pasted from {clip['from']}"}
+        )
 
     @app.post("/api/sync/leave")
     def ui_sync_leave() -> Response:

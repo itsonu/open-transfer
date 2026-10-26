@@ -30,9 +30,10 @@ from dataclasses import dataclass, field
 from functools import partial
 from typing import Any, cast
 
-from open_transfer.devices import TrustStore, valid_id
+from open_transfer.devices import TrustStore, clean_name, valid_id
 from open_transfer.security import log_safe as _safe
 from open_transfer.sensitive import looks_sensitive
+from open_transfer.sync.clients import ClientStore
 from open_transfer.sync.clock import HybridClock
 from open_transfer.sync.protocol import (
     CONTROL_EXPIRY,
@@ -103,6 +104,7 @@ class SyncEngine:
         submit: Callable[[Callable[[], Any]], Future[Any]] = _inline,
         clock: Callable[[], float] = time.time,
         meet: Callable[[str, str], object] | None = None,
+        clients: ClientStore | None = None,
     ) -> None:
         self._me = me
         self._trust = trust
@@ -112,6 +114,7 @@ class SyncEngine:
         self._online = online
         self._describe = describe
         self._meet = meet  # (device id, "host:port"): go and find a device we were introduced to
+        self.clients = clients  # iPhones and iPads that use this device as their hub
         self._submit = submit
         self._now = clock
         self._clock = HybridClock(clock)
@@ -178,7 +181,8 @@ class SyncEngine:
     def set_device(
         self, device_id: str, *, excluded: bool | None = None, paused_until: float | None = None
     ) -> dict[str, Any]:
-        if not (valid_id(device_id) and self._trust.get(device_id)):
+        client = self.clients.get(device_id) if self.clients and valid_id(device_id) else None
+        if not (valid_id(device_id) and (self._trust.get(device_id) or client)):
             raise SyncError(404, "not_paired", "That device isn’t one of your trusted devices.")
         return self._store.set_device(device_id, excluded=excluded, paused_until=paused_until)
 
@@ -249,32 +253,20 @@ class SyncEngine:
         if (sensitive or concealed) and manual and not confirm:
             raise SyncError(409, "sensitive", "This looks private. Send it anyway?")
         targets = sorted(d.id for d in self._trust.all() if self._syncs_with(d.id))
-        if not targets:
+        clients = self._client_targets()
+        if not targets and not clients:
             return _skipped("no_devices")
-        now = self._now()
-        event = {
-            "seq": self._store.next_seq(),
-            "hlc": [stamp[0], stamp[1]],
-            "type": kind,
-            "created": now,
-            "expires": now + policy["expiry"],
-        }
-        payload = json.dumps({"text": text, "sensitive": sensitive or concealed}).encode()
         event_id = secrets.token_hex(16)
-        outcomes: dict[str, list[str]] = {"delivered": [], "queued": [], "refused": []}
-        futures = []
-        for dst in targets:
-            pending = self._envelope(dst, "event", payload, event_id=event_id, **event)
-            with self._lock:
-                self._pending.pop(dst, None)  # only the newest waits
-            futures.append((dst, self._submit(partial(self._deliver, pending))))
-        for dst, future in futures:
-            try:
-                outcome = future.result(timeout=DELIVERY_TIMEOUT)
-            except Exception:
-                log.debug("sync delivery failed", exc_info=True)
-                outcome = "queued"
-            outcomes.setdefault(outcome, []).append(dst)
+        private = sensitive or concealed
+        now = self._now()
+        expires = now + policy["expiry"]
+        order = (stamp[0], stamp[1], self.id)
+        self._offer_clients(
+            clients, order, text, kind, str(self._me().get("name", "")), private, expires
+        )
+        outcomes = self._fan_out(
+            targets, {"text": text, "sensitive": private}, event_id, stamp, kind, now, expires
+        )
         self._note(
             {
                 "id": event_id,
@@ -293,6 +285,162 @@ class SyncEngine:
             len(outcomes["queued"]),
         )
         return {"status": "sent", "event": event_id, **{k: sorted(v) for k, v in outcomes.items()}}
+
+    def _fan_out(
+        self,
+        targets: list[str],
+        payload: dict[str, Any],
+        event_id: str,
+        stamp: tuple[int, int],
+        kind: str,
+        created: float,
+        expires: float,
+        *,
+        src: str | None = None,
+    ) -> dict[str, list[str]]:
+        """One sealed envelope per device, delivered in parallel."""
+        seq = self._store.next_seq()
+        sealed = json.dumps(payload).encode()
+        outcomes: dict[str, list[str]] = {"delivered": [], "queued": [], "refused": []}
+        futures = []
+        for dst in targets:
+            pending = self._envelope(
+                dst,
+                "event",
+                sealed,
+                event_id=event_id,
+                src=src,
+                seq=seq,
+                hlc=[stamp[0], stamp[1]],
+                type=kind,
+                created=created,
+                expires=expires,
+            )
+            with self._lock:
+                self._pending.pop(dst, None)  # only the newest waits
+            futures.append((dst, self._submit(partial(self._deliver, pending))))
+        for dst, future in futures:
+            try:
+                outcome = future.result(timeout=DELIVERY_TIMEOUT)
+            except Exception:
+                log.debug("sync delivery failed", exc_info=True)
+                outcome = "queued"
+            outcomes.setdefault(outcome, []).append(dst)
+        return outcomes
+
+    # ====================================================== iPhone and iPad
+
+    def _client_targets(self, exclude: str = "") -> list[str]:
+        if self.clients is None:
+            return []
+        now = self._now()
+        out = []
+        for client in self.clients.all():
+            device = self._store.device(client["id"])
+            if client["id"] != exclude and not device["excluded"] and device["paused_until"] <= now:
+                out.append(client["id"])
+        return out
+
+    def _offer_clients(
+        self,
+        targets: list[str],
+        order: tuple[int, int, str],
+        text: str,
+        kind: str,
+        name: str,
+        sensitive: bool,
+        expires: float,
+    ) -> None:
+        if self.clients is None:
+            return
+        clip = {
+            "order": order,
+            "text": text,
+            "type": kind,
+            "from": name,
+            "sensitive": sensitive,
+            "at": self._now(),
+            "expires": expires,
+        }
+        for client_id in targets:
+            self.clients.offer(client_id, clip)
+
+    def client_push(self, client_id: str, text: str, *, confirm: bool = False) -> dict[str, Any]:
+        """An iPhone/iPad (a Shortcut) sends what it copied, through this device."""
+        client = self.clients.get(client_id) if self.clients else None
+        if client is None:
+            raise SyncError(403, "not_paired", "This iPhone or iPad was removed.")
+        if not isinstance(text, str) or not text:
+            return _skipped("empty")
+        size = len(text.encode())
+        if size > MAX_TEXT_BYTES:
+            return _skipped("too_large")
+        policy = self._store.policy()
+        if not self.active():
+            return _skipped("off")
+        if self.paused():
+            return _skipped("paused")
+        device = self._store.device(client_id)
+        if device["excluded"] or device["paused_until"] > self._now():
+            return _skipped("not_allowed")
+        kind = classify(text)
+        if kind not in policy["types"]:
+            return _skipped("type")
+        sensitive = looks_sensitive(text) is not None
+        if sensitive and not confirm:
+            raise SyncError(409, "sensitive", "This looks private. Send it anyway?")
+        stamp = self._clock.tick()
+        order = (stamp[0], stamp[1], client_id)
+        now = self._now()
+        expires = now + policy["expiry"]
+        event_id = secrets.token_hex(16)
+        name = client["name"]
+        applied = bool(
+            self._apply(order, text, kind=kind, sensitive=sensitive, name=name, event_id=event_id)
+        )
+        self._offer_clients(
+            self._client_targets(exclude=client_id), order, text, kind, name, sensitive, expires
+        )
+        targets = sorted(d.id for d in self._trust.all() if self._syncs_with(d.id))
+        outcomes = self._fan_out(
+            targets,
+            {"text": text, "sensitive": sensitive, "name": name},
+            event_id,
+            stamp,
+            kind,
+            now,
+            expires,
+            src=client_id,
+        )
+        if applied:
+            outcomes["delivered"].insert(0, self.id)
+        self._note(
+            {
+                "id": event_id,
+                "direction": "received",
+                "type": kind,
+                "size": size,
+                "devices": [name],
+                "applied": applied,
+                "relayed": len(outcomes["delivered"]) - int(applied),
+            }
+        )
+        return {"status": "sent", "event": event_id, **outcomes}
+
+    def remove_client(self, client_id: str) -> bool:
+        """Forget an iPhone/iPad: its token stops working at once."""
+        if self.clients is None or not self.clients.remove(client_id):
+            return False
+        self._store.forget_device(client_id)
+        return True
+
+    def client_latest(self, client_id: str) -> dict[str, Any] | None:
+        """The newest clip waiting for an iPhone/iPad (``None``: nothing new)."""
+        if self.clients is None or self.clients.get(client_id) is None:
+            raise SyncError(403, "not_paired", "This iPhone or iPad was removed.")
+        if not self.active() or self.paused():
+            return None
+        return self.clients.latest(client_id, self._now())
 
     # ========================================================== delivery
 
@@ -529,36 +677,20 @@ class SyncEngine:
             self._seen[header.id] = header.expires
             self._last_seq[header.src] = header.seq
         self._clock.observe(header.hlc)
-        if self.before_apply is not None:
-            try:
-                self.before_apply()
-            except Exception:
-                log.debug("before_apply failed", exc_info=True)
-        with self._lock:
-            if self._current is not None and header.order <= self._current:
-                self._stats.setdefault(header.by, {})["last_received"] = now
-                return {"applied": False, "reason": "stale"}
-            writer = self._writer
-        name = self._name(header.src)
-        if writer is None:
+        sensitive = payload.get("sensitive") is True
+        given = payload.get("name") if header.src != header.by else None  # an iPhone, via its hub
+        name = clean_name(given) if isinstance(given, str) else self._name(header.src)
+        self._offer_clients(
+            self._client_targets(), header.order, text, header.type, name, sensitive, header.expires
+        )
+        self._stat(header.by, last_received=now)
+        ok = self._apply(
+            header.order, text, kind=header.type, sensitive=sensitive, name=name, event_id=header.id
+        )
+        if ok is None:
+            return {"applied": False, "reason": "stale"}
+        if not self.can_write:
             return {"applied": False, "reason": "no_clipboard"}
-        info = {
-            "id": header.id,
-            "type": header.type,
-            "sensitive": payload.get("sensitive") is True,
-            "from": name,
-        }
-        try:
-            ok = bool(writer(text, info))
-        except Exception:
-            log.warning("Couldn’t write the clipboard", exc_info=True)
-            ok = False
-        with self._lock:
-            if ok:
-                self._current = header.order
-                self._last_remote = _digest(text)
-                self._last_local = ""
-            self._stats.setdefault(header.by, {})["last_received"] = now
         self._note(
             {
                 "id": header.id,
@@ -571,6 +703,41 @@ class SyncEngine:
         )
         log.info("Clipboard %s (%d bytes) from %s", header.type, len(text.encode()), _safe(name))
         return {"applied": ok, "reason": "" if ok else "write_failed"}
+
+    def _apply(
+        self,
+        order: tuple[int, int, str],
+        text: str,
+        *,
+        kind: str,
+        sensitive: bool,
+        name: str,
+        event_id: str,
+    ) -> bool | None:
+        """Put a clip from elsewhere on this clipboard if it's the newest. ``None``: stale."""
+        if self.before_apply is not None:
+            try:
+                self.before_apply()  # report a copy made here that the agent hasn't yet
+            except Exception:
+                log.debug("before_apply failed", exc_info=True)
+        with self._lock:
+            if self._current is not None and order <= self._current:
+                return None
+            writer = self._writer
+        if writer is None:
+            return False
+        info = {"id": event_id, "type": kind, "sensitive": sensitive, "from": name}
+        try:
+            ok = bool(writer(text, info))
+        except Exception:
+            log.warning("Couldn’t write the clipboard", exc_info=True)
+            ok = False
+        if ok:
+            with self._lock:
+                self._current = order
+                self._last_remote = _digest(text)
+                self._last_local = ""
+        return ok
 
     # =========================================================== the network
 
@@ -750,6 +917,15 @@ class SyncEngine:
             "waiting_messages": len(self._store.outbox()),
             "recent": recent,
             "devices": devices,
+            "clients": [
+                {
+                    **client,
+                    "syncing": client["id"] in self._client_targets(),
+                    "excluded": self._store.device(client["id"])["excluded"],
+                    "paused_until": max(0.0, self._store.device(client["id"])["paused_until"]),
+                }
+                for client in (self.clients.all() if self.clients else [])
+            ],
         }
 
 

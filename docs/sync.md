@@ -164,6 +164,28 @@ Clips the agent writes carry its own marker (`io.github.itsonu.open-transfer.syn
 - Clips marked private are written with `EXTRA_IS_SENSITIVE`: Android 13+ hides them in the "copied" preview, and keyboards don't suggest them.
 - OEM battery savers (Samsung, Xiaomi, OnePlus…) may still stop background apps. If clips stop arriving, set Open Transfer to **Unrestricted** battery use. See the real-device checklist.
 
+## Using it on iPhone and iPad (phase 4)
+
+iOS doesn't let other apps read or write the clipboard in the background, and it suspends them. So an iPhone or iPad joins through **two Shortcuts** that run when you ask: one tap each, from Back Tap, the Action button, a widget or the share sheet.
+
+1. On any of your Open Transfer apps (a computer or an Android device that's usually on: that becomes the **hub**): **Clipboard sync → iPhone and iPad → Add iPhone or iPad**.
+2. It shows a **key** (shown only once) and two addresses. In the Shortcuts app, make:
+
+   | Shortcut | Actions |
+   |---|---|
+   | **Send clipboard** | Get Clipboard → **Get Contents of URL**: the *send address*, Method **POST**, Header `Authorization` = the key, Request Body **JSON**: `text` = Clipboard → **Show Notification**: *message* |
+   | **Paste from my devices** | **Get Contents of URL**: the *paste address*, Header `Authorization` = the key → Get Dictionary Value `text` → **If** it has any value → **Copy to Clipboard** |
+
+3. Settings → Accessibility → Touch → **Back Tap** → Double Tap → *Paste from my devices* (and Triple Tap → *Send clipboard*).
+
+How it fits the network:
+- The hub **sends** the iPhone's clips to every member (`src` = the iPhone, `by` = the hub), puts them on its own clipboard, and offers them to its other iPhones and iPads.
+- The hub keeps the **newest clip** from any member in a mailbox for each iPhone (in memory, until it expires: *Keep a clip for a device that's away*). An iPhone never gets its own clip back.
+- Each iPhone has its own **random key**; only its SHA-256 is stored. Wrong keys are rate-limited (10 a minute per address). **Remove** stops it at once. Per-device pause and leave-out work as for other devices.
+- ⚠️ The Shortcut talks to the hub over plain HTTP on your Wi-Fi: Shortcuts can't do the network's encryption, or trust a self-signed certificate. Anyone who can capture traffic on your Wi-Fi could read those clips. The other hops are sealed as usual.
+- Two Apple devices need one hub between them (any computer or Android device running Open Transfer).
+- ⛔ A native iOS app (share extension, widget) needs an Apple developer account to build and distribute. It isn't planned until then.
+
 ## Policies (per device and global)
 
 | Setting | Default |
@@ -189,6 +211,6 @@ Clips the agent writes carry its own marker (`io.github.itsonu.open-transfer.syn
 | **1** | Shared protocol, trusted network, introductions/revocation, policies, engine, P2P + UI API. Tests first (`tests/test_sync.py`, `tests/test_sync_api.py`) | ✅ |
 | **2** | Desktop agents (macOS, Windows, Linux), `--background` agent, start at login, window = view, settings UI. Mac ↔ Windows with both windows closed (`tests/test_clipagent.py`, `tests/test_background.py`, `tests/e2e/test_sync_ui.py`) | ✅ (real-device check pending) |
 | **3** | Android: background clipboard write, Quick Settings tile, Share sheet and text-selection send, send on focus (`tests/test_android.py`; Kotlin built in CI) | ✅ (real-device check pending) |
-| **4** | iOS/iPadOS via Shortcuts (token enrolment, push/pull, setup guide). ⛔ A native iOS app is blocked on an Apple developer account | ⏳ |
+| **4** | iOS/iPadOS via Shortcuts (token enrolment, push/pull, setup guide; `tests/test_sync_clients.py`). ⛔ A native iOS app is blocked on an Apple developer account | ✅ (real-device check pending) |
 | **5** | Tests for all ten pairs, both directions, plus fan-out, offline, concurrent copies and revocation; the real-device checklist | ⏳ |
 | **6** | Images, rich content, diagnostics, a cross-network relay. **Only after 1–5 prove reliable on real devices** | ⏳ |

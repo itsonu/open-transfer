@@ -80,6 +80,7 @@ from open_transfer.storage import (
     file_kind,
     safe_filename,
 )
+from open_transfer.sync.clients import ClientStore
 from open_transfer.sync.engine import SyncEngine
 from open_transfer.sync.store import SyncStore
 
@@ -334,6 +335,7 @@ class Mesh:
             describe=self._describe_peer,
             submit=self._submit,
             meet=self._meet,
+            clients=ClientStore(state),
         )
 
     # ------------------------------------------------------------- lifecycle
