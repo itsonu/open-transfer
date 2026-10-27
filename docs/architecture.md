@@ -31,7 +31,8 @@ src/open_transfer/
 ├── archive.py      streaming ZIP writer for "Download all"
 ├── network.py      LAN IP detection, host name, free-port search
 ├── templates/      index.html (app shell), error.html
-└── static/         lib.js (helpers) · nearby.js (devices, sending, pairing) · direct.js (WebRTC) · app.js (shell), app.css
+└── static/         lib.js (helpers) · nearby.js (devices, sending, pairing, QR scanning) · direct.js (WebRTC) · app.js (shell), app.css
+                    vendor/jsQR.js (QR decoding where the browser has no BarcodeDetector; loaded only when a scan starts)
 tests/              pytest: storage, API, security, CLI; tests/e2e: Playwright
 android/            Android app: Kotlin shell (WebView, file picker, QR scanner) around this package
 scripts/            build_app.py (standalone + desktop apps, .dmg), build_site.py (website), screenshots.py

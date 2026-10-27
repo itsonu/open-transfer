@@ -1746,7 +1746,7 @@ export function openAddDevice({ tab = "show" } = {}) {
 
 function canScan() {
   if (nativeApp()?.scanQr) return true;
-  return "BarcodeDetector" in window && Boolean(navigator.mediaDevices?.getUserMedia) && window.isSecureContext;
+  return Boolean(navigator.mediaDevices?.getUserMedia) && window.isSecureContext;
 }
 
 async function pair(code, address) {
@@ -1795,51 +1795,112 @@ function handleScan(text) {
 
 let scanner = null;
 
+const CAMERA_PROBLEMS = {
+  NotAllowedError: "Camera access is off. Allow it in your browser or system settings, or enter the code instead.",
+  SecurityError: "Camera access is off. Allow it in your browser or system settings, or enter the code instead.",
+  NotFoundError: "No camera found. Enter the code shown on the other device.",
+  OverconstrainedError: "No camera found. Enter the code shown on the other device.",
+  NotReadableError: "The camera is in use by another app. Close it, or enter the code instead.",
+};
+
+/** A QR reader for video frames: the browser's own, or jsQR where there's none (Safari, Firefox, desktop windows). */
+async function qrReader() {
+  if ("BarcodeDetector" in window && (await window.BarcodeDetector.getSupportedFormats()).includes("qr_code")) {
+    const detector = new window.BarcodeDetector({ formats: ["qr_code"] });
+    return async (video) => (await detector.detect(video))[0]?.rawValue;
+  }
+  if (!window.jsQR) {
+    await new Promise((resolve, reject) => {
+      document.head.append(h("script", { src: "/static/vendor/jsQR.js", onload: resolve, onerror: reject }));
+    });
+  }
+  const canvas = document.createElement("canvas");
+  const g = canvas.getContext("2d", { willReadFrequently: true });
+  return async (video) => {
+    const scale = Math.min(1, 640 / Math.max(video.videoWidth, video.videoHeight));
+    canvas.width = Math.round(video.videoWidth * scale);
+    canvas.height = Math.round(video.videoHeight * scale);
+    if (!canvas.width) return undefined;
+    g.drawImage(video, 0, 0, canvas.width, canvas.height);
+    return window.jsQR(g.getImageData(0, 0, canvas.width, canvas.height).data, canvas.width, canvas.height)?.data;
+  };
+}
+
 async function startScan() {
   const app = nativeApp();
   if (app?.scanQr) {
     app.scanQr();
     return;
   }
+  if (scanner) return; // already starting or scanning
+  const mine = { stream: null, stopped: false, cameras: [], camera: null };
+  scanner = mine;
+  $("#pair-error").textContent = "";
   try {
-    const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" } });
-    const video = $("#scan-video");
-    video.srcObject = stream;
+    const read = await qrReader();
+    await openCamera(mine, { facingMode: "environment" });
+    if (mine.stopped) return;
     $("#scan-view").hidden = false;
-    await video.play();
-    const detector = new window.BarcodeDetector({ formats: ["qr_code"] });
-    scanner = { stream, stopped: false };
+    mine.cameras = (await navigator.mediaDevices.enumerateDevices()).filter((d) => d.kind === "videoinput");
+    $("#scan-switch").hidden = mine.stopped || mine.cameras.length < 2;
+    const video = $("#scan-video");
     const tick = async () => {
-      if (!scanner || scanner.stopped) return;
+      if (mine.stopped) return;
       try {
-        const codes = await detector.detect(video);
-        if (codes.length) {
-          handleScan(codes[0].rawValue);
+        const text = await read(video);
+        if (text) {
+          handleScan(text);
           return;
         }
       } catch {
         /* frame not ready */
       }
-      requestAnimationFrame(tick);
+      setTimeout(tick, 100);
     };
     tick();
-  } catch {
-    $("#pair-error").textContent = "Couldn’t open the camera. Enter the code instead.";
+  } catch (err) {
+    if (mine.stopped) return;
+    stopScanner();
+    $("#pair-error").textContent = CAMERA_PROBLEMS[err?.name] || "Couldn’t open the camera. Enter the code instead.";
+    $("#pair-input").focus();
   }
+}
+
+/** Point the scanner at a camera, letting go of the one it had. */
+async function openCamera(mine, video) {
+  const stream = await navigator.mediaDevices.getUserMedia({ video });
+  if (mine.stopped) {
+    for (const track of stream.getTracks()) track.stop(); // closed while the camera was starting
+    return;
+  }
+  for (const track of mine.stream?.getTracks() || []) track.stop();
+  mine.stream = stream;
+  mine.camera = stream.getVideoTracks()[0]?.getSettings().deviceId ?? video.deviceId?.exact;
+  const el = $("#scan-video");
+  el.srcObject = stream;
+  await el.play();
+}
+
+function switchCamera() {
+  const mine = scanner;
+  if (!mine?.stream || mine.cameras.length < 2) return;
+  const at = Math.max(0, mine.cameras.findIndex((d) => d.deviceId === mine.camera)); // unknown: the default, listed first
+  const next = mine.cameras[(at + 1) % mine.cameras.length];
+  openCamera(mine, { deviceId: { exact: next.deviceId } }).catch((err) => {
+    if (mine.stopped) return;
+    $("#pair-error").textContent = CAMERA_PROBLEMS[err?.name] || "Couldn’t switch cameras.";
+  });
 }
 
 function stopScanner() {
   if (!scanner) return;
   scanner.stopped = true;
-  try {
-    for (const track of scanner.stream.getTracks()) track.stop();
-  } catch {
-    /* camera already stopped */
-  }
+  for (const track of scanner.stream?.getTracks() || []) track.stop();
   const video = $("#scan-video");
   if (video) video.srcObject = null;
   scanner = null;
   $("#scan-view").hidden = true;
+  $("#scan-switch").hidden = true;
 }
 
 function setupConnectSheet() {
@@ -1887,6 +1948,8 @@ function setupConnectSheet() {
   });
   $("#scan-button").addEventListener("click", startScan);
   $("#scan-cancel").addEventListener("click", stopScanner);
+  $("#scan-switch").addEventListener("click", switchCamera);
+  document.addEventListener("visibilitychange", () => document.hidden && stopScanner());
   window.addEventListener("ot-native-scan", (event) => handleScan(event.detail));
   $("#copy-url").addEventListener("click", async () => {
     const button = $("#copy-url");

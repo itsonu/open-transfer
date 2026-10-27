@@ -177,7 +177,7 @@ device it knows for `/info`, then runs SRP with those showing `"pairing": true`
 (devices it isn't paired with first).
 
 The QR code in "Add a device" is `http://<ip>:<port>/?pair=<code>` (+ `&join=<token>` with a PIN set: 10 minutes, never the PIN).
-The Android app scans it and pairs as above; a phone camera simply opens it,
+Every app's **Scan its QR code** (under Add device → Enter a code) reads it with the device's camera and pairs as above: the Android app with its own scanner, the desktop windows and browsers with any camera they have (built-in or USB, switchable), decoding with `BarcodeDetector` or, where there's none, jsQR. The camera is asked for only when a scan starts and let go when it ends (found, Cancel, the sheet closed, the page hidden); entering the code is always there. A phone camera simply opens it,
 which signs that browser in as a **trusted visitor** (its sends to the owner
 are accepted automatically).
 
