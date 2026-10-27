@@ -34,14 +34,20 @@ jobs:
       # Optional release signing: set the ANDROID_KEYSTORE_BASE64, ANDROID_KEYSTORE_PASSWORD,
       # ANDROID_KEY_ALIAS and ANDROID_KEY_PASSWORD secrets. Without them the release APK is
       # signed with the runner's debug key (installable, but not updatable across builds).
+      # Only pull requests from forks (which never get secrets) may fall back to it: a
+      # debug-signed APK installed over a release one wipes the phone's identity.
       - name: Release keystore
         env:
           KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          FORK_PR: ${{ github.event.pull_request.head.repo.fork == true }}
         run: |
           if [ -n "$KEYSTORE_BASE64" ]; then
             echo "$KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/release.jks"
             echo "ANDROID_KEYSTORE_FILE=$RUNNER_TEMP/release.jks" >> "$GITHUB_ENV"
             echo "Signing with the release key"
+          elif [ "$FORK_PR" != "true" ]; then
+            echo "::error::ANDROID_KEYSTORE_BASE64 is not set; refusing to sign with the debug key"
+            exit 1
           else
             echo "No release key configured; signing with the debug key"
           fi
