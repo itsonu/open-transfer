@@ -31,6 +31,7 @@ All notable changes are documented here. The format follows [Keep a Changelog](h
 - **The camera always turns off when scanning ends.** Closing Add device while the camera was starting (say, at the permission prompt) left it on, and tapping Scan twice opened it twice.
 - **Camera problems say what's wrong:** access turned off, no camera, or the camera in use by another app, each with what to do. The code box stays ready.
 - **On a Mac, Open Transfer could share its port with another app** listening on every address, so other devices reached the wrong app. It now picks a port nobody holds.
+- **Pasting in Add device** fills in the code instead of queueing the text to send behind the sheet.
 - **Pasting a pairing code** with other text around it ("Code: 332 156", a leading space) no longer cuts off digits.
 - **Pairing with a Windows PC that others can't reach:** a device heard on the Wi‑Fi but not answering now shows **Can’t connect** on its tile, and pairing by code names it and says why (its firewall, usually a Wi‑Fi set to *Public*) instead of "No device on this network is showing that code".
 - **Windows on a Public network:** the PC's own app now warns that other devices can't reach it and how to switch the Wi‑Fi to Private.

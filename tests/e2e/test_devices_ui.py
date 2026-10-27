@@ -181,6 +181,40 @@ def test_pasting_a_code_keeps_all_its_digits(devices: list[Server], page) -> Non
         expect(field).to_have_value("332 156")
 
 
+def test_pasting_into_an_open_sheet_doesnt_queue_a_send(devices: list[Server], page) -> None:  # type: ignore[no-untyped-def]
+    page.goto(devices[0].url)
+    page.click("#connect-button")
+    page.click("[role=tab][data-tab=enter]")
+    page.evaluate(
+        """() => {
+          document.activeElement.blur();  // pasted before clicking the code box
+          const data = new DataTransfer();
+          data.setData("text/plain", "332 156");
+          document.querySelector("#connect-dialog").dispatchEvent(
+            new ClipboardEvent("paste", { clipboardData: data, bubbles: true, cancelable: true }));
+        }"""
+    )
+    page.wait_for_timeout(500)
+    expect(page.locator("#send-bar")).to_be_hidden()
+    expect(page.locator("#pair-input")).to_have_value("332 156")  # it went where it was meant to
+
+
+def test_pasting_into_the_show_code_tab_does_nothing(devices: list[Server], page) -> None:  # type: ignore[no-untyped-def]
+    page.goto(devices[0].url)
+    page.click("#connect-button")
+    page.evaluate(
+        """() => {
+          const data = new DataTransfer();
+          data.setData("text/plain", "hello");
+          document.querySelector("#connect-dialog").dispatchEvent(
+            new ClipboardEvent("paste", { clipboardData: data, bubbles: true, cancelable: true }));
+        }"""
+    )
+    page.wait_for_timeout(500)
+    expect(page.locator("#send-bar")).to_be_hidden()
+    expect(page.locator("#pair-input")).to_have_value("")
+
+
 def test_rename_this_device(devices: list[Server], page) -> None:  # type: ignore[no-untyped-def]
     alpha = devices[0]
     page.goto(alpha.url)
