@@ -28,6 +28,8 @@ All notable changes are documented here. The format follows [Keep a Changelog](h
 - Android: the background service runs as a *connected device* service, so Android 15+ no longer stops it after about 6 hours a day.
 
 ### Fixed
+- **Android: Preview on a PDF** no longer pops up the "Open with" app list; PDFs are previewed where the browser can show them, and saved or opened otherwise.
+- **The drop zone's text lines up again** once files are listed (the title had drifted to the middle and the hint to the bottom-left).
 - **The camera always turns off when scanning ends.** Closing Add device while the camera was starting (say, at the permission prompt) left it on, and tapping Scan twice opened it twice.
 - **Camera problems say what's wrong:** access turned off, no camera, or the camera in use by another app, each with what to do. The code box stays ready.
 - **On a Mac, Open Transfer could share its port with another app** listening on every address, so other devices reached the wrong app. It now picks a port nobody holds.
