@@ -100,6 +100,34 @@ def test_new_sends_wait_their_turn(
     assert not (bravo.root / "file-3.txt").exists()
 
 
+def test_the_connection_dot_shows_only_when_slow(devices: list[Server], page) -> None:  # type: ignore[no-untyped-def]
+    """A normal connection gets no dot; only a slow one earns a warning colour."""
+    page.goto(devices[0].url)
+    signal = tile(page, "Bravo").locator(".device-signal")
+    expect(signal).to_have_attribute("aria-label", re.compile(r"^Connection: "), timeout=20_000)
+    expect(signal).to_be_hidden()  # 127.0.0.1: a few ms
+
+    def bravo_at(rtt: int):  # type: ignore[no-untyped-def]
+        def handle(route, _request) -> None:  # type: ignore[no-untyped-def]
+            fresh = {k: v for k, v in route.request.headers.items() if k != "if-none-match"}
+            res = route.fetch(headers=fresh)  # a full answer, never a 304
+            data = res.json()
+            for d in data.get("devices", []):
+                if d.get("name") == "Bravo":
+                    d["rtt"] = rtt
+            route.fulfill(response=res, json=data, headers={**res.headers, "etag": f"rtt-{rtt}"})
+
+        return handle
+
+    page.route("**/api/state*", bravo_at(90))  # a phone on Wi-Fi: normal
+    expect(signal).to_have_attribute("aria-label", "Connection: fair (90 ms)")
+    expect(signal).to_be_hidden()
+    page.unroute("**/api/state*")
+    page.route("**/api/state*", bravo_at(400))  # really slow
+    expect(signal).to_have_attribute("aria-label", "Connection: slow (400 ms)")
+    expect(signal).to_be_visible()
+
+
 def test_devices_and_transfers_show_their_connection(
     devices: list[Server], page, second_page, tmp_path: Path
 ) -> None:  # type: ignore[no-untyped-def]

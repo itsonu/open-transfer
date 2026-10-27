@@ -458,9 +458,9 @@ function updateTile(el, d) {
   button.setAttribute("aria-label", `${d.name}, ${status.text}${d.paired ? ", paired" : ""}${selected ? ", selected" : ""}`);
   const signal = el.querySelector(".device-signal");
   const rtt = d.kind === "app" && d.online && Number.isFinite(d.rtt) ? d.rtt : null;
-  signal.hidden = rtt === null;
+  const level = rtt === null ? null : rtt < 40 ? "good" : rtt < 150 ? "fair" : "slow";
+  signal.hidden = level !== "slow"; // a normal connection (a phone on Wi-Fi is often "fair") needs no warning
   if (rtt !== null) {
-    const level = rtt < 40 ? "good" : rtt < 150 ? "fair" : "slow";
     signal.dataset.level = level;
     signal.setAttribute("aria-label", `Connection: ${level} (${rtt} ms)`);
     signal.title = `Connection: ${level} · ${rtt} ms round trip`;

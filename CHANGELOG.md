@@ -28,6 +28,7 @@ All notable changes are documented here. The format follows [Keep a Changelog](h
 - Android: the background service runs as a *connected device* service, so Android 15+ no longer stops it after about 6 hours a day.
 
 ### Fixed
+- **No more warning-coloured dot on a normal connection:** device tiles show the connection dot only when it's actually slow. A phone on Wi‑Fi is often a little slower than a computer, and that's fine.
 - **Android: Preview on a PDF** no longer pops up the "Open with" app list; PDFs are previewed where the browser can show them, and saved or opened otherwise.
 - **The drop zone's text lines up again** once files are listed (the title had drifted to the middle and the hint to the bottom-left).
 - **The camera always turns off when scanning ends.** Closing Add device while the camera was starting (say, at the permission prompt) left it on, and tapping Scan twice opened it twice.
