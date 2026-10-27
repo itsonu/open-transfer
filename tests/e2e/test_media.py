@@ -256,3 +256,7 @@ def test_compact_drop_zone_keeps_its_text_in_one_column(mac: Server, page) -> No
     assert icon is not None
     for sel, x in lefts.items():
         assert icon["x"] + icon["width"] <= x <= icon["x"] + icon["width"] + 24, (sel, icon, x)
+    # The clipboard button hugs its label instead of stretching and centring it.
+    glyph = page.locator("#dropzone-clipboard .icon").bounding_box()
+    assert glyph is not None
+    assert glyph["x"] - lefts["#drop-title"] <= 24, (glyph, lefts["#drop-title"])

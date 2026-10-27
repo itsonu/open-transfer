@@ -578,6 +578,7 @@ main {
 
 .dropzone.is-compact > :not(.drop-icon) {
   grid-column: 2; /* title, link, clipboard, hint: always beside the icon */
+  justify-self: start; /* the clipboard button hugs its label */
 }
 
 .dropzone.is-compact .drop-icon {
