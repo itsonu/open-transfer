@@ -105,16 +105,19 @@ def hostname() -> str:
 
 
 def port_is_free(host: str, port: int) -> bool:
-    with closing(socket.socket(socket.AF_INET, socket.SOCK_STREAM)) as sock:
-        # Match the server socket (cheroot sets SO_REUSEADDR) so a port that only
-        # has TIME_WAIT leftovers from a restart counts as free. Not on Windows,
-        # where SO_REUSEADDR would let us "share" a port that is really in use.
-        if sys.platform != "win32":
-            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        try:
-            sock.bind((host, port))
-        except OSError:
-            return False
+    # macOS lets one address bind next to a listener on every address (0.0.0.0),
+    # and then the two share the port, so check that too.
+    for addr in dict.fromkeys((host, "0.0.0.0")):
+        with closing(socket.socket(socket.AF_INET, socket.SOCK_STREAM)) as sock:
+            # Match the server socket (cheroot sets SO_REUSEADDR) so a port that only
+            # has TIME_WAIT leftovers from a restart counts as free. Not on Windows,
+            # where SO_REUSEADDR would let us "share" a port that is really in use.
+            if sys.platform != "win32":
+                sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            try:
+                sock.bind((addr, port))
+            except OSError:
+                return False
     return True
 
 

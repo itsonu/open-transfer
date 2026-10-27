@@ -110,6 +110,18 @@ def test_find_free_port_skips_busy_port() -> None:
     assert network.find_free_port("127.0.0.1", 0) > 0
 
 
+def test_a_port_held_on_every_address_isnt_free_on_one() -> None:
+    """macOS lets 127.0.0.1:P bind next to a listener on 0.0.0.0:P; the two then share it."""
+    with socket.socket() as busy:
+        if sys.platform != "win32":
+            busy.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)  # as cheroot does
+        busy.bind(("0.0.0.0", 0))
+        busy.listen()
+        port = busy.getsockname()[1]
+        assert not network.port_is_free("127.0.0.1", port)
+        assert network.find_free_port("127.0.0.1", port) != port
+
+
 def test_lan_ips_are_usable() -> None:
     for ip in network.lan_ips():
         assert not ip.startswith("127.")
