@@ -169,6 +169,18 @@ def test_pair_with_a_code(devices: list[Server], page, second_page) -> None:  # 
     assert _api(bravo, "/api/state")["pairing"]["open"] is False
 
 
+def test_pasting_a_code_keeps_all_its_digits(devices: list[Server], page) -> None:  # type: ignore[no-untyped-def]
+    page.goto(devices[0].url)
+    page.click("#connect-button")
+    page.click("[role=tab][data-tab=enter]")
+    field = page.locator("#pair-input")
+    for pasted in ("Code: 332 156", " 332 156", "332-156\n"):
+        field.fill("")
+        field.focus()
+        page.keyboard.insert_text(pasted)  # a paste, as the browser applies it
+        expect(field).to_have_value("332 156")
+
+
 def test_rename_this_device(devices: list[Server], page) -> None:  # type: ignore[no-untyped-def]
     alpha = devices[0]
     page.goto(alpha.url)
