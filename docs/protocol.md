@@ -70,7 +70,7 @@ between **paired** apps carry a signature (§4).
 | Request | Purpose |
 | ------- | ------- |
 | `GET /info` | `{id, name, form, platform, port, version, accepts, visitors: [{id, name, form, platform}]}` (visitors hidden when a PIN is set and the caller isn't paired) |
-| `POST /hello` body = caller's info | Registers the caller (address = TCP peer address); returns `/info` |
+| `POST /hello` body = caller's info | Registers the caller (address = TCP peer address); returns `/info` plus `you: {reachable}` once it has tried to reach the caller — how a PC learns that others can't connect to it (usually its firewall) |
 | `POST /offers` | Offer files (below) → `201 {id, secret, state, reason}` (`reason` says why, when it is declined straight away) |
 | `GET /offers/<id>` + `X-OT-Secret` | `{state, reason, files: [{state, received}]}` |
 | `PUT /offers/<id>/files/<n>` + `X-OT-Secret`, `Content-Length` | Raw file bytes → `201 {file}` (small files) |

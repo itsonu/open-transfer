@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import ipaddress
 import socket
 import subprocess
@@ -134,6 +135,54 @@ def find_free_port(host: str, preferred: int, attempts: int = 20) -> int:
         if port_is_free(host, port):
             return port
     raise OSError(f"No free port found between {preferred} and {preferred + attempts - 1}")
+
+
+DISCOVERY_PORT = 47823  # discovery.PORT; nearby devices' announcements
+
+
+def can_allow_firewall() -> bool:
+    """Only the packaged Windows app: a rule for python.exe would let in far more than us."""
+    return sys.platform == "win32" and bool(getattr(sys, "frozen", False))
+
+
+def allow_command(exe: str, port: int, profile: str) -> list[str]:
+    """PowerShell that asks Windows (one UAC prompt) to let other devices reach ``exe``
+    on ``profile`` ("Private" or "Public") networks: its TCP port and discovery only."""
+    program = exe.replace("'", "''")
+    rules = "; ".join(
+        f"New-NetFirewallRule -DisplayName 'Open Transfer ({profile}, {proto})' -Direction Inbound "
+        f"-Program '{program}' -Profile {profile} -Protocol {proto} -LocalPort {int(local)} -Action Allow"
+        for proto, local in (("TCP", port), ("UDP", DISCOVERY_PORT))
+    )
+    encoded = base64.b64encode(rules.encode("utf-16-le")).decode()
+    return [
+        "powershell",
+        "-NoProfile",
+        "-NonInteractive",
+        "-Command",
+        "Start-Process powershell -Verb RunAs -WindowStyle Hidden -Wait "
+        f"-ArgumentList '-NoProfile','-EncodedCommand','{encoded}'",
+    ]
+
+
+def allow_firewall(
+    exe: str, port: int, profile: str, run: Callable[..., Any] = subprocess.run
+) -> str:
+    """``allowed``, ``cancelled`` (the person said no to the prompt) or ``failed``."""
+    try:
+        done = run(
+            allow_command(exe, port, profile),
+            capture_output=True,
+            text=True,
+            timeout=180,
+            check=False,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+    except (OSError, subprocess.SubprocessError):
+        return "failed"
+    if done.returncode == 0:
+        return "allowed"
+    return "cancelled" if "cancel" in str(done.stderr or "").lower() else "failed"
 
 
 PUBLIC_NETWORKS = (

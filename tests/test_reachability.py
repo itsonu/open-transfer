@@ -91,3 +91,116 @@ def test_pairing_without_such_a_device_keeps_the_plain_message(make_node: NodeFa
     mac.mesh.discovery = Discovery()  # type: ignore[assignment]
     with pytest.raises(MeshError, match="No device on this network is showing a pairing code"):
         mac.mesh.pair_with("822328")
+
+
+# The other side of it: the PC learns from those who can't reach it. Its own hello
+# gets through (outgoing connections are allowed), and the answer says so.
+
+
+def pc_and_mac(make_node: NodeFactory):  # type: ignore[no-untyped-def]
+    pc, mac = make_node("Sonu-PC"), make_node("Mac")
+    pc.mesh.connect(f"127.0.0.1:{mac.port}")  # the PC reaches the Mac
+    assert pc.mesh._hello(pc.mesh._peers[mac.mesh.id])  # and says hello, so the Mac knows it
+    return pc, mac
+
+
+def mac_cannot_reach(pc, mac) -> None:  # type: ignore[no-untyped-def]
+    mac.mesh._peers[pc.mesh.id].reachable = False  # what a dropped connection leaves
+
+
+def test_a_device_that_cant_reach_us_says_so(make_node: NodeFactory) -> None:
+    pc, mac = pc_and_mac(make_node)
+    mac_cannot_reach(pc, mac)
+    assert pc.mesh._hello(pc.mesh._peers[mac.mesh.id]) is True
+    network = owner(pc).state()["network"]
+    assert network["unreachable_by"] == ["Mac"]
+    assert network["reachable_by"] == 0
+
+
+def test_once_it_can_reach_us_the_warning_goes(make_node: NodeFactory) -> None:
+    pc, mac = pc_and_mac(make_node)
+    mac_cannot_reach(pc, mac)
+    pc.mesh._hello(pc.mesh._peers[mac.mesh.id])
+    mac.mesh._peers[pc.mesh.id].reachable = True
+    pc.mesh._hello(pc.mesh._peers[mac.mesh.id])
+    network = owner(pc).state()["network"]
+    assert network["unreachable_by"] == []
+    assert network["reachable_by"] == 1
+
+
+def test_only_devices_still_here_count(make_node: NodeFactory) -> None:
+    pc, mac = pc_and_mac(make_node)
+    mac_cannot_reach(pc, mac)
+    pc.mesh._hello(pc.mesh._peers[mac.mesh.id])
+    pc.mesh._peers[mac.mesh.id].last_seen = 0  # the Mac left
+    assert owner(pc).state()["network"]["unreachable_by"] == []
+
+
+# "Allow on this network": one narrow inbound rule for this app, on the network type
+# in use, through one Windows admin (UAC) prompt — only when the owner asks.
+
+
+def _script(cmd: list[str]) -> str:
+    import base64
+
+    encoded = cmd[cmd.index("-ArgumentList") + 1].split("'-EncodedCommand','")[1].rstrip("'")
+    return base64.b64decode(encoded).decode("utf-16-le")
+
+
+def test_the_firewall_rule_is_narrow() -> None:
+    from open_transfer import network
+
+    cmd = network.allow_command(r"C:\Users\o'neil\Desktop\open-transfer.exe", 5000, "Private")
+    assert cmd[:2] == ["powershell", "-NoProfile"]
+    assert "-Verb RunAs" in cmd[-1]  # Windows asks the person (UAC)
+    script = _script(cmd[-1].split())
+    assert "-Program 'C:\\Users\\o''neil\\Desktop\\open-transfer.exe'" in script  # quoted safely
+    assert "-Profile Private" in script
+    assert "-Protocol TCP -LocalPort 5000" in script
+    assert "-Protocol UDP -LocalPort 47823" in script  # nearby devices' announcements
+    assert "-Action Allow" in script
+    assert "Set-NetFirewallProfile" not in script  # never touches the firewall itself
+    assert "Enabled False" not in script
+
+
+@pytest.mark.parametrize(
+    ("returncode", "stderr", "result"),
+    [
+        (0, "", "allowed"),
+        (1, "The operation was canceled by the user.", "cancelled"),
+        (1, "boom", "failed"),
+    ],
+)
+def test_allowing_reports_what_happened(returncode: int, stderr: str, result: str) -> None:
+    from types import SimpleNamespace
+
+    from open_transfer import network
+
+    def run(*_a: Any, **_k: Any) -> SimpleNamespace:
+        return SimpleNamespace(returncode=returncode, stdout="", stderr=stderr)
+
+    assert network.allow_firewall(r"C:\app.exe", 5000, "Private", run=run) == result
+
+
+def test_only_the_owner_of_the_windows_app_can_allow(
+    make_node: NodeFactory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from open_transfer import network
+    from tests.test_mesh import visitor
+
+    pc = make_node("Sonu-PC")
+    status, data = owner(pc)("POST", "/api/network/allow")
+    assert status == 501  # not the packaged Windows app (never python.exe)
+    assert data["error"]["code"] == "unsupported"
+    assert owner(pc).state()["network"]["can_allow"] is False
+
+    asked: list[tuple[Any, ...]] = []
+    monkeypatch.setattr(network, "can_allow_firewall", lambda: True)
+    monkeypatch.setattr(network, "allow_firewall", lambda *a, **k: asked.append(a) or "allowed")
+    assert owner(pc).state()["network"]["can_allow"] is True
+    status, _ = visitor(pc, "Phone")("POST", "/api/network/allow")
+    assert status == 403
+    assert asked == []
+    status, data = owner(pc)("POST", "/api/network/allow")
+    assert (status, data) == (200, {"result": "allowed"})
+    assert asked[0][1:] == (pc.port, "Private")

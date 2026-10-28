@@ -166,6 +166,8 @@ class Peer:
     # Our last hello got no answer although we hear it on the network: usually its
     # firewall (Windows on a "Public" network). None until we've tried.
     reachable: bool | None = None
+    # Its answer to our hello says whether *it* can reach *us* (None: it hasn't tried).
+    reaches_us: bool | None = None
 
     @property
     def online(self) -> bool:
@@ -616,9 +618,16 @@ class Mesh:
         updated = self._upsert_peer(info, peer.host, manual=peer.manual)
         if updated is not None:
             took = (time.monotonic() - started) * 1000
+            you = info.get("you")
+            reaches_us = you.get("reachable") if isinstance(you, dict) else None
             with self._lock:
                 if updated.reachable is not True:
                     updated.reachable = True
+                    self._bump()
+                if isinstance(reaches_us, bool) and updated.reaches_us is not reaches_us:
+                    updated.reaches_us = reaches_us
+                    if not reaches_us:
+                        log.warning("%s can't reach this device", log_safe(updated.name))
                     self._bump()
                 updated.rtt = took if updated.rtt < 0 else updated.rtt * 0.7 + took * 0.3
         return True
@@ -626,8 +635,11 @@ class Mesh:
     def handle_hello(self, info: dict[str, Any], host: str) -> dict[str, Any]:
         if self._stop.is_set():
             raise MeshError(503, "stopping", "This device is shutting down.")
-        self._upsert_peer(info, host)
-        return self.self_info()
+        peer = self._upsert_peer(info, host)
+        reply = self.self_info()
+        if peer is not None and peer.reachable is not None:
+            reply["you"] = {"reachable": peer.reachable}  # whether we can reach the caller
+        return reply
 
     def connect(self, address: str) -> Peer:
         """Add an app by ``host:port`` (for networks where discovery is blocked)."""
@@ -2821,7 +2833,14 @@ class Mesh:
                 "expires_in": self.pair_code_expires_in(),
                 "open": self.pairing_open,
             }
-            state["network"] = {"public": list(self.public_networks)}
+            here = [p for p in self._peers.values() if p.online]
+            state["network"] = {
+                "public": list(self.public_networks),
+                # Told by the devices themselves: they hear us but can't connect to us.
+                "unreachable_by": sorted(p.name for p in here if p.reaches_us is False),
+                "reachable_by": sum(1 for p in here if p.reaches_us is True),
+                "can_allow": network.can_allow_firewall(),
+            }
             state["history"] = {"latest": self.history.latest()}
             state["clipboard"] = {
                 "latest": self._clip_latest,

@@ -28,6 +28,9 @@ All notable changes are documented here. The format follows [Keep a Changelog](h
 - Android: the background service runs as a *connected device* service, so Android 15+ no longer stops it after about 6 hours a day.
 
 ### Fixed
+- **A PC others can't reach now says so, whatever the reason.** Devices that hear it but can't connect tell it when it says hello, and it names them ("Mac can't reach this device — usually its firewall"). Before, it only warned on a *Public* network, so a firewall rule made for Public left it silent on Private — and its advice to switch to Private was what broke it.
+- **Windows: Allow on this network.** That warning has a button that asks Windows (one admin prompt) to let other devices reach Open Transfer on this kind of network: only its own port and discovery, never the firewall as a whole.
+- **Windows: no more "Failed to remove temporary directory" when closing the window;** the copy that keeps syncing in the background now runs from its own files.
 - **No more warning-coloured dot on a normal connection:** device tiles show the connection dot only when it's actually slow. A phone on Wi‑Fi is often a little slower than a computer, and that's fine.
 - **Android: Preview on a PDF** no longer pops up the "Open with" app list; PDFs are previewed where the browser can show them, and saved or opened otherwise.
 - **The drop zone's text lines up again** once files are listed (the title had drifted to the middle and the hint to the bottom-left).

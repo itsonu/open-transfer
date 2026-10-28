@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import io
 import json
+import sys
 import time
 from collections.abc import Callable
 from typing import Any
@@ -27,6 +28,7 @@ from flask import (
 )
 from werkzeug.exceptions import ClientDisconnected
 
+from open_transfer import network
 from open_transfer.archive import zip_stream
 from open_transfer.clipboard import MAX_IMAGE_BYTES as CLIP_MAX_IMAGE
 from open_transfer.devices import clean_form, clean_name, clean_platform, valid_id
@@ -857,6 +859,17 @@ def register(
     def ui_pair_open() -> Response:
         owner_only()
         return jsonify(mesh.open_pairing())
+
+    @app.post("/api/network/allow")
+    def ui_network_allow() -> Response:
+        """Let other devices reach this PC on this kind of network (one UAC prompt)."""
+        owner_only()
+        if not network.can_allow_firewall():
+            raise MeshError(
+                501, "unsupported", "Only the Windows app can change its firewall rule."
+            )
+        profile = "Public" if mesh.public_networks else "Private"
+        return jsonify({"result": network.allow_firewall(sys.executable, mesh.port, profile)})
 
     @app.post("/api/pair/close")
     def ui_pair_close() -> Response:

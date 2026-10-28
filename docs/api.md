@@ -136,6 +136,7 @@ These power the device grid. "Owner" means a request from the device itself
 | `POST /api/incoming/<id>/accept` · `/decline` · `DELETE /api/incoming/<id>` | the recipient | Answer or stop an incoming transfer |
 | `GET /api/inbox/files/<name>` · `DELETE …` · `GET /api/inbox/archive` | visitor | Files sent to this browser |
 | `POST /api/pair` `{code, address?}` | owner | Pair with the app showing `code` (the nearby one with Add device open, or at `address`) |
+| `POST /api/network/allow` | owner | Packaged Windows app only (`501 unsupported` elsewhere): asks Windows, through one admin (UAC) prompt, for an inbound rule for this app on the current network type (its TCP port and discovery UDP 47823) → `{result: allowed \| cancelled \| failed}`. `state.network` = `{public, unreachable_by, reachable_by, can_allow}` |
 | `POST /api/pair/open` · `POST /api/pair/close` | owner | Add device opened (renew every ≤30 s while it shows) → `{code, expires_in}` · closed. Codes only work while it's open |
 | `POST /api/devices` `{address}` | owner | Add an app by `host:port` |
 | `DELETE /api/pairs/<id>` · `POST /api/pair/new-code` · `GET /api/pair/qr.svg` | owner | Unpair · new code · QR with the code |

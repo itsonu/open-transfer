@@ -1418,6 +1418,10 @@ a.row-title:hover {
   font-size: 13px;
 }
 
+.me-allow {
+  margin-top: 6px;
+}
+
 .me-status::before {
   width: 7px;
   height: 7px;

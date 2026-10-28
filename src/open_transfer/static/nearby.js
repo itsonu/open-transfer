@@ -220,10 +220,21 @@ function renderMe() {
   $("#me-name-text").textContent = me.name;
   $("#me-icon").replaceChildren(icon(deviceIcon({ ...me, kind: me.kind === "owner" ? "app" : "browser" })));
   const status = $("#me-status");
-  const blocked = mesh.data.network?.public || [];
-  if (me.kind === "owner" && blocked.length) {
+  $("#me-allow").hidden = true;
+  const network = mesh.data.network || {};
+  const cantReach = network.unreachable_by || [];
+  // Only a guess: a device that does reach us proves this PC's firewall lets it in.
+  const blocked = network.reachable_by ? [] : network.public || [];
+  if (me.kind === "owner" && cantReach.length) {
+    // Told by the devices themselves (they hear us, but can't connect).
+    const kind = network.public?.length ? "Public" : "Private";
+    const fix = me.platform === "windows" ? ` In Windows Security → Firewall, allow Open Transfer on ${kind} networks.` : "";
+    status.textContent = `${cantReach.join(", ")} can’t reach this device — usually its firewall.${fix}`;
+    status.dataset.tone = "warn";
+    $("#me-allow").hidden = !network.can_allow;
+  } else if (me.kind === "owner" && blocked.length) {
     // Windows Firewall keeps everyone out on a "Public" network, whatever the app allows.
-    status.textContent = `Other devices can’t reach this PC: Windows treats “${blocked[0]}” as a Public network. Set it to Private in Settings → Network & internet → Wi-Fi.`;
+    status.textContent = `Other devices may not reach this PC: Windows treats “${blocked[0]}” as a Public network. Set it to Private, and allow Open Transfer on Private networks.`;
     status.dataset.tone = "warn";
   } else if (me.kind === "owner") {
     status.textContent = discovery ? "Visible to nearby devices" : "Not discoverable — add devices by code or address";
@@ -1639,6 +1650,22 @@ export async function confirmSensitive(text, { action = "Send" } = {}) {
   });
 }
 
+/** One narrow firewall rule for this app, after Windows asks the owner (UAC). */
+async function allowOnThisNetwork() {
+  const button = $("#me-allow");
+  button.disabled = true;
+  try {
+    const { data } = await api("/api/network/allow", { method: "POST" });
+    if (data.result === "allowed") toast("Allowed — other devices can reach this PC now", { tone: "success", icon: "check" });
+    else if (data.result === "cancelled") toast("Nothing changed — Windows asked and the answer was No", { icon: "alert" });
+    else toast("Couldn’t change the firewall rule", { tone: "error", icon: "alert" });
+  } catch (err) {
+    toast(err.message, { tone: "error", icon: "alert" });
+  } finally {
+    button.disabled = false;
+  }
+}
+
 function setupRename() {
   const dialog = $("#rename-dialog");
   const input = $("#rename-input");
@@ -2036,6 +2063,7 @@ export function initNearby(context) {
   setupConnectSheet();
   setupRename();
   setupTextDialog();
+  $("#me-allow").addEventListener("click", allowOnThisNetwork);
   $("#select-all").addEventListener("click", () => {
     const online = onlineDevices();
     const allSelected = online.every((d) => mesh.selected.has(d.id));
