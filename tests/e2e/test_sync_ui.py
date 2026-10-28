@@ -114,3 +114,15 @@ def test_adding_an_iphone(two_apps: tuple[Server, Server], page) -> None:  # typ
     row.get_by_role("button", name="Remove Sam’s iPhone").click()
     page.click("#confirm-ok")
     expect(page.locator("#sync-clients")).to_have_count(0)
+
+
+def test_recently_says_who_didnt_take_a_clip(two_apps: tuple[Server, Server], page) -> None:  # type: ignore[no-untyped-def]
+    """Bravo has sync off: the Mac used to say only "Not sent", never why."""
+    alpha, _bravo = two_apps
+    call(alpha, "PUT", "/api/sync/policy", {"enabled": True})
+    call(alpha, "POST", "/api/sync/send", {"text": "hello Bravo"})
+    page.goto(alpha.url)
+    expect(page.locator("#clipboard-section")).to_be_visible(timeout=10_000)
+    page.click("#sync-open")
+    expect(page.locator("#sync-recent li").first).to_contain_text("Bravo didn’t take it")
+    expect(page.locator("#sync-devices li", has_text="Bravo")).to_contain_text("Sync is off there")

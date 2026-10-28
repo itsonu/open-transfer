@@ -426,11 +426,11 @@ function render() {
               "span",
               {},
               r.direction === "sent"
-                ? r.devices.length
-                  ? `Sent to ${r.devices.join(", ")}`
-                  : r.queued
-                    ? `Waiting for ${plural(r.queued, "device")}`
-                    : "Not sent"
+                ? (r.devices.length
+                    ? `Sent to ${r.devices.join(", ")}`
+                    : r.queued
+                      ? `Waiting for ${plural(r.queued, "device")}`
+                      : "Not sent") + (r.refused?.length ? ` · ${r.refused.join(", ")} didn’t take it` : "")
                 : `${r.applied === false ? "Not pasted" : "Received"} from ${r.devices.join(", ")}`,
             ),
             h("span", { class: "muted" }, ` · ${TYPE_LABELS[r.type] || r.type} · ${relativeTime(r.at)}`),

@@ -275,14 +275,16 @@ class SyncEngine:
                 "size": size,
                 "devices": [self._name(d) for d in outcomes["delivered"]],
                 "queued": len(outcomes["queued"]),
+                "refused": [self._name(d) for d in outcomes["refused"]],  # e.g. sync off there
             }
         )
         log.info(
-            "Clipboard %s (%d bytes) synced to %d device(s), %d waiting",
+            "Clipboard %s (%d bytes) synced to %d device(s), %d waiting, %d refused",
             kind,
             size,
             len(outcomes["delivered"]),
             len(outcomes["queued"]),
+            len(outcomes["refused"]),
         )
         return {"status": "sent", "event": event_id, **{k: sorted(v) for k, v in outcomes.items()}}
 

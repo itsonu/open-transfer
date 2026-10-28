@@ -266,6 +266,18 @@ def test_receivers_refuse_devices_they_dont_sync_with(net: Net) -> None:
     assert texts(win) == []
 
 
+def test_a_refusal_shows_in_recent_and_the_log(net: Net, caplog: pytest.LogCaptureFixture) -> None:
+    """A device with sync off says no; "Sent to …" alone hid that it never got there."""
+    mac, win = network(net, "Mac", "Windows")
+    win.engine.set_policy(enabled=False)
+    with caplog.at_level(logging.INFO, logger="open_transfer"):
+        mac.copy("hello?")
+    latest = mac.engine.status()["recent"][0]
+    assert latest["devices"] == []
+    assert latest["refused"] == ["Windows"]
+    assert "1 refused" in caplog.text
+
+
 # ------------------------------------------------- loops, echoes, dedup
 
 
