@@ -30,6 +30,7 @@ import base64
 import contextlib
 import dataclasses
 import hashlib
+import hmac
 import http.client
 import ipaddress
 import json
@@ -94,6 +95,7 @@ VISITOR_FORGET = 24 * 3600.0
 HELLO_EVERY = 6.0
 NETWORK_CHECK_EVERY = 60.0  # how often Windows is asked whether the Wi-Fi is "Public"
 HELLO_TIMEOUT = 3.0  # seconds a hello may take before we give up on it
+MOVE_CHECK_EVERY = 30.0  # seconds between challenges to one claimed new address
 FINISHED_KEEP = 90.0  # finished transfers stay in the UI this long
 PAIR_CODE_TTL = 600.0
 PAIR_WINDOW = 30.0  # a code works this long after the Add device page last renewed it
@@ -335,6 +337,7 @@ class Mesh:
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self._hellos: set[Future[bool]] = set()
+        self._move_checks: dict[tuple[str, str], float] = {}  # (device, host) → last challenge
         self.sync = SyncEngine(
             me=lambda: self.identity.to_dict(),
             trust=self.trust,
@@ -491,7 +494,9 @@ class Mesh:
 
     # ------------------------------------------------------------- peers
 
-    def _upsert_peer(self, info: dict[str, Any], host: str, *, manual: bool = False) -> Peer | None:
+    def _upsert_peer(
+        self, info: dict[str, Any], host: str, *, manual: bool = False, proven: bool = False
+    ) -> Peer | None:
         peer_id = info.get("id")
         port = info.get("port")
         if not valid_id(peer_id) or peer_id == self.id or not str(peer_id).startswith("d-"):
@@ -499,6 +504,14 @@ class Mesh:
         if not isinstance(port, int) or not 1 <= port <= 65535:
             return None
         assert isinstance(peer_id, str)  # noqa: S101 - narrowed by valid_id
+        with self._lock:
+            peer = self._peers.get(peer_id)
+            moved = peer is not None and peer.host != host and not _is_loopback(host)
+        if moved and not (proven or manual) and self.trust.get(peer_id):
+            # Anyone on the Wi-Fi can send this with a paired device's id: move it (or
+            # believe anything else said here) only once it proves it's there.
+            self._check_move(peer_id, host, port)
+            return None
         with self._lock:
             peer = self._peers.get(peer_id)
             is_new = peer is None or not peer.online
@@ -634,14 +647,70 @@ class Mesh:
                 updated.rtt = took if updated.rtt < 0 else updated.rtt * 0.7 + took * 0.3
         return True
 
-    def handle_hello(self, info: dict[str, Any], host: str) -> dict[str, Any]:
+    def handle_hello(
+        self, info: dict[str, Any], host: str, *, signed: bool = False
+    ) -> dict[str, Any]:
+        """``signed``: the caller proved it's the paired device it says (``X-OT-Auth``)."""
         if self._stop.is_set():
             raise MeshError(503, "stopping", "This device is shutting down.")
-        peer = self._upsert_peer(info, host)
+        peer = self._upsert_peer(info, host, proven=signed)
         reply = self.self_info()
         if peer is not None and peer.reachable is not None:
             reply["you"] = {"reachable": peer.reachable}  # whether we can reach the caller
+        challenge, to = info.get("challenge"), info.get("to")
+        trusted = self.trust.get(str(info.get("id"))) if signed else None
+        # Prove we're here — only for an address that is ours, so someone relaying the
+        # challenge to us can't use the answer for theirs.
+        if (
+            trusted
+            and isinstance(challenge, str)
+            and 16 <= len(challenge) <= 128
+            and isinstance(to, str)
+            and self._is_own_address(to)
+        ):
+            key = bytes.fromhex(trusted.key)
+            reply["proof"] = _move_proof(key, challenge, self.id, trusted.id, to)
         return reply
+
+    def _is_own_address(self, address: str) -> bool:
+        try:
+            host, port = _parse_address(address)
+        except MeshError:
+            return False
+        return port == self.port and (_is_loopback(host) or host in network.lan_ips())
+
+    def _check_move(self, peer_id: str, host: str, port: int) -> None:
+        """A paired device seems to be at ``host:port`` now: challenge it there (N1)."""
+        now = time.monotonic()
+        with self._lock:
+            if now - self._move_checks.get((peer_id, host), -1e9) < MOVE_CHECK_EVERY:
+                return
+            self._move_checks[(peer_id, host)] = now
+            for key, at in list(self._move_checks.items()):
+                if now - at > MOVE_CHECK_EVERY:
+                    del self._move_checks[key]
+
+        def challenge() -> None:
+            trusted = self.trust.get(peer_id)
+            if trusted is None or self._stop.is_set():
+                return
+            nonce, to = secrets.token_hex(16), f"{host}:{port}"
+            there = Peer(peer_id, "", "computer", "unknown", host, port)  # _http signs for it
+            body = {**self.self_info(include_visitors=False), "challenge": nonce, "to": to}
+            try:
+                status, info = self._http(
+                    there, "POST", f"{P2P}/hello", body=body, timeout=HELLO_TIMEOUT
+                )
+            except OSError:
+                return
+            expected = _move_proof(bytes.fromhex(trusted.key), nonce, peer_id, self.id, to)
+            proof = info.get("proof")
+            if status == 200 and isinstance(proof, str) and hmac.compare_digest(proof, expected):
+                log.info("%s moved to %s", log_safe(trusted.name), to)
+                self._upsert_peer(info, host, proven=True)
+                self._bump()
+
+        self._submit(challenge)
 
     def connect(self, address: str) -> Peer:
         """Add an app by ``host:port`` (for networks where discovery is blocked)."""
@@ -3195,6 +3264,12 @@ def _clean_mime(value: str) -> str:
     ):
         return value.strip().lower()[:100]
     return "application/octet-stream"
+
+
+def _move_proof(key: bytes, nonce: str, prover: str, verifier: str, to: str) -> str:
+    """A paired device's answer to "are you at ``to``?" (needs the pair's key)."""
+    message = f"open-transfer-move/1|{nonce}|{prover}|{verifier}|{to}".encode()
+    return hmac.new(key, message, hashlib.sha256).hexdigest()
 
 
 def _parse_address(address: str) -> tuple[str, int]:

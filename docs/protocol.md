@@ -194,6 +194,25 @@ Receivers accept signatures within ±120 s and refuse a signature they have
 already seen. A valid signature makes an offer from that app's owner
 auto-accepted; anything else is treated as a stranger (asked first).
 
+### A paired app's new address
+
+Anyone on the Wi-Fi can send an announcement carrying a paired app's id, so
+for a **paired** app the address (and anything else the packet says) changes
+only on proof:
+
+* a `POST /hello` it signed (§4) arriving from the new address, or
+* its answer to a challenge: the app that heard the claim sends a signed
+  `POST /hello` there with `challenge` (random hex) and `to` (the `host:port`
+  it dialled). The answer must carry
+  `proof = hex HMAC-SHA256(key, "open-transfer-move/1|<challenge>|<prover>|<verifier>|<to>")`.
+  An app answers only when `to` is one of its own addresses and ports, so a
+  challenge relayed to the real app proves nothing for the relay's address.
+  At most one challenge per app and address every 30 s.
+
+Apps that aren't paired move as before (there's no key to prove anything
+with). Older apps don't answer challenges; their own signed hellos still move
+them.
+
 ## Security notes and limits
 
 * **Transport is plain HTTP on the LAN.** Pairing authenticates devices and

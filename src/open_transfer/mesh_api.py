@@ -145,8 +145,12 @@ def register(
     @app.post(f"{P2P}/hello")
     def p2p_hello() -> Response:
         info = body_json()
-        reply = mesh.handle_hello(info, client())
-        if config.pin and not signed_by(str(info.get("id", ""))):
+        sender = str(info.get("id", ""))
+        signed = request.headers.get("X-OT-From") == sender and signed_by(
+            sender
+        )  # once: no replays
+        reply = mesh.handle_hello(info, client(), signed=signed)
+        if config.pin and not signed:
             reply.pop("visitors", None)
         return jsonify(reply)
 
