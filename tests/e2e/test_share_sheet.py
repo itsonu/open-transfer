@@ -130,3 +130,48 @@ def test_browsers_without_the_bridge_are_unaffected(page, devices: list[Server])
     expect(tile(page, "Bravo")).to_be_visible(timeout=10_000)
     page.evaluate("window.dispatchEvent(new Event('ot-native-share'))")
     expect(page.locator("#send-bar")).to_be_hidden()
+
+
+# ------------------------------------------------------- text, links, both
+
+
+def share_text(page, text: str, *files: dict) -> None:  # type: ignore[no-untyped-def,type-arg]
+    """A share with text (EXTRA_TEXT / EXTRA_SUBJECT / ClipData text, combined by the app)."""
+    page.evaluate(
+        "([text, files]) => { window.__shares.push({ files, text });"
+        " window.dispatchEvent(new Event('ot-native-share')); }",
+        [text, list(files)],
+    )
+
+
+def test_shared_text_is_ready_to_send_to_who_you_choose(
+    phone, second_page, devices: list[Server]
+) -> None:  # type: ignore[no-untyped-def]
+    _alpha, bravo, charlie = devices
+    second_page.goto(bravo.url)
+    share_text(phone, "Meet at the north entrance at 5")
+    expect(phone.locator("#send-bar-files")).to_contain_text("Shared text")
+    tile(phone, "Bravo").locator(".device-button").click()
+    phone.click("#send-go")
+    second_page.locator("#incoming-accept").click(timeout=10_000)
+    expect(phone.locator(".job-target", has_text="Bravo")).to_contain_text(
+        "Delivered", timeout=10_000
+    )
+    [got] = list(bravo.root.glob("Shared text*.txt"))
+    assert got.read_text() == "Meet at the north entrance at 5"
+    assert not list(charlie.root.glob("*.txt"))  # only who was chosen
+
+
+def test_a_shared_link_is_sent_as_a_link(phone) -> None:  # type: ignore[no-untyped-def]
+    share_text(phone, "Open Transfer docs\nhttps://example.com/docs")
+    expect(phone.locator("#send-bar-files")).to_contain_text("Link")
+
+
+def test_text_shared_with_files_keeps_both(phone) -> None:  # type: ignore[no-untyped-def]
+    share_text(phone, "Photos from Saturday", PHOTO_ITEM, PDF_ITEM)
+    expect(phone.locator("#send-bar-files")).to_contain_text("3 files")
+
+
+def test_private_looking_shared_text_asks_first(phone) -> None:  # type: ignore[no-untyped-def]
+    share_text(phone, "password: hunter2-correct-horse")
+    expect(phone.locator("#confirm-dialog")).to_be_visible()

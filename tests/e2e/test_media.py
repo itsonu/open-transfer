@@ -260,3 +260,17 @@ def test_compact_drop_zone_keeps_its_text_in_one_column(mac: Server, page) -> No
     glyph = page.locator("#dropzone-clipboard .icon").bounding_box()
     assert glyph is not None
     assert glyph["x"] - lefts["#drop-title"] <= 24, (glyph, lefts["#drop-title"])
+
+
+def test_the_android_app_shares_a_received_file_to_other_apps(mac: Server, page) -> None:  # type: ignore[no-untyped-def]
+    # Android's WebView has no navigator.share: the app's bridge opens the system Sharesheet.
+    page.add_init_script(
+        "window.__out = []; window.OpenTransferAndroid = {"
+        " openFile() {}, shareFile(name) { window.__out.push(name); } };"
+    )
+    page.goto(mac.url)
+    row = page.locator(".file-row", has_text="notes.txt")
+    expect(row).to_be_visible(timeout=10_000)
+    row.locator(".row-more").click()
+    page.locator("#file-menu [role=menuitem]", has_text="Share…").click()
+    assert page.evaluate("window.__out") == ["notes.txt"]

@@ -205,6 +205,26 @@ What makes this work, and the limits:
   doing, not Open Transfer's. The device sharing the hotspot can still reach
   everyone.
 
+## 9. Android share sheet (into and out of Open Transfer)
+
+Each row: share from the named app → pick **Open Transfer** → the items are staged → choose one device, then two devices → **Send** → the receiver gets exactly what was shared (names, contents) and the sender shows *Delivered*.
+
+| # | Check | Result |
+|---|-------|--------|
+| 9.1 | One photo from Photos/Gallery | |
+| 9.2 | Five photos and a video at once (SEND_MULTIPLE) | |
+| 9.3 | A PDF and a .docx from Files / Drive | |
+| 9.4 | A 2 GB video: staged without the app slowing down; progress shown; arrives intact | |
+| 9.5 | Plain text from Keep/Notes → arrives as *Shared text ….txt* | |
+| 9.6 | A link from Chrome → arrives as *Link ….txt* with the page title and the address | |
+| 9.7 | Photos with a caption (e.g. from a messaging app) → the photos **and** a .txt with the caption | |
+| 9.8 | Copy text → share it via the clipboard tile / *Send to my devices* with clipboard sync **off** → the app opens with the text ready to send | |
+| 9.9 | The same photo shared twice in one go → staged once | |
+| 9.10 | Share, then press Home before sending; reopen → still staged, sends fine | |
+| 9.11 | Share from an app, then cancel in Open Transfer → nothing is sent | |
+| 9.12 | A received file → ⋯ → **Share…** → the system share sheet → send it to another app (Gmail, Drive) | |
+| 9.13 | A paired receiver: the transfer shows **encrypted** (§3) | |
+
 ## If devices don't see each other
 
 1. Same Wi‑Fi? Guest networks and many routers isolate devices.

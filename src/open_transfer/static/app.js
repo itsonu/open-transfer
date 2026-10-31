@@ -397,7 +397,9 @@ function fileActions(file, row) {
       }
     },
   });
-  if (canShareFiles()) items.push({ label: "Share…", icon: "share", run: () => shareFile(urlFor(file), file) });
+  // Android's WebView has no navigator.share: the app opens the system Sharesheet.
+  if (native && nativeApp().shareFile) items.push({ label: "Share…", icon: "share", run: () => nativeApp().shareFile(file.name) });
+  else if (canShareFiles()) items.push({ label: "Share…", icon: "share", run: () => shareFile(urlFor(file), file) });
   if (can("delete") || inInbox()) items.push({ label: "Delete", icon: "trash", danger: true, run: () => deleteFile(file, row) });
   return items;
 }
@@ -1045,7 +1047,9 @@ async function takeShared() {
     return;
   }
   const items = Array.isArray(shared?.files) ? shared.files : [];
-  if (!items.length) return;
+  // Text, links and captions (EXTRA_TEXT, EXTRA_SUBJECT, ClipData text): a .txt file.
+  const text = typeof shared?.text === "string" ? shared.text : "";
+  if (!items.length && !text) return;
   const total = items.reduce((n, item) => n + Math.max(0, Number(item.size) || 0), 0);
   if (total > 20_000_000) toast(`Getting ${plural(items.length, "shared file")} ready…`, { icon: "clock" });
   const files = [];
@@ -1061,14 +1065,17 @@ async function takeShared() {
       failed += 1;
     }
   }
+  if (text && (await confirmSensitive(text))) files.push(textFile(text, /https?:\/\/\S/.test(text) ? "Link" : "Shared text"));
   if (failed) toast(`Couldn’t read ${plural(failed, "shared file")}`, { tone: "error", icon: "alert" });
-  enqueueFiles(files, { source: "share" });
+  if (files.length) enqueueFiles(files, { source: "share" });
 }
+
+const textFile = (text, label) => new File([text.replace(/\r\n/g, "\n")], `${label} ${stamp()}.txt`, { type: "text/plain" });
 
 /** Text to send, as a .txt file; private-looking text asks first. */
 async function sendText(text, label) {
   if (!(await confirmSensitive(text))) return;
-  enqueueFiles([new File([text.replace(/\r\n/g, "\n")], `${label} ${stamp()}.txt`, { type: "text/plain" })]);
+  enqueueFiles([textFile(text, label)]);
 }
 
 /** Send what's on the clipboard: an image as is, text as a .txt file. */

@@ -42,6 +42,7 @@ object SharedFiles {
 
     private val lock = Any()
     private var pending: List<Item> = emptyList()
+    private var pendingText: String? = null
 
     /** Shares the page took, by token, newest last (it may still be fetching them). */
     private val served = LinkedHashMap<String, List<Item>>()
@@ -58,9 +59,13 @@ object SharedFiles {
             .filter { SharePolicy.accepts(it.scheme, it.authority, own) }
             .take(MAX_ITEMS)
             .mapIndexed { index, uri -> describe(resolver, uri, type, index) }
-        offer(items)
-        return items.size
+        val text = text(intent, hasFiles = items.isNotEmpty())
+        offer(items, text)
+        return items.size + (if (text != null) 1 else 0)
     }
+
+    /** Text "Send to my devices" couldn't send itself: the page stages it to choose a device. */
+    fun offerText(text: String) = offer(emptyList(), SharePolicy.sharedText(null, listOf(text)))
 
     /**
      * A file shared as `text/plain` (a .txt from a file manager) lands in
@@ -105,25 +110,30 @@ object SharedFiles {
         return items.size
     }
 
-    private fun offer(items: List<Item>) {
-        if (items.isEmpty()) return
-        synchronized(lock) { pending = pending + items }
-        Log.i(LOG_TAG, "Shared ${items.size} file(s)") // never names: they're private
+    private fun offer(items: List<Item>, text: String? = null) {
+        if (items.isEmpty() && text == null) return
+        synchronized(lock) {
+            pending = pending + items
+            if (text != null) pendingText = listOfNotNull(pendingText, text).joinToString("\n\n")
+        }
+        Log.i(LOG_TAG, "Shared ${items.size} file(s)${if (text != null) " and text" else ""}") // never names
     }
 
     /** For the page (bridge): what was shared since it last asked, as JSON; "" if nothing. */
     fun take(): String {
         val token = SharePolicy.newToken()
-        val items = synchronized(lock) {
+        val (items, text) = synchronized(lock) {
             val taken = pending
+            val words = pendingText
             pending = emptyList()
+            pendingText = null
             if (taken.isNotEmpty()) {
                 served[token] = taken
                 while (served.size > KEEP_TOKENS) served.remove(served.keys.first())
             }
-            taken
+            taken to words
         }
-        if (items.isEmpty()) return ""
+        if (items.isEmpty() && text == null) return ""
         val files = JSONArray()
         items.forEachIndexed { index, item ->
             files.put(
@@ -134,7 +144,7 @@ object SharedFiles {
                     .put("size", item.size),
             )
         }
-        return JSONObject().put("files", files).toString()
+        return JSONObject().put("files", files).apply { if (text != null) put("text", text) }.toString()
     }
 
     /**
@@ -176,6 +186,16 @@ object SharedFiles {
         return found.distinct()
     }
 
+    /** EXTRA_TEXT (one or a list), ClipData text and EXTRA_SUBJECT: never dropped silently. */
+    private fun text(intent: Intent, hasFiles: Boolean): String? {
+        val texts = mutableListOf<String?>()
+        // A list or a single value, depending on the app: a mismatch just reads as null.
+        intent.getCharSequenceExtra(Intent.EXTRA_TEXT)?.let { texts += it.toString() }
+        intent.getCharSequenceArrayListExtra(Intent.EXTRA_TEXT)?.forEach { texts += it?.toString() }
+        intent.clipData?.let { clip -> for (i in 0 until clip.itemCount) texts += clip.getItemAt(i).text?.toString() }
+        return SharePolicy.sharedText(intent.getStringExtra(Intent.EXTRA_SUBJECT), texts, hasFiles)
+    }
+
     private fun describe(resolver: ContentResolver, uri: Uri, given: String?, index: Int): Item {
         var name: String? = null
         var size = -1L
@@ -208,6 +228,7 @@ object SharedFiles {
 /** The pure rules behind [SharedFiles] (no Android APIs, so they are unit tested). */
 object SharePolicy {
     const val PREFIX = "/__shared/"
+    const val MAX_TEXT = 1_000_000
     private const val MAX_NAME = 200
     private val PATH = Regex("^/__shared/([A-Za-z0-9_-]{1,64})/(\\d{1,6})$")
     private val random = SecureRandom()
@@ -244,6 +265,24 @@ object SharePolicy {
         }
         return name.take(MAX_NAME)
     }
+
+    /**
+     * What a share says in words: each text once (EXTRA_TEXT and ClipData often repeat
+     * it), after the subject (a page's title) unless the text already has it. A subject
+     * alone counts only when no file came with it: file managers put the name there.
+     */
+    fun sharedText(subject: String?, texts: List<String?>, hasFiles: Boolean = false): String? {
+        val parts = texts.mapNotNull { it?.trim()?.takeIf(String::isNotEmpty) }.distinct()
+        val title = subject?.trim()?.takeIf { s ->
+            s.isNotEmpty() && parts.none { s in it } && (parts.isNotEmpty() || !hasFiles)
+        }
+        val body = parts.joinToString("\n\n")
+        val all = listOfNotNull(title, body.takeIf(String::isNotEmpty)).joinToString("\n")
+        return all.takeIf(String::isNotEmpty)?.take(MAX_TEXT)
+    }
+
+    /** "Send to my devices" couldn't send: clipboard sync off, paused, or nobody to send to. */
+    fun opensAppInstead(reason: String): Boolean = reason in setOf("off", "paused", "no_devices")
 
     /** Is this a file shared as text (only a stream, no text)? Then it isn't a clip. */
     fun isFileShare(action: String?, hasStream: Boolean, hasText: Boolean): Boolean =

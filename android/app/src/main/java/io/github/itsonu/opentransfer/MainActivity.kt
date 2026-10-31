@@ -4,6 +4,7 @@ import android.Manifest
 import android.annotation.SuppressLint
 import android.app.DownloadManager
 import android.content.ActivityNotFoundException
+import android.content.ClipData
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
@@ -537,27 +538,47 @@ class MainActivity : ComponentActivity() {
 
     // ------------------------------------------------------------------ bridge
 
-    private fun openOwnFile(name: String?) {
+    /** A received file as a content:// URI other apps can be granted, with its type. */
+    private fun ownFile(name: String?): Pair<Uri, String>? {
         val safe = name?.takeIf { LocalPolicy.isSafeFileName(it) }
         if (safe == null) {
             Log.w(LOG_TAG, "Refusing to open '$name'")
-            return
+            return null
         }
         val file = File(TransferService.storageDir ?: Places.publicStorageDir(), safe)
         if (!file.isFile) {
             toast(R.string.file_missing)
-            return
+            return null
         }
         val uri = try {
             FileProvider.getUriForFile(this, "$packageName.files", file)
         } catch (e: IllegalArgumentException) {
             Log.w(LOG_TAG, "No FileProvider path for $file", e)
             toast(R.string.file_missing)
-            return
+            return null
         }
         val mime = MimeTypeMap.getSingleton()
             .getMimeTypeFromExtension(file.extension.lowercase(Locale.ROOT))
             ?: "application/octet-stream"
+        return uri to mime
+    }
+
+    private fun shareOwnFile(name: String?) {
+        val (uri, mime) = ownFile(name) ?: return
+        val send = Intent(Intent.ACTION_SEND)
+            .setType(mime)
+            .putExtra(Intent.EXTRA_STREAM, uri)
+            .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        send.clipData = ClipData.newRawUri(null, uri) // lets the chooser pass the grant on
+        try {
+            startActivity(Intent.createChooser(send, null))
+        } catch (e: ActivityNotFoundException) {
+            toast(R.string.no_app_for_file)
+        }
+    }
+
+    private fun openOwnFile(name: String?) {
+        val (uri, mime) = ownFile(name) ?: return
         val view = Intent(Intent.ACTION_VIEW)
             .setDataAndType(uri, mime)
             .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
@@ -617,6 +638,12 @@ class MainActivity : ComponentActivity() {
         @JavascriptInterface
         fun openFile(name: String?) {
             main.post { openOwnFile(name) }
+        }
+
+        /** The system Sharesheet for a received file (the WebView has no navigator.share). */
+        @JavascriptInterface
+        fun shareFile(name: String?) {
+            main.post { shareOwnFile(name) }
         }
 
         /** The clipboard's text, or "": the WebView never lets the page read it (no prompt to ask with). */
