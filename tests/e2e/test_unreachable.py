@@ -134,3 +134,31 @@ def test_no_allow_button_without_the_windows_app(page, devices: list[Server]) ->
     page.goto(devices[0].url)
     expect(page.locator("#me-status")).to_contain_text("can’t reach", timeout=10_000)
     expect(page.locator("#me-allow")).to_be_hidden()
+
+
+def test_a_windows_block_rule_is_named_and_offered_for_removal(page, devices: list[Server]) -> None:  # type: ignore[no-untyped-def]
+    """Windows' own prompt, cancelled once, left a Block rule for the app: Block beats
+    Allow, so the button says it removes that rule too (only that one)."""
+
+    def patch(route) -> None:  # type: ignore[no-untyped-def]
+        response = route.fetch()
+        if response.status != 200:
+            route.fulfill(response=response)
+            return
+        data = response.json()
+        data["me"]["platform"] = "windows"
+        data["network"] = {
+            "public": [],
+            "unreachable_by": ["Mac"],
+            "reachable_by": 0,
+            "can_allow": True,
+            "blocking_rules": ["open-transfer-windows-x64.exe"],
+        }
+        route.fulfill(response=response, body=json.dumps(data))
+
+    page.route("**/api/state*", patch)
+    page.goto(devices[0].url)
+    status = page.locator("#me-status")
+    expect(status).to_contain_text("open-transfer-windows-x64.exe", timeout=10_000)
+    expect(status).to_contain_text("blocks Open Transfer")
+    expect(page.locator("#me-allow")).to_have_text("Remove the block and allow")

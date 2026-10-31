@@ -228,10 +228,17 @@ function renderMe() {
   if (me.kind === "owner" && cantReach.length) {
     // Told by the devices themselves (they hear us, but can't connect).
     const kind = network.public?.length ? "Public" : "Private";
-    const fix = me.platform === "windows" ? ` In Windows Security → Firewall, allow Open Transfer on ${kind} networks.` : "";
+    const blocks = network.blocking_rules || [];
+    // Block beats Allow: name the rule (left by a cancelled Windows prompt) and say the button removes it.
+    const fix = blocks.length
+      ? ` A Windows Firewall rule (“${blocks[0]}”) blocks Open Transfer.`
+      : me.platform === "windows"
+        ? ` In Windows Security → Firewall, allow Open Transfer on ${kind} networks.`
+        : "";
     status.textContent = `${cantReach.join(", ")} can’t reach this device — usually its firewall.${fix}`;
     status.dataset.tone = "warn";
     $("#me-allow").hidden = !network.can_allow;
+    $("#me-allow").textContent = blocks.length ? "Remove the block and allow" : "Allow on this network";
   } else if (me.kind === "owner" && blocked.length) {
     // Windows Firewall keeps everyone out on a "Public" network, whatever the app allows.
     status.textContent = `Other devices may not reach this PC: Windows treats “${blocked[0]}” as a Public network. Set it to Private, and allow Open Transfer on Private networks.`;
@@ -1657,6 +1664,7 @@ async function allowOnThisNetwork() {
   try {
     const { data } = await api("/api/network/allow", { method: "POST" });
     if (data.result === "allowed") toast("Allowed — other devices can reach this PC now", { tone: "success", icon: "check" });
+    else if (data.result === "failed" && mesh.data?.network?.blocking_rules?.length) toast("Couldn’t remove the blocking rule — Windows Security → Firewall can", { tone: "error", icon: "alert" });
     else if (data.result === "cancelled") toast("Nothing changed — Windows asked and the answer was No", { icon: "alert" });
     else toast("Couldn’t change the firewall rule", { tone: "error", icon: "alert" });
   } catch (err) {

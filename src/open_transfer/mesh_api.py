@@ -870,7 +870,11 @@ def register(
                 501, "unsupported", "Only the Windows app can change its firewall rule."
             )
         profile = "Public" if mesh.public_networks else "Private"
-        return jsonify({"result": network.allow_firewall(sys.executable, mesh.port, profile)})
+        unblock = bool(mesh.blocking_rules)  # shown to the owner, who chose to allow
+        result = network.allow_firewall(sys.executable, mesh.port, profile, unblock=unblock)
+        if result == "allowed":
+            mesh.check_network()
+        return jsonify({"result": result})
 
     @app.post("/api/pair/close")
     def ui_pair_close() -> Response:

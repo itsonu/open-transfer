@@ -37,6 +37,7 @@ import logging
 import os
 import queue
 import secrets
+import sys
 import threading
 import time
 from collections.abc import Callable
@@ -327,6 +328,7 @@ class Mesh:
         self._rotate_code()
         self._rev = 0
         self.public_networks: list[str] = []  # Windows networks set to Public (see network.py)
+        self.blocking_rules: list[str] = []  # Windows Firewall rules blocking this app
         self.port = 0
         self.discovery: Discovery | None = None
         self._executor = ThreadPoolExecutor(max_workers=16, thread_name_prefix="ot-mesh")
@@ -2498,10 +2500,13 @@ class Mesh:
     def check_network(self) -> None:
         """On Windows, notice a Wi-Fi set to Public: others can't reach this PC then."""
         found = network.public_networks()
+        blocks = network.block_rules(sys.executable) if network.can_allow_firewall() else []
         with self._lock:
-            if found == self.public_networks:
+            if (found, blocks) == (self.public_networks, self.blocking_rules):
                 return
-            self.public_networks = found
+            self.public_networks, self.blocking_rules = found, blocks
+        if blocks:
+            log.warning("Windows Firewall rules block this app: %s", ", ".join(blocks))
         if found:
             log.warning(
                 "Windows treats %s as a Public network: other devices can't reach this PC",
@@ -2840,6 +2845,7 @@ class Mesh:
                 "unreachable_by": sorted(p.name for p in here if p.reaches_us is False),
                 "reachable_by": sum(1 for p in here if p.reaches_us is True),
                 "can_allow": network.can_allow_firewall(),
+                "blocking_rules": list(self.blocking_rules),
             }
             state["history"] = {"latest": self.history.latest()}
             state["clipboard"] = {

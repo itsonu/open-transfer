@@ -210,6 +210,72 @@ def test_only_the_owner_of_the_windows_app_can_allow(
     assert asked[0][1:] == (pc.port, "Private")
 
 
+# Windows' own first-run prompt, cancelled, leaves Block rules for the .exe, and Block
+# beats Allow. Only rules for this .exe are ever touched, and only when the owner asks.
+
+
+def test_block_rules_for_this_app_only() -> None:
+    from types import SimpleNamespace
+
+    from open_transfer import network
+
+    seen: list[str] = []
+
+    def run(argv: list[str], **_k: Any) -> SimpleNamespace:
+        seen.append(argv[-1])
+        return SimpleNamespace(
+            returncode=0, stdout="open-transfer.exe\r\nOpen Transfer\r\n", stderr=""
+        )
+
+    exe = r"C:\Users\o'neil\open-transfer.exe"
+    assert network.block_rules(exe, run=run, platform="win32") == [
+        "open-transfer.exe",
+        "Open Transfer",
+    ]
+    assert "-Program 'C:\\Users\\o''neil\\open-transfer.exe'" in seen[0]
+    assert "'Inbound'" in seen[0]
+    assert "'Block'" in seen[0]
+    assert network.block_rules(exe, run=run, platform="darwin") == []
+
+
+def test_unblocking_removes_only_this_apps_inbound_block_rules() -> None:
+    from open_transfer import network
+
+    exe = r"C:\app\open-transfer.exe"
+    plain = _script(network.allow_command(exe, 5000, "Private")[-1].split())
+    assert "Remove-NetFirewallRule" not in plain
+    script = _script(network.allow_command(exe, 5000, "Private", unblock=True)[-1].split())
+    remove, _, rest = script.partition("Remove-NetFirewallRule")
+    assert (
+        remove.count("Get-NetFirewallApplicationFilter -Program 'C:\\app\\open-transfer.exe'") == 1
+    )
+    assert "Direction -eq 'Inbound'" in remove
+    assert "Action -eq 'Block'" in remove
+    assert "New-NetFirewallRule" in rest  # then the narrow Allow rules
+    assert "Set-NetFirewallProfile" not in script
+
+
+def test_the_owner_sees_the_block_and_allowing_removes_it(
+    make_node: NodeFactory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from open_transfer import network
+
+    asked: list[dict[str, Any]] = []
+    monkeypatch.setattr(network, "can_allow_firewall", lambda: True)
+    monkeypatch.setattr(network, "block_rules", lambda exe: ["open-transfer.exe"])
+    monkeypatch.setattr(network, "allow_firewall", lambda *a, **k: asked.append(k) or "allowed")
+    pc = make_node("Sonu-PC")
+    pc.mesh.check_network()
+    assert owner(pc).state()["network"]["blocking_rules"] == ["open-transfer.exe"]
+    assert owner(pc)("POST", "/api/network/allow")[0] == 200
+    assert asked == [{"unblock": True}]
+    monkeypatch.setattr(network, "block_rules", lambda exe: [])
+    pc.mesh.check_network()
+    assert owner(pc).state()["network"]["blocking_rules"] == []
+    assert owner(pc)("POST", "/api/network/allow")[0] == 200
+    assert asked[-1] == {"unblock": False}
+
+
 # The real thing, on GitHub's Windows runners only (admin, no UAC prompt): never on
 # someone's own PC, where it would change their firewall.
 on_windows_ci = pytest.mark.skipif(
@@ -271,3 +337,24 @@ def test_a_rule_windows_refuses_is_not_reported_as_allowed(tmp_path: Any) -> Non
         assert network.allow_firewall(program, 5123, "NoSuchProfile") == "failed"
     finally:
         _remove(program)
+
+
+@on_windows_ci
+def test_windows_block_rules_for_this_app_are_found_and_removed(tmp_path: Any) -> None:
+    from open_transfer import network
+
+    program, other = str(tmp_path / "open-transfer.exe"), str(tmp_path / "someone-else.exe")
+    try:
+        for exe in (program, other):  # what a cancelled first-run prompt leaves behind
+            _ps(
+                f"New-NetFirewallRule -DisplayName 'probe block' -Direction Inbound "
+                f"-Program '{exe}' -Action Block"
+            )
+        assert network.block_rules(program) == ["probe block"]
+        assert network.allow_firewall(program, 5123, "Private", unblock=True) == "allowed"
+        assert network.block_rules(program) == []
+        assert _rules(program) == ["Private Allow TCP 5123", "Private Allow UDP 47823"]
+        assert network.block_rules(other) == ["probe block"]  # never someone else's
+    finally:
+        _remove(program)
+        _remove(other)
