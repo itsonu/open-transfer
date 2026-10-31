@@ -28,6 +28,10 @@ All notable changes are documented here. The format follows [Keep a Changelog](h
 - Android: the background service runs as a *connected device* service, so Android 15+ no longer stops it after about 6 hours a day.
 
 ### Fixed
+- **Windows: Allow on this network no longer says it worked when Windows refused the rule.** It used to report success whatever happened inside the admin prompt.
+- **One clipboard switch:** where the app can reach the clipboard itself, the old "Share automatically while this window is open" box is gone (and stops sharing); Clipboard sync is the switch. It used to sit beside the real one and be taken for it.
+- **A device listed twice after a reinstall** now says which entry is probably the old copy, so you know which one to remove. Nothing is removed for you.
+- A request refused before its body was read (wrong PIN, not the owner) could lose its answer on Windows; the server now reads small bodies first.
 - **Android: Send what you copied works.** It always said to allow clipboard access, with nothing to allow; the app now reads the clipboard itself.
 - **Every file is checked end to end again when the receiver has a PIN.** The receiving app asked the sending app for the PIN when it reported its checksum, so the check was quietly skipped.
 - **Clipboard sync says who didn't take a clip:** a device with sync off used to look like it simply wasn't sent; Recently now names it ("MAYA didn't take it").
