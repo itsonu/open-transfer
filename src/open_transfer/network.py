@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import ipaddress
 import socket
+import struct
 import subprocess
 import sys
 import threading
@@ -88,16 +89,69 @@ def _host_ips(wait: float = 1.0) -> list[str]:
         return list(_host_ips_cache or [])
 
 
+# Interfaces nobody nearby can reach: mobile data, VPNs, containers, Apple's peer links.
+_NOT_LAN = (
+    "lo", "rmnet", "ccmni", "pdp_ip", "v4-", "clat", "tun", "utun", "ppp", "ipsec", "wg",
+    "tailscale", "zt", "docker", "veth", "br-", "virbr", "vmnet", "vboxnet", "awdl", "llw",
+    "dummy",
+)  # fmt: skip
+
+
+def interface_ips() -> list[tuple[str, str]]:
+    """(name, IPv4 address) of each interface; empty where there's no list (Windows,
+    whose host name resolves to every adapter instead)."""
+    if sys.platform == "win32" or not hasattr(socket, "if_nameindex"):
+        return []
+    import fcntl
+
+    request = 0xC0206921 if sys.platform == "darwin" else 0x8915  # SIOCGIFADDR
+    found = []
+    with closing(socket.socket(socket.AF_INET, socket.SOCK_DGRAM)) as sock:
+        try:
+            names = [name for _, name in socket.if_nameindex()]
+        except OSError:
+            return []
+        for name in names:
+            try:
+                ifreq = fcntl.ioctl(sock.fileno(), request, struct.pack("256s", name.encode()[:15]))
+            except OSError:  # no IPv4 address
+                continue
+            found.append((name, socket.inet_ntoa(ifreq[20:24])))
+    return found
+
+
 def lan_ips() -> list[str]:
-    """All usable IPv4 addresses of this machine, primary first."""
+    """All usable IPv4 addresses of this machine, primary first.
+
+    Interfaces count too: a device that *is* the hotspot (192.168.43.1 on an
+    Android phone, bridge100 on a Mac sharing its connection) has that address
+    on neither the route out nor its host name. Mobile data, VPN and container
+    interfaces are left out, even as the route out: nobody nearby reaches them.
+    """
+    ifaces = interface_ips()
+    unreachable = {ip for name, ip in ifaces if name.startswith(_NOT_LAN)}
     found: list[str] = []
-    primary = primary_ip()
-    if primary:
-        found.append(primary)
-    for ip in _host_ips():
-        if ip not in found:
+    for ip in [primary_ip(), *(ip for _, ip in ifaces), *_host_ips()]:
+        if ip and _is_usable(ip) and ip not in unreachable and ip not in found:
             found.append(ip)
     return found
+
+
+def neighbours(ips: list[str]) -> list[str]:
+    """Every other address of the private /24 around each of ``ips``.
+
+    For networks that drop multicast (many hotspots): hotspots and home Wi-Fi
+    are /24s. Never outside private ranges.
+    """
+    found: dict[str, None] = {}
+    for ip in ips:
+        addr = ipaddress.ip_address(ip)
+        if addr.is_private and not addr.is_loopback:
+            for host in ipaddress.ip_network(f"{ip}/24", strict=False).hosts():
+                found.setdefault(str(host))
+    for ip in ips:
+        found.pop(ip, None)
+    return list(found)
 
 
 def hostname() -> str:

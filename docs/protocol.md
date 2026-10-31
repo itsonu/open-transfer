@@ -55,8 +55,17 @@ it stays open.
 Multicast is often blocked (guest Wi-Fi, some routers, Docker). So apps also:
 
 * say **hello** over HTTP to every known app every 6 s (keeps presence alive
-  even if multicast only works one way), and
-* can be added by address (`POST /api/devices`, `--peer HOST:PORT`).
+  even if multicast only works one way),
+* can be added by address (`POST /api/devices`, `--peer HOST:PORT`), and
+* **sweep** their private /24 networks with `GET /info` (0.8 s timeout, their
+  own port, 5000 and known devices' ports): when entering a code finds
+  nobody, and when their own addresses change (a hotspot, a new lease) while
+  a paired device isn't here. A paired device found that way moves only on
+  proof (§4).
+
+An app's addresses are those of its interfaces too, not just the route out:
+on a device that *is* the hotspot, the hotspot address is often on neither.
+Mobile-data, VPN and container interfaces are left out.
 
 An app is *nearby* while it was heard from in the last 15 s; unpaired apps are
 forgotten after 2 minutes, paired ones stay listed as "Not nearby".

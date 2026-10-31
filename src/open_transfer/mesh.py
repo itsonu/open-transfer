@@ -96,6 +96,8 @@ HELLO_EVERY = 6.0
 NETWORK_CHECK_EVERY = 60.0  # how often Windows is asked whether the Wi-Fi is "Public"
 HELLO_TIMEOUT = 3.0  # seconds a hello may take before we give up on it
 MOVE_CHECK_EVERY = 30.0  # seconds between challenges to one claimed new address
+LAN_CHECK_EVERY = 10.0  # how often we look whether our own addresses changed (hotspot, Wi-Fi)
+APP_PORT = 5000  # the default port (config.py): where a swept device most likely listens
 FINISHED_KEEP = 90.0  # finished transfers stay in the UI this long
 PAIR_CODE_TTL = 600.0
 PAIR_WINDOW = 30.0  # a code works this long after the Add device page last renewed it
@@ -341,6 +343,7 @@ class Mesh:
         self._thread: threading.Thread | None = None
         self._hellos: set[Future[bool]] = set()
         self._move_checks: dict[tuple[str, str], float] = {}  # (device, host) → last challenge
+        self._lan: list[str] | None = None  # our addresses at the last look
         self.sync = SyncEngine(
             me=lambda: self.identity.to_dict(),
             trust=self.trust,
@@ -725,7 +728,7 @@ class Mesh:
         try:
             status, info = self._http(probe, "GET", f"{P2P}/info", timeout=4)
         except OSError as exc:
-            raise MeshError(502, "unreachable", f"Couldn’t reach {host}:{port}.") from exc
+            raise MeshError(502, "unreachable", _unreachable(host, port, exc)) from exc
         if status != 200:
             raise MeshError(502, "not_open_transfer", f"{host}:{port} isn’t an Open Transfer app.")
         if info.get("id") == self.id:
@@ -991,8 +994,16 @@ class Mesh:
         wait_futures([self._submit(partial(self._refresh_info, p)) for p in online], timeout=2.5)
         if self.discovery and self.discovery.working:
             time.sleep(max(0.0, started + 0.6 - time.monotonic()))  # multicast answers
+
+        def showing() -> list[Peer]:
+            with self._lock:
+                return [p for p in self._peers.values() if p.online and p.pairing]
+
+        found = showing()
+        if not found:  # nothing answered: the network may drop multicast (many hotspots)
+            self.sweep()
+            found = showing()
         with self._lock:
-            found = [p for p in self._peers.values() if p.online and p.pairing]
             blocked = sorted(
                 p.name for p in self._peers.values() if p.online and p.reachable is False
             )
@@ -1015,6 +1026,42 @@ class Mesh:
             "No device on this network is showing a pairing code. Open Add device on it, "
             "or enter its address.",
         )
+
+    def _sweep_ports(self) -> set[int]:
+        with self._lock:
+            return {self.port, APP_PORT, *(p.port for p in self._peers.values())}
+
+    def sweep(self) -> None:
+        """Ask every address of our /24s for ``/info``: finding devices where multicast
+        doesn't get through. A paired device found somewhere new still has to prove it."""
+        hosts = network.neighbours(network.lan_ips())
+        ports = sorted(self._sweep_ports())
+
+        def probe(host: str, port: int) -> None:
+            there = Peer("d-00000000", "", "computer", "unknown", host, port)
+            try:
+                status, info = self._http(there, "GET", f"{P2P}/info", timeout=0.8)
+            except OSError:
+                return
+            if status == 200 and info.get("id") != self.id:
+                peer = self._upsert_peer(info, host)
+                if peer is not None:
+                    self._say_hello(peer)
+
+        if hosts:
+            log.info("Looking for devices on %s addresses (multicast may be blocked)", len(hosts))
+            with ThreadPoolExecutor(64, thread_name_prefix="ot-sweep") as pool:
+                list(pool.map(lambda hp: probe(*hp), [(h, p) for h in hosts for p in ports]))
+
+    def check_lan(self) -> None:
+        """Our addresses changed (another Wi-Fi, a hotspot, a new lease): if a paired device
+        isn't here, look for it, in case this network drops multicast."""
+        lan = network.lan_ips()
+        with self._lock:
+            changed, self._lan = lan != self._lan, lan
+            here = {p.id for p in self._peers.values() if p.online}
+        if changed and lan and self.trust.ids() - here:
+            self.sweep()
 
     def _refresh_info(self, peer: Peer) -> None:
         with contextlib.suppress(OSError):
@@ -2728,6 +2775,7 @@ class Mesh:
     def _housekeeping(self) -> None:
         last_hello = 0.0
         last_network = -1e9
+        last_lan = time.monotonic()  # the first look waits a little: multicast goes first
         manual_known: dict[str, float] = {}
         while not self._stop.wait(2.0):
             now = time.monotonic()
@@ -2785,6 +2833,9 @@ class Mesh:
             if now - last_network >= NETWORK_CHECK_EVERY:
                 last_network = now
                 self._executor.submit(self.check_network)
+            if now - last_lan >= LAN_CHECK_EVERY:
+                last_lan = now
+                self._executor.submit(self.check_lan)
             if now - last_hello >= HELLO_EVERY:
                 last_hello = now
                 for peer in peers:
@@ -3331,6 +3382,20 @@ def _is_loopback(host: str) -> bool:
 def _incoming_chunk_key(session_id: str, index: int) -> str:
     """Chunk-store id for one incoming file (the store only takes ``[A-Za-z0-9_-]``)."""
     return f"{session_id}-{index}"
+
+
+def _unreachable(host: str, port: int, exc: OSError) -> str:
+    """Tell Open Transfer not running apart from a network that keeps devices apart."""
+    if isinstance(exc, ConnectionRefusedError):
+        return f"{host} answered, but Open Transfer isn’t open on port {port} there."
+    why = (
+        f"Nothing answered at {host}:{port}. If Open Transfer is open there, something keeps "
+        "the devices apart: its firewall, or a hotspot or guest Wi-Fi with client isolation "
+        "(try the device sharing the hotspot, or another network)."
+    )
+    if sys.platform == "darwin":
+        why += " On this Mac, check System Settings → Privacy & Security → Local Network."
+    return why
 
 
 def _describe_error(exc: Exception, delivery: Delivery) -> str:

@@ -204,7 +204,7 @@ def create_app(config: Config | None = None) -> Flask:
             return config.public_url
         host, port = request_host_port()
         if host in {"localhost", "127.0.0.1", "::1", "0.0.0.0"}:
-            host = network.primary_ip() or host
+            host = next(iter(network.lan_ips()), None) or host  # a hotspot's own, too
         return origin_for(host, port)
 
     def all_urls() -> list[str]:

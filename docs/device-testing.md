@@ -173,6 +173,38 @@ It pairs this computer with each Android device if needed, turns sync on, and ch
 | 7.9 | Android locked for an hour+ → clips still arrive (else: battery → Unrestricted; note the brand) | |
 | 7.10 | Battery after a day (Android settings → Battery) | |
 
+## 8. Phone hotspots and switching networks (no internet needed)
+
+Turn **mobile data off** on the hotspot phone for at least one run, to prove
+nothing needs the internet. Pair the devices once on ordinary Wi‑Fi first;
+Use *paired* devices so transfers are encrypted (§3 should show
+**encrypted** next to *Direct*).
+
+| # | Check | Result |
+|---|-------|--------|
+| 8.1 | Android phone hotspot → **Mac** joins it: they see each other, pair (QR and code), send a file both ways | |
+| 8.2 | Android phone hotspot → **Windows PC** joins: same as 8.1 (Windows will ask Public/Private: choose Private, or allow when Open Transfer warns) | |
+| 8.3 | Android phone hotspot → **another Android phone or a Samsung Tab** joins: same as 8.1 | |
+| 8.4 | **Mac** shares its connection (Internet Sharing over Wi‑Fi) → Android phone/Tab joins: same as 8.1. The Mac's QR code shows its 192.168.2.x address | |
+| 8.5 | **Windows Mobile Hotspot** → Android phone/Tab joins: same as 8.1. The PC's QR code shows 192.168.137.1 | |
+| 8.6 | Ordinary Wi‑Fi router → every device: same as 8.1 | |
+| 8.7 | Paired Mac and phone on home Wi‑Fi → Mac switches to the phone's hotspot **without restarting either app** → within about 20 s both show each other online again; one tile each, no duplicates | |
+| 8.8 | Turn the hotspot off and on again (new DHCP lease) → both come back online by themselves | |
+| 8.9 | Two clients on one hotspot that can't reach each other: Add device → Enter its address says **"Nothing answered … client isolation"**; the device *sharing* the hotspot still reaches both | |
+
+What makes this work, and the limits:
+* A device that **is** the hotspot announces itself on the hotspot
+  interface. Before H7 it used only the route out (mobile data), so its QR
+  code and announcements pointed nowhere.
+* Where the hotspot drops multicast, an app whose network changed while a
+  paired device is away asks every address of its /24 for `/info` (about 250
+  short requests, once per network change). Entering a code with nothing
+  found does the same. Paired devices found that way must still prove it's
+  them (N2) before anything goes to the new address.
+* **Client isolation** (clients can't reach each other) is the network's
+  doing, not Open Transfer's. The device sharing the hotspot can still reach
+  everyone.
+
 ## If devices don't see each other
 
 1. Same Wi‑Fi? Guest networks and many routers isolate devices.

@@ -16,6 +16,14 @@ from open_transfer.node import Node
 AppFactory = Callable[..., Flask]
 
 
+@pytest.fixture(autouse=True)
+def _no_sweeping_real_networks(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A paired test app that is away would make another sweep the machine's real /24."""
+    from open_transfer import network
+
+    monkeypatch.setattr(network, "neighbours", lambda ips: [])
+
+
 @pytest.fixture
 def make_app(tmp_path: Path) -> AppFactory:
     def factory(**overrides: object) -> Flask:
