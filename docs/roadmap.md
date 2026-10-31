@@ -70,6 +70,29 @@ Status legend: **Done** · **Partial** (some of it existed before this plan) · 
 - **Checking the browser → its own app hop:** the checksum covers app to app; the first hop relies on the connection's own checks.
 - **A configurable queue size** (fixed at 2 for now).
 
+## Engineering backlog (2026-10-31)
+
+The eight product phases asked for on 2026-10-31 map onto what's shipped:
+
+| Asked for | Where it is | What's left (small tasks, tests first) |
+|---|---|---|
+| 1. Persistent history UI and transfer management | ✅ Phase D (history API, search, timeline, queue) | Configurable queue size (`policy` + Settings field; E2E: size 3 → 3 run at once) |
+| 2. Media previews and thumbnails | ✅ Phase B | — |
+| 3. Shared clipboard and history | ✅ Phase C + [Trusted Sync Network](sync.md) | iPhone stays one-tap (Shortcuts); no background sync on iOS (platform limit) |
+| 4. Copy/paste between devices | ✅ Phases C, sync | Android: images from **Send what you copied** (the native bridge reads text only; add `readClipboardImage` → base64, E2E with a fake bridge) |
+| 5. Drag-and-drop onto device targets | ✅ Phase A | — |
+| 6. Visual device screen with direct drop | ✅ Phase A (drop targets, "Everyone") | — |
+| 7. Multi-device sharing and quick send | ✅ Phase A | — |
+| 8. Notifications, queues, file management | ✅ Phase D | Accept/Decline inside the notification (service worker; secure contexts only — the desktop and Android apps qualify, LAN `http://` browsers don't) |
+
+Reliability and security follow-ups from the audit ([audit-2026-10-26.md](audit-2026-10-26.md)):
+
+1. **Encrypt file transfers between paired apps** (the protocol's biggest open limit: plain HTTP on the LAN). Smallest step: seal each piece with the pair key, as clips already are; then TLS with pinned per-device certificates.
+2. **Checksum the browser → its own app hop** (today only app → app is verified).
+3. **Windows on a Domain network:** make the Allow rule for the current profile (Domain) instead of Private.
+4. **Paired devices pass on each other's new addresses** (today each device must hear the move itself).
+5. **E2E flake:** `test_browsers_send_to_each_other_directly[False]` failed once under full-suite load (passes alone and in CI).
+
 ## Not in scope
 
 - **iOS app:** iPhone and iPad keep using the browser.

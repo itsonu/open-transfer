@@ -23,11 +23,14 @@ All notable changes are documented here. The format follows [Keep a Changelog](h
 - **Scan a QR code to pair from the Mac and Windows apps and from Safari and Firefox,** not only on Android and in Chrome. Any camera works, built-in or USB, with **Use another camera** when there's more than one.
 
 ### Changed
+- **Shared-folder mode: visitors can't delete files unless you allow it** (`--allow-delete` / `OPEN_TRANSFER_ALLOW_DELETE=1`). Before, anyone on the Wi‑Fi could. If your setup relies on visitors deleting, add the flag. `--no-delete` still works.
 - **Pairing can't be cracked by listening** ⚠️ *pair again after updating; older apps can't pair with this one*: the code is now checked with SRP (a password-authenticated key exchange). Before, someone on the same Wi‑Fi could work out the code, and the pair's key, from the messages alone. Now nothing sent lets anyone test a guess, and each try is one guess. Entering a code no longer broadcasts anything derived from it.
 - **A pairing code only works while Add device is open** on its device, and opening it shows a fresh one. Entering a code finds whichever nearby device has Add device open; pairing with an older app says to update it.
 - Android: the background service runs as a *connected device* service, so Android 15+ no longer stops it after about 6 hours a day.
 
 ### Fixed
+- **Security: a paired device can't be redirected by someone else on the Wi‑Fi.** One packet with its id used to move it to their address, so files meant for it went to them. A paired device's new address is now believed only when it proves it with the pair's key (after a Wi‑Fi reconnect or a new address, it is followed within seconds).
+- **Windows: a firewall rule that blocks Open Transfer is named, and can be removed.** Cancelling Windows' own firewall prompt once leaves a rule that blocks the app whatever else is allowed. The warning now names it, and **Remove the block and allow** removes that rule (only rules for Open Transfer itself) in the same admin prompt.
 - **Windows: Allow on this network no longer says it worked when Windows refused the rule.** It used to report success whatever happened inside the admin prompt.
 - **One clipboard switch:** where the app can reach the clipboard itself, the old "Share automatically while this window is open" box is gone (and stops sharing); Clipboard sync is the switch. It used to sit beside the real one and be taken for it.
 - **A device listed twice after a reinstall** now says which entry is probably the old copy, so you know which one to remove. Nothing is removed for you.

@@ -146,6 +146,6 @@ def test_an_old_copy_of_a_device_is_pointed_out(two_apps: tuple[Server, Server],
     rows = page.locator("#sync-devices li", has_text="Bravo")
     expect(rows).to_have_count(2)
     expect(rows.filter(has_text="older copy")).to_have_count(1)
-    expect(page.locator(f"#sync-devices li[data-id='{'d-' + '0e' * 12}']")).to_contain_text(
-        "older copy"
-    )
+    old_copy = page.locator(f"#sync-devices li[data-id='{'d-' + '0e' * 12}']")
+    expect(old_copy).to_contain_text("older copy")
+    expect(old_copy.get_by_role("button", name="Remove Bravo from your devices")).to_be_visible()
