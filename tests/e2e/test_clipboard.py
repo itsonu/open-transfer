@@ -267,3 +267,29 @@ def test_auto_share_sends_what_you_copy(pair_of_apps: tuple[Server, Server], bro
         assert received() == ["Copied just now"]
     finally:
         ctx.close()
+
+
+def test_where_clipboard_sync_can_run_it_is_the_only_switch(
+    pair_of_apps: tuple[Server, Server], browser
+) -> None:  # type: ignore[no-untyped-def]
+    # U3: with sync off, "Share automatically while this window is open" sat next to the
+    # small "Clipboard sync Off" button and was taken for it. Where the app can reach the
+    # clipboard itself, sync is the switch: the window-only box goes, and stops sharing.
+    alpha, _bravo = pair_of_apps
+    ctx = browser.new_context(permissions=CLIPBOARD)
+    a = ctx.new_page()
+
+    def native_access(route) -> None:  # type: ignore[no-untyped-def]
+        status = route.fetch().json()
+        route.fulfill(json={**status, "clipboard_access": True})
+
+    try:
+        a.add_init_script("localStorage.setItem('ot-clip-auto', '1')")  # ticked before
+        a.route("**/api/sync", native_access)
+        a.goto(alpha.url)
+        expect(a.locator("#clip-sync-state")).to_have_text("Off", timeout=10_000)
+        expect(a.locator("#clip-sync-note")).to_be_visible()
+        expect(a.locator("label.clip-auto")).to_be_hidden()
+        assert a.evaluate("localStorage.getItem('ot-clip-auto')") == "0"
+    finally:
+        ctx.close()

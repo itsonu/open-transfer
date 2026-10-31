@@ -211,9 +211,9 @@ function statusLine(s) {
   return { tone: "on", text: on ? `On${session} · syncing with ${plural(on, "device")}` : `On${session} · no devices chosen yet` };
 }
 
-function deviceRow(d, target) {
+function deviceRow(d, target, oldCopy = false) {
   const detail = !d.online
-    ? "Away"
+    ? oldCopy ? "Away · probably an older copy of this device — remove it if so" : "Away"
     : d.last_error
       ? ERRORS[d.last_error] || "Last clip didn’t arrive"
       : d.last_sent
@@ -265,14 +265,23 @@ function render() {
   if (!box || !s) return;
   const p = s.policy;
   const line = statusLine(s);
+  // Away, with the same name here: usually a reinstall's old identity (U4). Say so only.
+  const here = new Set(s.devices.filter((d) => d.online).map((d) => d.name));
   const note = $("#clip-sync-state");
   if (note) {
     note.textContent = { on: "On", warn: "On", paused: "Paused", off: "Off" }[line.tone];
     note.dataset.tone = line.tone;
   }
-  // The background agent does what the "while this window is open" box did.
-  const auto = $("#clip-auto")?.closest("label");
-  if (auto && s.active && s.clipboard_access) auto.hidden = true;
+  // The background agent does what the "while this window is open" box did, so where
+  // it can run, sync is the one switch, on or off (the box was taken for it, U3).
+  const auto = $("#clip-auto");
+  if (auto && s.clipboard_access && !auto.closest("label").hidden) {
+    auto.closest("label").hidden = true;
+    if (auto.checked) {
+      auto.checked = false;
+      auto.dispatchEvent(new Event("change")); // stops its sharing, remembered as off
+    }
+  }
 
   const parts = [
     h(
@@ -313,7 +322,7 @@ function render() {
       ),
     ),
     s.devices.length
-      ? h("ul", { class: "sync-devices list card", id: "sync-devices" }, ...s.devices.map((d) => deviceRow(d, p.target)))
+      ? h("ul", { class: "sync-devices list card", id: "sync-devices" }, ...s.devices.map((d) => deviceRow(d, p.target, !d.online && here.has(d.name))))
       : h("p", { class: "muted" }, "No trusted devices yet. Pair one with Add device → Enter a code; your other devices meet it automatically."),
   );
 

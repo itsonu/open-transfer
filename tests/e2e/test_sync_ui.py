@@ -126,3 +126,26 @@ def test_recently_says_who_didnt_take_a_clip(two_apps: tuple[Server, Server], pa
     page.click("#sync-open")
     expect(page.locator("#sync-recent li").first).to_contain_text("Bravo didn’t take it")
     expect(page.locator("#sync-devices li", has_text="Bravo")).to_contain_text("Sync is off there")
+
+
+def test_an_old_copy_of_a_device_is_pointed_out(two_apps: tuple[Server, Server], page) -> None:  # type: ignore[no-untyped-def]
+    """U4: a reinstall left the phone listed twice, "Away" and "Nearby", with
+    nothing to say which one to remove. Nothing is removed for you."""
+    alpha, _bravo = two_apps
+
+    def with_old_copy(route) -> None:  # type: ignore[no-untyped-def]
+        status = route.fetch().json()
+        bravo = next(d for d in status["devices"] if d["name"] == "Bravo")
+        old = {**bravo, "id": "d-" + "0e" * 12, "online": False}
+        route.fulfill(json={**status, "devices": [*status["devices"], old]})
+
+    page.route("**/api/sync", with_old_copy)
+    page.goto(alpha.url)
+    expect(page.locator("#clipboard-section")).to_be_visible(timeout=10_000)
+    page.click("#sync-open")
+    rows = page.locator("#sync-devices li", has_text="Bravo")
+    expect(rows).to_have_count(2)
+    expect(rows.filter(has_text="older copy")).to_have_count(1)
+    expect(page.locator(f"#sync-devices li[data-id='{'d-' + '0e' * 12}']")).to_contain_text(
+        "older copy"
+    )
