@@ -175,3 +175,11 @@ def test_text_shared_with_files_keeps_both(phone) -> None:  # type: ignore[no-un
 def test_private_looking_shared_text_asks_first(phone) -> None:  # type: ignore[no-untyped-def]
     share_text(phone, "password: hunter2-correct-horse")
     expect(phone.locator("#confirm-dialog")).to_be_visible()
+
+
+def test_a_mixed_share_keeps_what_it_can_and_says_what_it_cant(phone) -> None:  # type: ignore[no-untyped-def]
+    """Phase L: a photo, a file whose grant expired (404), a link and its title, in one share."""
+    gone = {"url": "/__shared/t0k3n/2", "name": "gone.pdf", "mime": "application/pdf"}
+    share_text(phone, "Holiday album\nhttps://example.com/album", PHOTO_ITEM, gone)
+    expect(phone.locator(".toast", has_text="Couldn’t read 1 shared file")).to_be_visible()
+    expect(phone.locator("#send-bar-files")).to_contain_text("2 files")  # the photo and the link

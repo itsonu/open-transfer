@@ -89,4 +89,31 @@ until adb logcat -d -s OpenTransfer:I | grep "Shared 0 file(s) and text" >/dev/n
 done
 adb shell pidof "$PKG" >/dev/null || { echo "The app died after the text share"; exit 1; }
 
+echo "One share with a file, a link and its title"
+adb logcat -c || true
+adb shell am start -W -a android.intent.action.SEND -t image/jpeg \
+  --eu android.intent.extra.STREAM "content://media/external/images/media/1" \
+  --es android.intent.extra.TEXT "https://example.com/album" \
+  --es android.intent.extra.SUBJECT "'Holiday album'" -n "$PKG/.MainActivity"
+deadline=$((SECONDS + 20))
+until adb logcat -d -s OpenTransfer:I | grep "Shared 1 file(s) and text" >/dev/null; do
+  if [ "$SECONDS" -ge "$deadline" ]; then echo "The app didn't take the file and the link together"; exit 1; fi
+  sleep 1
+done
+
+echo "Files that are gone, or that we may not read, don't take the app down"
+for uri in "content://media/external/images/media/987654321" \
+  "content://com.android.contacts/contacts/1/photo"; do
+  adb shell am start -W -a android.intent.action.SEND -t image/jpeg \
+    --eu android.intent.extra.STREAM "$uri" -n "$PKG/.MainActivity" >/dev/null
+  # "Send to my devices" copies the file in at once: the read fails there, right away.
+  adb shell am start -W -a android.intent.action.SEND -t text/plain \
+    --eu android.intent.extra.STREAM "$uri" -n "$PKG/.ClipboardSendActivity" >/dev/null
+done
+sleep 3
+adb shell pidof "$PKG" >/dev/null || { echo "The app died on a bad shared file"; exit 1; }
+curl -sf --max-time 5 "http://127.0.0.1:$PORT/api/health" >/dev/null || { echo "Server gone after a bad share"; exit 1; }
+adb logcat -d -s OpenTransfer:W | grep -q "Couldn't copy a shared file" \
+  || { echo "A bad shared file wasn't reported"; exit 1; }
+
 echo "Smoke test passed"

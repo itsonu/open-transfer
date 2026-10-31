@@ -51,6 +51,17 @@ def test_a_phone_hotspot_with_no_mobile_data_still_has_an_address(
     assert network.lan_ips() == ["10.42.17.1"]
 
 
+def test_a_mac_on_a_phone_hotspot_with_mobile_data_off(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Phase L: the Mac is a client of the phone's hotspot, and nothing routes to the internet."""
+    fake_net(
+        monkeypatch,
+        [("lo0", "127.0.0.1"), ("en0", "172.20.10.4"), ("awdl0", "169.254.7.7")],
+        primary=None,  # no default route: the "route out" lookup finds nothing
+    )
+    assert network.lan_ips() == ["172.20.10.4"]
+    assert "172.20.10.1" in neighbours(network.lan_ips())  # the phone, to sweep for
+
+
 def test_a_mac_sharing_its_connection_lists_both_networks(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -164,6 +175,25 @@ def test_a_spoofer_found_by_a_sweep_doesnt_move_a_paired_device(
     wait_for(lambda: challenged == [lan_ip()])  # it was found and asked to prove it…
     __import__("time").sleep(1.0)
     assert peer.host == "192.0.2.9"  # …and couldn't
+
+
+def test_several_paired_devices_on_one_hotspot_are_found_by_one_sweep(
+    make_node: NodeFactory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Phase L: everyone moved to the phone's hotspot (new leases), and it drops multicast."""
+    a, b, c = make_node("Alpha"), make_node("Bravo"), make_node("Charlie")
+    pair(a, b)
+    pair(a, c)
+    for other in (b, c):
+        peer = a.mesh._peers[other.mesh.id]
+        peer.host, peer.last_seen = "192.0.2.9", 0.0  # their old addresses; away
+    here = lan_ip()
+    monkeypatch.setattr(network, "neighbours", lambda ips: [here])
+    a.mesh.sweep()
+    for other in (b, c):
+        wait_for(lambda o=other: a.mesh._peers[o.mesh.id].host == here, timeout=5)
+    ids = [p.id for p in a.mesh._peers.values()]
+    assert ids.count(b.mesh.id) == ids.count(c.mesh.id) == 1
 
 
 def test_pairing_by_code_finds_the_device_when_multicast_is_blocked(
