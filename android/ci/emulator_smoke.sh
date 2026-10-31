@@ -77,10 +77,11 @@ adb shell pidof "$PKG" >/dev/null || { echo "The app died after the share"; exit
 curl -sf --max-time 5 "http://127.0.0.1:$PORT/api/health" >/dev/null || { echo "Server gone after the share"; exit 1; }
 
 echo "Sharing a link hands its text (and title) to the app"
+# adb shell joins its arguments into one command line: quote a value with spaces twice.
 adb logcat -c || true
 adb shell am start -W -a android.intent.action.SEND -t text/plain \
   --es android.intent.extra.TEXT "https://example.com/smoke" \
-  --es android.intent.extra.SUBJECT "Smoke test" -n "$PKG/.MainActivity"
+  --es android.intent.extra.SUBJECT "'Smoke test'" -n "$PKG/.MainActivity"
 deadline=$((SECONDS + 20))
 until adb logcat -d -s OpenTransfer:I | grep "Shared 0 file(s) and text" >/dev/null; do
   if [ "$SECONDS" -ge "$deadline" ]; then echo "The app never took the shared link"; exit 1; fi
