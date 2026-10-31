@@ -20,15 +20,42 @@ All notable changes are documented here. The format follows [Keep a Changelog](h
 - **Share photos and files from any Android app:** Open Transfer is now in the share sheet for photos, videos, audio, PDFs and any other file, one or many at once. The app opens with them ready to send: tap a device, then **Send**. Files stream straight from the app you shared from, so large videos work too. Text still goes through **Send to my devices**; a shared `.txt` file is sent as a file.
 - **Compatibility tests** for all ten device pairs (Mac, Windows, Android phone and tablet, iPhone/iPad), both ways, plus one copy reaching a six-device network, removal, and expiry while a device is away; real-device checks in [docs/device-testing.md](docs/device-testing.md).
 
+- **Scan a QR code to pair from the Mac and Windows apps and from Safari and Firefox,** not only on Android and in Chrome. Any camera works, built-in or USB, with **Use another camera** when there's more than one.
+
 ### Changed
+- **Shared-folder mode: visitors can't delete files unless you allow it** (`--allow-delete` / `OPEN_TRANSFER_ALLOW_DELETE=1`). Before, anyone on the Wi‑Fi could. If your setup relies on visitors deleting, add the flag. `--no-delete` still works.
+- **Pairing can't be cracked by listening** ⚠️ *pair again after updating; older apps can't pair with this one*: the code is now checked with SRP (a password-authenticated key exchange). Before, someone on the same Wi‑Fi could work out the code, and the pair's key, from the messages alone. Now nothing sent lets anyone test a guess, and each try is one guess. Entering a code no longer broadcasts anything derived from it.
+- **A pairing code only works while Add device is open** on its device, and opening it shows a fresh one. Entering a code finds whichever nearby device has Add device open; pairing with an older app says to update it.
 - Android: the background service runs as a *connected device* service, so Android 15+ no longer stops it after about 6 hours a day.
 
 ### Fixed
+- **Security: a paired device can't be redirected by someone else on the Wi‑Fi.** One packet with its id used to move it to their address, so files meant for it went to them. A paired device's new address is now believed only when it proves it with the pair's key (after a Wi‑Fi reconnect or a new address, it is followed within seconds).
+- **Windows: a firewall rule that blocks Open Transfer is named, and can be removed.** Cancelling Windows' own firewall prompt once leaves a rule that blocks the app whatever else is allowed. The warning now names it, and **Remove the block and allow** removes that rule (only rules for Open Transfer itself) in the same admin prompt.
+- **Windows: Allow on this network no longer says it worked when Windows refused the rule.** It used to report success whatever happened inside the admin prompt.
+- **One clipboard switch:** where the app can reach the clipboard itself, the old "Share automatically while this window is open" box is gone (and stops sharing); Clipboard sync is the switch. It used to sit beside the real one and be taken for it.
+- **A device listed twice after a reinstall** now says which entry is probably the old copy, so you know which one to remove. Nothing is removed for you.
+- A request refused before its body was read (wrong PIN, not the owner) could lose its answer on Windows; the server now reads small bodies first.
+- **Android: Send what you copied works.** It always said to allow clipboard access, with nothing to allow; the app now reads the clipboard itself.
+- **Every file is checked end to end again when the receiver has a PIN.** The receiving app asked the sending app for the PIN when it reported its checksum, so the check was quietly skipped.
+- **Clipboard sync says who didn't take a clip:** a device with sync off used to look like it simply wasn't sent; Recently now names it ("MAYA didn't take it").
+- **A PC others can't reach now says so, whatever the reason.** Devices that hear it but can't connect tell it when it says hello, and it names them ("Mac can't reach this device — usually its firewall"). Before, it only warned on a *Public* network, so a firewall rule made for Public left it silent on Private — and its advice to switch to Private was what broke it.
+- **Windows: Allow on this network.** That warning has a button that asks Windows (one admin prompt) to let other devices reach Open Transfer on this kind of network: only its own port and discovery, never the firewall as a whole.
+- **Windows: no more "Failed to remove temporary directory" when closing the window;** the copy that keeps syncing in the background now runs from its own files.
+- **No more warning-coloured dot on a normal connection:** device tiles show the connection dot only when it's actually slow. A phone on Wi‑Fi is often a little slower than a computer, and that's fine.
+- **Android: Preview on a PDF** no longer pops up the "Open with" app list; PDFs are previewed where the browser can show them, and saved or opened otherwise.
+- **The drop zone's text lines up again** once files are listed (the title had drifted to the middle and the hint to the bottom-left).
+- **The camera always turns off when scanning ends.** Closing Add device while the camera was starting (say, at the permission prompt) left it on, and tapping Scan twice opened it twice.
+- **Camera problems say what's wrong:** access turned off, no camera, or the camera in use by another app, each with what to do. The code box stays ready.
+- **On a Mac, Open Transfer could share its port with another app** listening on every address, so other devices reached the wrong app. It now picks a port nobody holds.
+- **Pasting in Add device** fills in the code instead of queueing the text to send behind the sheet.
+- **Pasting a pairing code** with other text around it ("Code: 332 156", a leading space) no longer cuts off digits.
 - **Pairing with a Windows PC that others can't reach:** a device heard on the Wi‑Fi but not answering now shows **Can’t connect** on its tile, and pairing by code names it and says why (its firewall, usually a Wi‑Fi set to *Public*) instead of "No device on this network is showing that code".
 - **Windows on a Public network:** the PC's own app now warns that other devices can't reach it and how to switch the Wi‑Fi to Private.
 - The "Enter its address" field no longer shows an example address that looks filled in; it says where to find the other device's address.
 - **One device, one tile:** a device that comes back with a new identity (an Android phone reinstalled from an APK signed with another key, which wipes its data) replaces its old pairing when you pair again, instead of showing up two or three times. Old duplicates already saved show once, and away devices keep their phone/tablet/computer icon.
 - Paired apps can share clipboards with a device that has a PIN (the PIN is for people; paired apps sign their requests).
+- **QR codes never contain the PIN:** with a PIN set, the share and pairing QR codes carry a token that lets a browser in for 10 minutes instead, so a photo of the screen isn't a lasting key. Changing the PIN cancels it. The terminal's QR code is just the address (the PIN is printed beside it). Typed `?pin=` links still work.
+- **A fake goodbye can't hide a device:** a *bye* from an address other than the device's (someone else on the Wi‑Fi, or the device's second network interface) now makes the app check with the device first; it shows as gone only if it doesn't answer.
 
 ## [3.3.0] — 2026-10-22
 

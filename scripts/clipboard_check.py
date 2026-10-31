@@ -251,7 +251,7 @@ class Checker:
 
     def _pair(self, node: Node) -> None:
         if not self.here.paired_with(node):
-            code = node.state()["pairing"]["code"]
+            code = node.show_code()
             expect(self.here.base, "POST", "/api/pair", {"code": code, "address": node.address})
             print(f"  (paired {self.here.name} with {node.name})")
         pc = self.here

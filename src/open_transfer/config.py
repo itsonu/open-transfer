@@ -58,8 +58,8 @@ class Config:
     pin: str | None = None
     #: Maximum size of a single upload in bytes. 0 = unlimited (bounded by free disk).
     max_upload_size: int = 0
-    #: Allow visitors to delete shared files.
-    allow_delete: bool = True
+    #: Allow visitors to delete shared files (shared-folder mode). Off unless asked for.
+    allow_delete: bool = False
     #: Allow visitors to upload files. Disable to only *serve* a folder.
     allow_upload: bool = True
     #: Allow visitors to see and download shared files. Disable for a "drop box".

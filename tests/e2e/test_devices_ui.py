@@ -140,9 +140,10 @@ def test_pair_with_a_code(devices: list[Server], page, second_page) -> None:  # 
     alpha, bravo, _ = devices
     second_page.goto(bravo.url)
     second_page.click("#connect-button")
+    # The code shows once Bravo's app has opened its pairing window.
+    expect(second_page.locator("#pair-code")).to_have_text(re.compile(r"^\d{3} \d{3}$"))
+    assert _api(bravo, "/api/state")["pairing"]["open"] is True
     code = second_page.locator("#pair-code").inner_text().replace(" ", "")
-    assert code.isdigit()
-    assert len(code) == 6
 
     page.goto(alpha.url)
     page.click("#connect-button")
@@ -158,6 +159,60 @@ def test_pair_with_a_code(devices: list[Server], page, second_page) -> None:  # 
     expect(second_page.locator("#connect-dialog")).to_be_hidden()
     second_page.click("#connect-button")
     expect(second_page.locator("#pair-code")).not_to_have_text(f"{code[:3]} {code[3:]}")
+    # Closing the sheet closes the window: the code stops working at once.
+    second_page.keyboard.press("Escape")
+    expect(second_page.locator("#connect-dialog")).to_be_hidden()
+    for _ in range(50):
+        if not _api(bravo, "/api/state")["pairing"]["open"]:
+            break
+        second_page.wait_for_timeout(100)
+    assert _api(bravo, "/api/state")["pairing"]["open"] is False
+
+
+def test_pasting_a_code_keeps_all_its_digits(devices: list[Server], page) -> None:  # type: ignore[no-untyped-def]
+    page.goto(devices[0].url)
+    page.click("#connect-button")
+    page.click("[role=tab][data-tab=enter]")
+    field = page.locator("#pair-input")
+    for pasted in ("Code: 332 156", " 332 156", "332-156\n"):
+        field.fill("")
+        field.focus()
+        page.keyboard.insert_text(pasted)  # a paste, as the browser applies it
+        expect(field).to_have_value("332 156")
+
+
+def test_pasting_into_an_open_sheet_doesnt_queue_a_send(devices: list[Server], page) -> None:  # type: ignore[no-untyped-def]
+    page.goto(devices[0].url)
+    page.click("#connect-button")
+    page.click("[role=tab][data-tab=enter]")
+    page.evaluate(
+        """() => {
+          document.activeElement.blur();  // pasted before clicking the code box
+          const data = new DataTransfer();
+          data.setData("text/plain", "332 156");
+          document.querySelector("#connect-dialog").dispatchEvent(
+            new ClipboardEvent("paste", { clipboardData: data, bubbles: true, cancelable: true }));
+        }"""
+    )
+    page.wait_for_timeout(500)
+    expect(page.locator("#send-bar")).to_be_hidden()
+    expect(page.locator("#pair-input")).to_have_value("332 156")  # it went where it was meant to
+
+
+def test_pasting_into_the_show_code_tab_does_nothing(devices: list[Server], page) -> None:  # type: ignore[no-untyped-def]
+    page.goto(devices[0].url)
+    page.click("#connect-button")
+    page.evaluate(
+        """() => {
+          const data = new DataTransfer();
+          data.setData("text/plain", "hello");
+          document.querySelector("#connect-dialog").dispatchEvent(
+            new ClipboardEvent("paste", { clipboardData: data, bubbles: true, cancelable: true }));
+        }"""
+    )
+    page.wait_for_timeout(500)
+    expect(page.locator("#send-bar")).to_be_hidden()
+    expect(page.locator("#pair-input")).to_have_value("")
 
 
 def test_rename_this_device(devices: list[Server], page) -> None:  # type: ignore[no-untyped-def]

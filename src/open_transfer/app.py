@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import hmac
 import io
 import ipaddress
 import logging
@@ -63,6 +64,10 @@ PUBLIC_ENDPOINTS = {
     "info",
     *PUBLIC_P2P_ENDPOINTS,
 }
+
+
+JOIN_TTL = 600  # seconds a QR code lets browsers in without the PIN
+DRAIN_MAX = 1 << 20  # unread request bytes read before answering (see finish)
 
 
 def _load_secret(state_dir: Path) -> bytes:
@@ -213,6 +218,26 @@ def create_app(config: Config | None = None) -> Flask:
     def client_id() -> str:
         return log_safe(request.remote_addr or "unknown")
 
+    def join_token() -> str:
+        """For QR codes: lets a browser in instead of the PIN, for JOIN_TTL only.
+
+        ``<expiry>.<mac>``: the MAC covers the expiry and the current PIN, so a
+        photographed QR code stops working after 10 minutes (or when the PIN
+        changes), and can't be extended or forged. The PIN itself is never in it.
+        """
+        expires = int(time.time() + JOIN_TTL)
+        return f"{expires}.{join_mac(expires)}"
+
+    def join_mac(expires: int) -> str:
+        message = f"open-transfer-join|{expires}|{pin_digest}".encode()
+        return hmac.new(app.secret_key, message, hashlib.sha256).hexdigest()[:32]  # type: ignore[arg-type]
+
+    def join_token_valid(token: str) -> bool:
+        expires, _, mac = token.partition(".")
+        if not expires.isdigit() or int(expires) < time.time():
+            return False
+        return hmac.compare_digest(join_mac(int(expires)), mac)
+
     def check_pin(supplied: str) -> float | bool:
         """``True`` if right, ``False`` if wrong, or seconds to wait if rate-limited."""
         if not config.pin:
@@ -289,6 +314,11 @@ def create_app(config: Config | None = None) -> Flask:
     @app.after_request
     def finish(response: Response) -> Response:
         apply_security_headers(response)
+        # Answered before reading the body (a 401/403)? Read it now: closing with it
+        # unread makes the OS reset the connection, and the client can lose the answer.
+        # ponytail: bigger uploads refused early still reset; reading them invites abuse.
+        if 0 < (request.content_length or 0) <= DRAIN_MAX:
+            request.stream.read()
         if request.path.startswith("/api/"):
             response.headers.setdefault("Cache-Control", "no-store")
         elif request.path.endswith((".js", ".css")):
@@ -328,12 +358,16 @@ def create_app(config: Config | None = None) -> Flask:
         supplied = request.args.get("pin")
         pair = request.args.get("pair")
         invite = request.args.get("invite")
-        if supplied is not None or pair is not None or invite is not None:
-            # QR codes embed the PIN (and the owner's pairing code) so scanning
-            # is enough to get in. Strip them from the URL straight away so
-            # they don't linger in history. Both are rate-limited.
+        join = request.args.get("join")
+        if supplied is not None or pair is not None or invite is not None or join is not None:
+            # QR codes carry a short-lived join token (and the owner's pairing
+            # code), never the PIN; a hand-typed ?pin= link still works. Strip
+            # them from the URL straight away so they don't linger in history.
             if supplied is not None and config.pin and not is_authenticated():
                 check_pin(supplied)
+            if join and config.pin and not is_authenticated() and join_token_valid(join):
+                session.permanent = True
+                session["pin"] = pin_digest
             if (
                 pair
                 and not is_owner()
@@ -610,7 +644,7 @@ def create_app(config: Config | None = None) -> Flask:
     def qr_code() -> Response:
         url = share_url()
         if config.pin:
-            url += f"/?pin={quote(config.pin)}"
+            url += f"/?join={join_token()}"  # 10 minutes, never the PIN itself
         buffer = io.BytesIO()
         segno.make(url, error="m").save(
             buffer, kind="svg", scale=8, border=0, dark="#000", light=None
@@ -656,5 +690,6 @@ def create_app(config: Config | None = None) -> Flask:
         client=client_id,
         file_csp=FILE_CSP,
         share_url=share_url,
+        join_token=join_token,
     )
     return app

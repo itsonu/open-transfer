@@ -54,8 +54,16 @@ def test_cli_defaults(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     assert config.storage_dir == (tmp_path / "uploads").resolve()
     assert config.pin is None
     assert config.allow_upload
-    assert config.allow_delete
+    assert not config.allow_delete  # visitors can't delete unless you opt in
     assert config.allow_browse
+
+
+def test_visitors_delete_only_when_allowed(monkeypatch: pytest.MonkeyPatch) -> None:
+    assert parse("--allow-delete").allow_delete
+    assert not parse("--allow-delete", "--no-delete").allow_delete  # the stricter one wins
+    assert not parse("--allow-delete", "--read-only").allow_delete
+    monkeypatch.setenv("OPEN_TRANSFER_ALLOW_DELETE", "1")
+    assert parse().allow_delete
 
 
 def test_cli_flags(tmp_path: Path) -> None:
@@ -110,6 +118,18 @@ def test_find_free_port_skips_busy_port() -> None:
     assert network.find_free_port("127.0.0.1", 0) > 0
 
 
+def test_a_port_held_on_every_address_isnt_free_on_one() -> None:
+    """macOS lets 127.0.0.1:P bind next to a listener on 0.0.0.0:P; the two then share it."""
+    with socket.socket() as busy:
+        if sys.platform != "win32":
+            busy.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)  # as cheroot does
+        busy.bind(("0.0.0.0", 0))
+        busy.listen()
+        port = busy.getsockname()[1]
+        assert not network.port_is_free("127.0.0.1", port)
+        assert network.find_free_port("127.0.0.1", port) != port
+
+
 def test_lan_ips_are_usable() -> None:
     for ip in network.lan_ips():
         assert not ip.startswith("127.")
@@ -120,7 +140,13 @@ def test_banner_shows_addresses_pin_and_qr(
 ) -> None:
     monkeypatch.setattr(network, "lan_ips", lambda: ["192.168.1.24"])
     config = Config(storage_dir=tmp_path, pin="4821")
+    import segno
+
+    printed: list[str] = []
+    real = segno.make
+    monkeypatch.setattr(segno, "make", lambda url, **kw: (printed.append(url), real(url, **kw))[1])
     share = cli._print_banner(config, 5001, cli._Style(False), show_qr=True)
+    assert printed == ["http://192.168.1.24:5001"]  # the QR never holds the PIN
     out = capsys.readouterr().out
     assert share == "http://192.168.1.24:5001"
     assert "http://localhost:5001" in out

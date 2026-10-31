@@ -112,7 +112,7 @@ Restores a deleted file within `undo_seconds`: `{"file": {…}}`, or `404`.
 Streams a ZIP of all files, or only those given as `?name=a.txt&name=b.jpg`.
 
 ### `GET /api/qr.svg`
-QR code (SVG) for the share URL; includes the PIN when one is set.
+QR code (SVG) for the share URL. With a PIN set it carries a 10-minute join token (`?join=`), never the PIN.
 
 ### `POST /api/logout`
 Clears the session.
@@ -135,7 +135,9 @@ These power the device grid. "Owner" means a request from the device itself
 | `POST /api/send/<job>/retry` `{to?: [ids]}` | job creator | Re-offer the job's files to declined/failed/expired targets → `201 {job}` (receiver is asked again) |
 | `POST /api/incoming/<id>/accept` · `/decline` · `DELETE /api/incoming/<id>` | the recipient | Answer or stop an incoming transfer |
 | `GET /api/inbox/files/<name>` · `DELETE …` · `GET /api/inbox/archive` | visitor | Files sent to this browser |
-| `POST /api/pair` `{code, address?}` | owner | Pair with the app showing `code` (found by multicast, or at `address`) |
+| `POST /api/pair` `{code, address?}` | owner | Pair with the app showing `code` (the nearby one with Add device open, or at `address`) |
+| `POST /api/network/allow` | owner | Packaged Windows app only (`501 unsupported` elsewhere): asks Windows, through one admin (UAC) prompt, for an inbound rule for this app on the current network type (its TCP port and discovery UDP 47823) If Windows Firewall has inbound *Block* rules for exactly this .exe (`state.network.blocking_rules`, their names; a cancelled first-run prompt leaves them, and Block beats Allow), the same prompt removes those first — never rules for other programs. → `{result: allowed \| cancelled \| failed}` (`failed` also when Windows refuses the rule). `state.network` = `{public, unreachable_by, reachable_by, can_allow, blocking_rules}` |
+| `POST /api/pair/open` · `POST /api/pair/close` | owner | Add device opened (renew every ≤30 s while it shows) → `{code, expires_in}` · closed. Codes only work while it's open |
 | `POST /api/devices` `{address}` | owner | Add an app by `host:port` |
 | `DELETE /api/pairs/<id>` · `POST /api/pair/new-code` · `GET /api/pair/qr.svg` | owner | Unpair · new code · QR with the code |
 

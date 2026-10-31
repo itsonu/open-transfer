@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import io
 import json
+import sys
 import time
 from collections.abc import Callable
 from typing import Any
@@ -27,6 +28,7 @@ from flask import (
 )
 from werkzeug.exceptions import ClientDisconnected
 
+from open_transfer import network
 from open_transfer.archive import zip_stream
 from open_transfer.clipboard import MAX_IMAGE_BYTES as CLIP_MAX_IMAGE
 from open_transfer.devices import clean_form, clean_name, clean_platform, valid_id
@@ -46,9 +48,10 @@ PUBLIC_P2P_ENDPOINTS = {
     "p2p_offer_status",
     "p2p_offer_upload",
     "p2p_offer_file_status",
+    "p2p_offer_verify",
     "p2p_offer_cancel",
-    "p2p_pair",
-    "p2p_pair_confirm",
+    "p2p_pair_begin",
+    "p2p_pair_prove",
     "p2p_signal",
     # These check the sender's signature themselves (a PIN is for people, not paired apps).
     "p2p_clip",
@@ -90,6 +93,7 @@ def register(
     client: Callable[[], str],
     file_csp: str,
     share_url: Callable[[], str],
+    join_token: Callable[[], str],
 ) -> None:
     config = mesh.config
 
@@ -141,8 +145,12 @@ def register(
     @app.post(f"{P2P}/hello")
     def p2p_hello() -> Response:
         info = body_json()
-        reply = mesh.handle_hello(info, client())
-        if config.pin and not signed_by(str(info.get("id", ""))):
+        sender = str(info.get("id", ""))
+        signed = request.headers.get("X-OT-From") == sender and signed_by(
+            sender
+        )  # once: no replays
+        reply = mesh.handle_hello(info, client(), signed=signed)
+        if config.pin and not signed:
             reply.pop("visitors", None)
         return jsonify(reply)
 
@@ -285,19 +293,21 @@ def register(
         mesh.handle_signal(body_json())
         return jsonify({"ok": True})
 
-    @app.post(f"{P2P}/pair")
-    def p2p_pair() -> Response:
+    @app.post(f"{P2P}/pair/begin")
+    def p2p_pair_begin() -> Response:
         data = body_json()
         device = data.get("device")
         if not isinstance(device, dict):
             raise MeshError(400, "bad_request", "Missing device.")
-        return jsonify(mesh.pair_begin(device, str(data.get("nonce", "")), client()))
+        return jsonify(mesh.pair_begin(device, client()))
 
-    @app.post(f"{P2P}/pair/confirm")
-    def p2p_pair_confirm() -> Response:
+    @app.post(f"{P2P}/pair/prove")
+    def p2p_pair_prove() -> Response:
         data = body_json()
         return jsonify(
-            mesh.pair_confirm(str(data.get("id", "")), str(data.get("proof", "")), client())
+            mesh.pair_prove(
+                str(data.get("id", "")), str(data.get("a", "")), str(data.get("m1", "")), client()
+            )
         )
 
     # ================================================================ web UI
@@ -850,6 +860,32 @@ def register(
         peer = mesh.pair_with(str(data.get("code", "")), address)
         return jsonify({"device": {"id": peer.id, "name": peer.name}})
 
+    @app.post("/api/pair/open")
+    def ui_pair_open() -> Response:
+        owner_only()
+        return jsonify(mesh.open_pairing())
+
+    @app.post("/api/network/allow")
+    def ui_network_allow() -> Response:
+        """Let other devices reach this PC on this kind of network (one UAC prompt)."""
+        owner_only()
+        if not network.can_allow_firewall():
+            raise MeshError(
+                501, "unsupported", "Only the Windows app can change its firewall rule."
+            )
+        profile = "Public" if mesh.public_networks else "Private"
+        unblock = bool(mesh.blocking_rules)  # shown to the owner, who chose to allow
+        result = network.allow_firewall(sys.executable, mesh.port, profile, unblock=unblock)
+        if result == "allowed":
+            mesh.check_network()
+        return jsonify({"result": result})
+
+    @app.post("/api/pair/close")
+    def ui_pair_close() -> Response:
+        owner_only()
+        mesh.close_pairing()
+        return jsonify({"ok": True})
+
     @app.post("/api/pair/new-code")
     def ui_new_code() -> Response:
         owner_only()
@@ -868,7 +904,7 @@ def register(
         owner_only()
         url = f"{share_url()}/?pair={mesh.pair_code}"
         if config.pin:
-            url += f"&pin={quote(config.pin)}"
+            url += f"&join={join_token()}"  # never the PIN itself
         buffer = io.BytesIO()
         segno.make(url, error="m").save(
             buffer, kind="svg", scale=8, border=0, dark="#000", light=None

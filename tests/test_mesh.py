@@ -92,6 +92,13 @@ def device_id(client: Client, name: str) -> str:
     return str(wait_for(find))
 
 
+def show_code(node: Node) -> str:
+    """Open Add device on ``node``, as its owner would, and read the code it shows."""
+    status, data = owner(node)("POST", "/api/pair/open")
+    assert status == 200, data
+    return str(data["code"])
+
+
 def connect(a: Node, b: Node) -> None:
     status, data = owner(a)("POST", "/api/devices", {"address": f"127.0.0.1:{b.port}"})
     assert status == 200, data
@@ -416,7 +423,7 @@ def test_not_enough_space_is_declined_up_front(make_node: NodeFactory) -> None:
 def test_pairing_by_code_and_address_auto_accepts(make_node: NodeFactory) -> None:
     a, b = make_node("Alpha"), make_node("Bravo")
     alice, bob = owner(a), owner(b)
-    code = bob.state()["pairing"]["code"]
+    code = show_code(b)
     status, data = alice("POST", "/api/pair", {"code": code, "address": f"127.0.0.1:{b.port}"})
     assert status == 200, data
     assert data["device"]["name"] == "Bravo"
@@ -437,7 +444,7 @@ def test_pairing_by_code_and_address_auto_accepts(make_node: NodeFactory) -> Non
 def test_wrong_pairing_code_is_rejected_and_rate_limited(make_node: NodeFactory) -> None:
     a, b = make_node("Alpha"), make_node("Bravo")
     alice = owner(a)
-    real = owner(b).state()["pairing"]["code"]
+    real = show_code(b)
     wrong = f"{(int(real) + 1) % 10**6:06d}"
     codes = []
     for _ in range(6):
@@ -448,10 +455,89 @@ def test_wrong_pairing_code_is_rejected_and_rate_limited(make_node: NodeFactory)
     assert not any(d["paired"] for d in alice.state()["devices"])
 
 
+def test_a_code_works_only_while_add_device_is_open(make_node: NodeFactory) -> None:
+    a, b = make_node("Alpha"), make_node("Bravo")
+    alice, bob = owner(a), owner(b)
+    code = bob.state()["pairing"]["code"]  # shown nowhere: the screen is closed
+    status, data = alice("POST", "/api/pair", {"code": code, "address": f"127.0.0.1:{b.port}"})
+    assert status == 409, data
+    assert data["error"]["code"] == "pairing_not_open"
+    phone = Client(f"http://{lan_ip()}:{b.port}")
+    phone("GET", f"/?pair={code}", raw=True)
+    assert phone.state()["me"]["paired"] is False  # nor does a scanned QR
+
+    code = show_code(b)
+    assert bob("POST", "/api/pair/close")[0] == 200
+    status, data = alice("POST", "/api/pair", {"code": code, "address": f"127.0.0.1:{b.port}"})
+    assert status == 409, data
+
+
+def test_pairing_never_puts_the_code_where_it_can_be_checked(
+    make_node: NodeFactory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Someone on the Wi-Fi sees every pairing message. Nothing in them lets them
+    test a guess offline, not even the right one: SRP, not a hash of the code."""
+    from open_transfer import srp
+
+    a, b = make_node("Alpha"), make_node("Bravo")
+    sent: list[tuple[str, Any, Any]] = []
+    real = a.mesh._http
+
+    def spy(peer: Any, method: str, path: str, **kw: Any) -> tuple[int, dict[str, Any]]:
+        status, data = real(peer, method, path, **kw)
+        sent.append((path, kw.get("body"), data))
+        return status, data
+
+    monkeypatch.setattr(a.mesh, "_http", spy)
+    code = show_code(b)
+    status, data = owner(a)("POST", "/api/pair", {"code": code, "address": f"127.0.0.1:{b.port}"})
+    assert status == 200, data
+    wire = json.dumps(sent)
+    assert code not in wire
+    (_, _, begun), (_, proved, _) = [m for m in sent if "/pair/" in m[0]]
+    # The eavesdropper knows the right code and replays the exchange: no match.
+    guess = srp.Client(f"{b.mesh.id}|{a.mesh.id}", code)
+    m1 = guess.respond(bytes.fromhex(begun["salt"]), int(begun["b"], 16))
+    assert m1.hex() != proved["m1"]
+
+
+def test_pairing_by_code_alone_finds_the_device_showing_it(make_node: NodeFactory) -> None:
+    """No multicast needed, and no code hint sent: every nearby device is asked
+    whether Add device is open, and only that one is tried."""
+    a, b, c = make_node("Alpha"), make_node("Bravo"), make_node("Charlie")
+    connect(a, b)
+    connect(a, c)
+    code = show_code(c)
+    status, data = owner(a)("POST", "/api/pair", {"code": code})
+    assert status == 200, data
+    assert data["device"]["name"] == "Charlie"
+    assert not any(d["paired"] for d in owner(b).state()["devices"])
+    assert b.mesh._pair_failures == 0  # Bravo was never tried
+
+
+def test_pairing_with_an_older_app_says_to_update_it(
+    make_node: NodeFactory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    a, b = make_node("Alpha"), make_node("Bravo")
+    real = a.mesh._http
+
+    def old_app(peer: Any, method: str, path: str, **kw: Any) -> tuple[int, dict[str, Any]]:
+        if path.endswith("/pair/begin"):
+            return 404, {"error": {"code": "not_found", "message": "Not found."}}
+        return real(peer, method, path, **kw)
+
+    monkeypatch.setattr(a.mesh, "_http", old_app)
+    code = show_code(b)
+    status, data = owner(a)("POST", "/api/pair", {"code": code, "address": f"127.0.0.1:{b.port}"})
+    assert status == 409, data
+    assert data["error"]["code"] == "update_needed"
+    assert "Bravo" in data["error"]["message"]
+
+
 def test_unpair_removes_trust(make_node: NodeFactory) -> None:
     a, b = make_node("Alpha"), make_node("Bravo")
     alice = owner(a)
-    code = owner(b).state()["pairing"]["code"]
+    code = show_code(b)
     alice("POST", "/api/pair", {"code": code, "address": f"127.0.0.1:{b.port}"})
     bravo = device_id(alice, "Bravo")
     assert alice("DELETE", f"/api/pairs/{bravo}")[0] == 200
@@ -461,7 +547,7 @@ def test_unpair_removes_trust(make_node: NodeFactory) -> None:
 def test_forged_signature_is_not_trusted(make_node: NodeFactory) -> None:
     a, b = make_node("Alpha"), make_node("Bravo")
     alice = owner(a)
-    code = owner(b).state()["pairing"]["code"]
+    code = show_code(b)
     alice("POST", "/api/pair", {"code": code, "address": f"127.0.0.1:{b.port}"})
     # Someone else claims to be Alpha but can't sign with the pairing key.
     forged = {
@@ -555,7 +641,7 @@ def test_visitor_sends_to_the_app_owner(make_node: NodeFactory) -> None:
 
 def test_visitor_paired_by_qr_code_is_auto_accepted(make_node: NodeFactory) -> None:
     a = make_node("Alpha")
-    code = owner(a).state()["pairing"]["code"]
+    code = show_code(a)
     phone = Client(f"http://{lan_ip()}:{a.port}")
     phone("GET", f"/?pair={code}", raw=True)
     assert phone.state()["me"]["paired"] is True
@@ -610,7 +696,7 @@ def test_devices_find_each_other_automatically(make_node: NodeFactory) -> None:
             )
         )
     # Pair by code alone: Alpha finds whoever shows Bravo's code on the network.
-    code = owner(b).state()["pairing"]["code"]
+    code = show_code(b)
     status, data = owner(a)("POST", "/api/pair", {"code": code})
     assert status == 200, data
     assert data["device"]["name"] == "Bravo"
@@ -644,6 +730,21 @@ def test_hello_answered_after_a_goodbye_does_not_bring_the_device_back(
     assert not peer.online
 
 
+def test_goodbye_from_another_address_is_checked(make_node: NodeFactory) -> None:
+    """Anyone on the Wi-Fi can send a bye with a device's id. One from an address
+    other than the device's (a spoof, or its second network interface) counts only
+    if the device really has gone."""
+    a, c = make_node("Alpha"), make_node("Charlie")
+    connect(a, c)
+    bye = {"type": "bye", "id": c.mesh.id}
+    a.mesh._on_packet(bye, "203.0.113.9")  # spoofed: Charlie is still there
+    time.sleep(1)
+    assert a.mesh._peers[c.mesh.id].online
+    c.stop()
+    a.mesh._on_packet(bye, "203.0.113.9")  # its other interface
+    wait_for(lambda: not a.mesh._peers[c.mesh.id].online, timeout=5)
+
+
 def test_hello_through_a_local_tunnel_keeps_the_real_address(make_node: NodeFactory) -> None:
     # A device added by its LAN address answers through a port forward (adb
     # forward, SSH -L): its hello arrives from loopback. Keep the real address.
@@ -653,6 +754,15 @@ def test_hello_through_a_local_tunnel_keeps_the_real_address(make_node: NodeFact
     a.mesh.handle_hello(info, "127.0.0.1")
     assert a.mesh._peers[b.mesh.id].host == "192.168.1.50"
     a.mesh.handle_hello(info, "192.168.1.77")  # it really moved: follow it
+    assert a.mesh._peers[b.mesh.id].host == "192.168.1.77"
+
+
+def test_an_announcement_from_a_new_address_moves_the_device(make_node: NodeFactory) -> None:
+    # A phone's Wi-Fi lease changed (N1): its next announcement is where it is now.
+    a, b = make_node("Alpha"), make_node("Bravo")
+    info = b.mesh.self_info(include_visitors=False)
+    a.mesh._upsert_peer(info, "192.168.1.50")
+    a.mesh._on_packet({"type": "announce", **info}, "192.168.1.77")
     assert a.mesh._peers[b.mesh.id].host == "192.168.1.77"
 
 

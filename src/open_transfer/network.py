@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import ipaddress
 import socket
 import subprocess
@@ -105,16 +106,19 @@ def hostname() -> str:
 
 
 def port_is_free(host: str, port: int) -> bool:
-    with closing(socket.socket(socket.AF_INET, socket.SOCK_STREAM)) as sock:
-        # Match the server socket (cheroot sets SO_REUSEADDR) so a port that only
-        # has TIME_WAIT leftovers from a restart counts as free. Not on Windows,
-        # where SO_REUSEADDR would let us "share" a port that is really in use.
-        if sys.platform != "win32":
-            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        try:
-            sock.bind((host, port))
-        except OSError:
-            return False
+    # macOS lets one address bind next to a listener on every address (0.0.0.0),
+    # and then the two share the port, so check that too.
+    for addr in dict.fromkeys((host, "0.0.0.0")):
+        with closing(socket.socket(socket.AF_INET, socket.SOCK_STREAM)) as sock:
+            # Match the server socket (cheroot sets SO_REUSEADDR) so a port that only
+            # has TIME_WAIT leftovers from a restart counts as free. Not on Windows,
+            # where SO_REUSEADDR would let us "share" a port that is really in use.
+            if sys.platform != "win32":
+                sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            try:
+                sock.bind((addr, port))
+            except OSError:
+                return False
     return True
 
 
@@ -131,6 +135,95 @@ def find_free_port(host: str, preferred: int, attempts: int = 20) -> int:
         if port_is_free(host, port):
             return port
     raise OSError(f"No free port found between {preferred} and {preferred + attempts - 1}")
+
+
+DISCOVERY_PORT = 47823  # discovery.PORT; nearby devices' announcements
+
+
+def can_allow_firewall() -> bool:
+    """Only the packaged Windows app: a rule for python.exe would let in far more than us."""
+    return sys.platform == "win32" and bool(getattr(sys, "frozen", False))
+
+
+def _blocks(program: str) -> str:
+    """Enabled inbound Block rules for exactly ``program`` (already quoted), nothing else."""
+    return (
+        f"Get-NetFirewallApplicationFilter -Program '{program}' | Get-NetFirewallRule | "
+        "Where-Object { $_.Direction -eq 'Inbound' -and $_.Action -eq 'Block' "
+        "-and $_.Enabled -eq 'True' }"
+    )
+
+
+def block_rules(
+    exe: str, run: Callable[..., Any] = subprocess.run, platform: str = sys.platform
+) -> list[str]:
+    """Names of Windows Firewall rules that block ``exe`` from being reached (Windows'
+    own first-run prompt, cancelled, leaves these; Block beats Allow). Empty on failure."""
+    if platform != "win32":
+        return []
+    try:
+        done = run(
+            ["powershell", "-NoProfile", "-NonInteractive", "-Command",
+             f"{_blocks(exe.replace(chr(39), chr(39) * 2))} | ForEach-Object DisplayName"],
+            capture_output=True,
+            text=True,
+            timeout=15,
+            check=False,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )  # fmt: skip
+    except (OSError, subprocess.SubprocessError):
+        return []
+    return [line.strip() for line in str(done.stdout or "").splitlines() if line.strip()][:8]
+
+
+def allow_command(exe: str, port: int, profile: str, unblock: bool = False) -> list[str]:
+    """PowerShell that asks Windows (one UAC prompt) to let other devices reach ``exe``
+    on ``profile`` ("Private" or "Public") networks: its TCP port and discovery only.
+    With ``unblock``, first removes the Block rules for ``exe`` (see ``block_rules``)."""
+    program = exe.replace("'", "''")
+    rules = "; ".join(
+        f"New-NetFirewallRule -DisplayName 'Open Transfer ({profile}, {proto})' -Direction Inbound "
+        f"-Program '{program}' -Profile {profile} -Protocol {proto} -LocalPort {int(local)} -Action Allow"
+        for proto, local in (("TCP", port), ("UDP", DISCOVERY_PORT))
+    )
+    # Stop at the first refusal, and pass the elevated copy's result back: Start-Process
+    # alone succeeds whatever happens inside, which would report a rule Windows refused.
+    if unblock:
+        rules = f"{_blocks(program)} | Remove-NetFirewallRule; {rules}"
+    script = f"$ErrorActionPreference = 'Stop'; {rules}"
+    encoded = base64.b64encode(script.encode("utf-16-le")).decode()
+    return [
+        "powershell",
+        "-NoProfile",
+        "-NonInteractive",
+        "-Command",
+        "$p = Start-Process powershell -Verb RunAs -WindowStyle Hidden -Wait -PassThru "
+        f"-ArgumentList '-NoProfile','-EncodedCommand','{encoded}'; exit $p.ExitCode",
+    ]
+
+
+def allow_firewall(
+    exe: str,
+    port: int,
+    profile: str,
+    run: Callable[..., Any] = subprocess.run,
+    unblock: bool = False,
+) -> str:
+    """``allowed``, ``cancelled`` (the person said no to the prompt) or ``failed``."""
+    try:
+        done = run(
+            allow_command(exe, port, profile, unblock),
+            capture_output=True,
+            text=True,
+            timeout=180,
+            check=False,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+    except (OSError, subprocess.SubprocessError):
+        return "failed"
+    if done.returncode == 0:
+        return "allowed"
+    return "cancelled" if "cancel" in str(done.stderr or "").lower() else "failed"
 
 
 PUBLIC_NETWORKS = (

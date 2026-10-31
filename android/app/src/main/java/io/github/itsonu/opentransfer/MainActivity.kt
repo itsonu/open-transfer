@@ -50,6 +50,7 @@ import java.net.URL
 import java.util.Locale
 import java.util.concurrent.Callable
 import java.util.concurrent.FutureTask
+import java.util.concurrent.TimeUnit
 import kotlin.concurrent.thread
 
 /**
@@ -616,6 +617,19 @@ class MainActivity : ComponentActivity() {
         @JavascriptInterface
         fun openFile(name: String?) {
             main.post { openOwnFile(name) }
+        }
+
+        /** The clipboard's text, or "": the WebView never lets the page read it (no prompt to ask with). */
+        @JavascriptInterface
+        fun readClipboard(): String {
+            // Read on the main thread, where the focus is.
+            val read = FutureTask(Callable { ClipSync.readIfNew(this@MainActivity, force = true) })
+            main.post(read)
+            return try {
+                read.get(2, TimeUnit.SECONDS) ?: ""
+            } catch (e: Exception) {
+                ""
+            }
         }
 
         /** Photos and files shared from other apps since the page last asked (JSON, or ""). */

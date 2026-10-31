@@ -8,7 +8,7 @@ pairing) happens over HTTP between the devices themselves.
 
 Multicast is often filtered on guest Wi-Fi and some routers. The mesh
 therefore also keeps peers alive with direct HTTP "hello"s, and devices can
-be added by address or found by their pairing code.
+be added by address or found while their Add device screen is open.
 """
 
 from __future__ import annotations
@@ -128,9 +128,9 @@ class Discovery:
         packet = {"type": "reply" if reply else "announce", **self._describe()}
         self.send(packet)
 
-    def find(self, hint: str) -> None:
-        """Ask whoever shows the pairing code with this hint to answer."""
-        self.send({"type": "find", "id": self._describe()["id"], "find": hint})
+    def find(self) -> None:
+        """Ask whoever has Add device open to answer (the code itself is never sent)."""
+        self.send({"type": "find", "id": self._describe()["id"]})
 
     def send(self, packet: dict[str, Any]) -> None:
         sock = self._sock

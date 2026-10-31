@@ -98,7 +98,7 @@ def pair_all(apps: list[Device]) -> None:
     assert first is not None
     for other in apps[1:]:
         assert other.node is not None
-        code = owner(other.node).state()["pairing"]["code"]
+        code = owner(other.node)("POST", "/api/pair/open")[1]["code"]
         status, data = owner(first)(
             "POST", "/api/pair", {"code": code, "address": f"127.0.0.1:{other.node.port}"}
         )

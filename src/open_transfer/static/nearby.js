@@ -24,6 +24,7 @@ export const mesh = {
   promptId: null,
   seen: new Map(), // incoming id -> last state
   paired: null, // ids of paired devices (to notice new pairings)
+  pairTimer: null, // keeps Add device's pairing window open while the sheet shows
   directFiles: [], // files received straight from another browser (kept in memory)
   tiles: new Map(), // device id -> { el, sig }
   incomingRows: new Map(),
@@ -219,10 +220,28 @@ function renderMe() {
   $("#me-name-text").textContent = me.name;
   $("#me-icon").replaceChildren(icon(deviceIcon({ ...me, kind: me.kind === "owner" ? "app" : "browser" })));
   const status = $("#me-status");
-  const blocked = mesh.data.network?.public || [];
-  if (me.kind === "owner" && blocked.length) {
+  $("#me-allow").hidden = true;
+  const network = mesh.data.network || {};
+  const cantReach = network.unreachable_by || [];
+  // Only a guess: a device that does reach us proves this PC's firewall lets it in.
+  const blocked = network.reachable_by ? [] : network.public || [];
+  if (me.kind === "owner" && cantReach.length) {
+    // Told by the devices themselves (they hear us, but can't connect).
+    const kind = network.public?.length ? "Public" : "Private";
+    const blocks = network.blocking_rules || [];
+    // Block beats Allow: name the rule (left by a cancelled Windows prompt) and say the button removes it.
+    const fix = blocks.length
+      ? ` A Windows Firewall rule (“${blocks[0]}”) blocks Open Transfer.`
+      : me.platform === "windows"
+        ? ` In Windows Security → Firewall, allow Open Transfer on ${kind} networks.`
+        : "";
+    status.textContent = `${cantReach.join(", ")} can’t reach this device — usually its firewall.${fix}`;
+    status.dataset.tone = "warn";
+    $("#me-allow").hidden = !network.can_allow;
+    $("#me-allow").textContent = blocks.length ? "Remove the block and allow" : "Allow on this network";
+  } else if (me.kind === "owner" && blocked.length) {
     // Windows Firewall keeps everyone out on a "Public" network, whatever the app allows.
-    status.textContent = `Other devices can’t reach this PC: Windows treats “${blocked[0]}” as a Public network. Set it to Private in Settings → Network & internet → Wi-Fi.`;
+    status.textContent = `Other devices may not reach this PC: Windows treats “${blocked[0]}” as a Public network. Set it to Private, and allow Open Transfer on Private networks.`;
     status.dataset.tone = "warn";
   } else if (me.kind === "owner") {
     status.textContent = discovery ? "Visible to nearby devices" : "Not discoverable — add devices by code or address";
@@ -457,9 +476,9 @@ function updateTile(el, d) {
   button.setAttribute("aria-label", `${d.name}, ${status.text}${d.paired ? ", paired" : ""}${selected ? ", selected" : ""}`);
   const signal = el.querySelector(".device-signal");
   const rtt = d.kind === "app" && d.online && Number.isFinite(d.rtt) ? d.rtt : null;
-  signal.hidden = rtt === null;
+  const level = rtt === null ? null : rtt < 40 ? "good" : rtt < 150 ? "fair" : "slow";
+  signal.hidden = level !== "slow"; // a normal connection (a phone on Wi-Fi is often "fair") needs no warning
   if (rtt !== null) {
-    const level = rtt < 40 ? "good" : rtt < 150 ? "fair" : "slow";
     signal.dataset.level = level;
     signal.setAttribute("aria-label", `Connection: ${level} (${rtt} ms)`);
     signal.title = `Connection: ${level} · ${rtt} ms round trip`;
@@ -1638,6 +1657,23 @@ export async function confirmSensitive(text, { action = "Send" } = {}) {
   });
 }
 
+/** One narrow firewall rule for this app, after Windows asks the owner (UAC). */
+async function allowOnThisNetwork() {
+  const button = $("#me-allow");
+  button.disabled = true;
+  try {
+    const { data } = await api("/api/network/allow", { method: "POST" });
+    if (data.result === "allowed") toast("Allowed — other devices can reach this PC now", { tone: "success", icon: "check" });
+    else if (data.result === "failed" && mesh.data?.network?.blocking_rules?.length) toast("Couldn’t remove the blocking rule — Windows Security → Firewall can", { tone: "error", icon: "alert" });
+    else if (data.result === "cancelled") toast("Nothing changed — Windows asked and the answer was No", { icon: "alert" });
+    else toast("Couldn’t change the firewall rule", { tone: "error", icon: "alert" });
+  } catch (err) {
+    toast(err.message, { tone: "error", icon: "alert" });
+  } finally {
+    button.disabled = false;
+  }
+}
+
 function setupRename() {
   const dialog = $("#rename-dialog");
   const input = $("#rename-input");
@@ -1683,13 +1719,37 @@ function formatCode(code) {
 function fillPairing() {
   const pairing = mesh.data?.pairing;
   if (!pairing) return;
-  $("#pair-code").textContent = formatCode(pairing.code);
-  $("#pair-code").setAttribute("aria-label", `Pairing code ${pairing.code.split("").join(" ")}`);
+  // Until the app says the window is open, the code it has isn't the one that will work.
+  $("#pair-code").textContent = pairing.open ? formatCode(pairing.code) : "––– –––";
+  $("#pair-code").setAttribute("aria-label", pairing.open ? `Pairing code ${pairing.code.split("").join(" ")}` : "Getting a pairing code");
   const qr = $("#qr-image");
-  const src = `/api/pair/qr.svg?c=${encodeURIComponent(pairing.code)}`;
-  if (qr.getAttribute("src") !== src) qr.src = src;
+  const src = pairing.open ? `/api/pair/qr.svg?c=${encodeURIComponent(pairing.code)}` : "";
+  if (!src) qr.removeAttribute("src");
+  else if (qr.getAttribute("src") !== src) qr.src = src;
   const minutes = Math.max(1, Math.round(pairing.expires_in / 60));
   $("#pair-expiry-text").textContent = `Changes in ${minutes} min`;
+}
+
+// A code only works while Add device is open on its device: tell the app when
+// the sheet opens, renew it while it stays open, and say when it closes.
+function holdPairingOpen() {
+  const renew = () =>
+    api("/api/pair/open", { method: "POST" })
+      .then(({ data }) => {
+        if (mesh.data) mesh.data.pairing = { ...data, open: true };
+        fillPairing();
+      })
+      .catch(() => {});
+  clearInterval(mesh.pairTimer);
+  renew();
+  mesh.pairTimer = setInterval(() => ($("#connect-dialog").open ? renew() : releasePairing()), 20000);
+}
+
+function releasePairing() {
+  if (!mesh.pairTimer) return;
+  clearInterval(mesh.pairTimer);
+  mesh.pairTimer = null;
+  api("/api/pair/close", { method: "POST" }).catch(() => {});
 }
 
 export function openAddDevice({ tab = "show" } = {}) {
@@ -1703,8 +1763,10 @@ export function openAddDevice({ tab = "show" } = {}) {
     : "Scan with another phone’s camera, or open the link on any device on the same Wi-Fi.";
   const info = state.info;
   $("#share-url").textContent = info.share_url;
-  if (owner) fillPairing();
-  else $("#qr-image").src = `/api/qr.svg?v=${encodeURIComponent(info.share_url)}`;
+  if (owner) {
+    fillPairing();
+    holdPairingOpen();
+  } else $("#qr-image").src = `/api/qr.svg?v=${encodeURIComponent(info.share_url)}`;
   $("#pin-note").hidden = !info.pin;
   $("#pin-note-value").textContent = info.pin || "";
   $("#share-url-button").hidden = !navigator.share;
@@ -1719,7 +1781,7 @@ export function openAddDevice({ tab = "show" } = {}) {
 
 function canScan() {
   if (nativeApp()?.scanQr) return true;
-  return "BarcodeDetector" in window && Boolean(navigator.mediaDevices?.getUserMedia) && window.isSecureContext;
+  return Boolean(navigator.mediaDevices?.getUserMedia) && window.isSecureContext;
 }
 
 async function pair(code, address) {
@@ -1768,51 +1830,112 @@ function handleScan(text) {
 
 let scanner = null;
 
+const CAMERA_PROBLEMS = {
+  NotAllowedError: "Camera access is off. Allow it in your browser or system settings, or enter the code instead.",
+  SecurityError: "Camera access is off. Allow it in your browser or system settings, or enter the code instead.",
+  NotFoundError: "No camera found. Enter the code shown on the other device.",
+  OverconstrainedError: "No camera found. Enter the code shown on the other device.",
+  NotReadableError: "The camera is in use by another app. Close it, or enter the code instead.",
+};
+
+/** A QR reader for video frames: the browser's own, or jsQR where there's none (Safari, Firefox, desktop windows). */
+async function qrReader() {
+  if ("BarcodeDetector" in window && (await window.BarcodeDetector.getSupportedFormats()).includes("qr_code")) {
+    const detector = new window.BarcodeDetector({ formats: ["qr_code"] });
+    return async (video) => (await detector.detect(video))[0]?.rawValue;
+  }
+  if (!window.jsQR) {
+    await new Promise((resolve, reject) => {
+      document.head.append(h("script", { src: "/static/vendor/jsQR.js", onload: resolve, onerror: reject }));
+    });
+  }
+  const canvas = document.createElement("canvas");
+  const g = canvas.getContext("2d", { willReadFrequently: true });
+  return async (video) => {
+    const scale = Math.min(1, 640 / Math.max(video.videoWidth, video.videoHeight));
+    canvas.width = Math.round(video.videoWidth * scale);
+    canvas.height = Math.round(video.videoHeight * scale);
+    if (!canvas.width) return undefined;
+    g.drawImage(video, 0, 0, canvas.width, canvas.height);
+    return window.jsQR(g.getImageData(0, 0, canvas.width, canvas.height).data, canvas.width, canvas.height)?.data;
+  };
+}
+
 async function startScan() {
   const app = nativeApp();
   if (app?.scanQr) {
     app.scanQr();
     return;
   }
+  if (scanner) return; // already starting or scanning
+  const mine = { stream: null, stopped: false, cameras: [], camera: null };
+  scanner = mine;
+  $("#pair-error").textContent = "";
   try {
-    const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" } });
-    const video = $("#scan-video");
-    video.srcObject = stream;
+    const read = await qrReader();
+    await openCamera(mine, { facingMode: "environment" });
+    if (mine.stopped) return;
     $("#scan-view").hidden = false;
-    await video.play();
-    const detector = new window.BarcodeDetector({ formats: ["qr_code"] });
-    scanner = { stream, stopped: false };
+    mine.cameras = (await navigator.mediaDevices.enumerateDevices()).filter((d) => d.kind === "videoinput");
+    $("#scan-switch").hidden = mine.stopped || mine.cameras.length < 2;
+    const video = $("#scan-video");
     const tick = async () => {
-      if (!scanner || scanner.stopped) return;
+      if (mine.stopped) return;
       try {
-        const codes = await detector.detect(video);
-        if (codes.length) {
-          handleScan(codes[0].rawValue);
+        const text = await read(video);
+        if (text) {
+          handleScan(text);
           return;
         }
       } catch {
         /* frame not ready */
       }
-      requestAnimationFrame(tick);
+      setTimeout(tick, 100);
     };
     tick();
-  } catch {
-    $("#pair-error").textContent = "Couldn’t open the camera. Enter the code instead.";
+  } catch (err) {
+    if (mine.stopped) return;
+    stopScanner();
+    $("#pair-error").textContent = CAMERA_PROBLEMS[err?.name] || "Couldn’t open the camera. Enter the code instead.";
+    $("#pair-input").focus();
   }
+}
+
+/** Point the scanner at a camera, letting go of the one it had. */
+async function openCamera(mine, video) {
+  const stream = await navigator.mediaDevices.getUserMedia({ video });
+  if (mine.stopped) {
+    for (const track of stream.getTracks()) track.stop(); // closed while the camera was starting
+    return;
+  }
+  for (const track of mine.stream?.getTracks() || []) track.stop();
+  mine.stream = stream;
+  mine.camera = stream.getVideoTracks()[0]?.getSettings().deviceId ?? video.deviceId?.exact;
+  const el = $("#scan-video");
+  el.srcObject = stream;
+  await el.play();
+}
+
+function switchCamera() {
+  const mine = scanner;
+  if (!mine?.stream || mine.cameras.length < 2) return;
+  const at = Math.max(0, mine.cameras.findIndex((d) => d.deviceId === mine.camera)); // unknown: the default, listed first
+  const next = mine.cameras[(at + 1) % mine.cameras.length];
+  openCamera(mine, { deviceId: { exact: next.deviceId } }).catch((err) => {
+    if (mine.stopped) return;
+    $("#pair-error").textContent = CAMERA_PROBLEMS[err?.name] || "Couldn’t switch cameras.";
+  });
 }
 
 function stopScanner() {
   if (!scanner) return;
   scanner.stopped = true;
-  try {
-    for (const track of scanner.stream.getTracks()) track.stop();
-  } catch {
-    /* camera already stopped */
-  }
+  for (const track of scanner.stream?.getTracks() || []) track.stop();
   const video = $("#scan-video");
   if (video) video.srcObject = null;
   scanner = null;
   $("#scan-view").hidden = true;
+  $("#scan-switch").hidden = true;
 }
 
 function setupConnectSheet() {
@@ -1821,7 +1944,10 @@ function setupConnectSheet() {
   dialog.addEventListener("click", (event) => {
     if (event.target === dialog) dialog.close();
   });
-  dialog.addEventListener("close", stopScanner);
+  dialog.addEventListener("close", () => {
+    stopScanner();
+    releasePairing();
+  });
   for (const tab of document.querySelectorAll("#connect-dialog [role=tab]")) {
     tab.addEventListener("click", () => setTab(tab.dataset.tab));
     tab.addEventListener("keydown", (event) => {
@@ -1857,6 +1983,8 @@ function setupConnectSheet() {
   });
   $("#scan-button").addEventListener("click", startScan);
   $("#scan-cancel").addEventListener("click", stopScanner);
+  $("#scan-switch").addEventListener("click", switchCamera);
+  document.addEventListener("visibilitychange", () => document.hidden && stopScanner());
   window.addEventListener("ot-native-scan", (event) => handleScan(event.detail));
   $("#copy-url").addEventListener("click", async () => {
     const button = $("#copy-url");
@@ -1943,6 +2071,7 @@ export function initNearby(context) {
   setupConnectSheet();
   setupRename();
   setupTextDialog();
+  $("#me-allow").addEventListener("click", allowOnThisNetwork);
   $("#select-all").addEventListener("click", () => {
     const online = onlineDevices();
     const allSelected = online.every((d) => mesh.selected.has(d.id));

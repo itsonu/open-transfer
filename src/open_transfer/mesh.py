@@ -30,6 +30,7 @@ import base64
 import contextlib
 import dataclasses
 import hashlib
+import hmac
 import http.client
 import ipaddress
 import json
@@ -37,15 +38,17 @@ import logging
 import os
 import queue
 import secrets
+import sys
 import threading
 import time
 from collections.abc import Callable
 from concurrent.futures import Future, ThreadPoolExecutor
 from concurrent.futures import wait as wait_futures
 from dataclasses import dataclass, field
+from functools import partial
 from typing import Any
 
-from open_transfer import __version__, network
+from open_transfer import __version__, network, srp
 from open_transfer.chunks import CHUNK_SIZE as RESUMABLE_CHUNK_SIZE
 from open_transfer.chunks import ChunkSessions
 from open_transfer.clipboard import IMAGE_MIME as CLIP_IMAGE_MIME
@@ -60,11 +63,9 @@ from open_transfer.devices import (
     clean_form,
     clean_name,
     clean_platform,
-    code_hint,
+    derive_pair_key,
     new_pair_code,
     new_visitor_id,
-    pair_key,
-    pair_proof,
     sign,
     valid_id,
 )
@@ -94,8 +95,10 @@ VISITOR_FORGET = 24 * 3600.0
 HELLO_EVERY = 6.0
 NETWORK_CHECK_EVERY = 60.0  # how often Windows is asked whether the Wi-Fi is "Public"
 HELLO_TIMEOUT = 3.0  # seconds a hello may take before we give up on it
+MOVE_CHECK_EVERY = 30.0  # seconds between challenges to one claimed new address
 FINISHED_KEEP = 90.0  # finished transfers stay in the UI this long
 PAIR_CODE_TTL = 600.0
+PAIR_WINDOW = 30.0  # a code works this long after the Add device page last renewed it
 STALL_TIMEOUT = 60.0  # a receiver that takes no data for this long is dropped
 CHUNK = 256 * 1024
 MAX_FILES = 1000
@@ -158,6 +161,7 @@ class Peer:
     rev: int = -1
     last_seen: float = 0.0
     left_at: float = 0.0  # when it last said goodbye
+    pairing: bool = False  # it said its Add device screen is open
     manual: bool = False
     visitors: list[dict[str, str]] = field(default_factory=list)
     accepts: str = "everyone"
@@ -165,6 +169,8 @@ class Peer:
     # Our last hello got no answer although we hear it on the network: usually its
     # firewall (Windows on a "Public" network). None until we've tried.
     reachable: bool | None = None
+    # Its answer to our hello says whether *it* can reach *us* (None: it hasn't tried).
+    reaches_us: bool | None = None
 
     @property
     def online(self) -> bool:
@@ -317,19 +323,21 @@ class Mesh:
         self._listeners: list[Listener] = []
         self._signatures = SignatureChecker()
         self._pair_limiter = RateLimiter(attempts=5, window=60)
-        self._pair_pending: dict[str, tuple[str, str, dict[str, Any], str, float]] = {}
+        self._pair_pending: dict[str, tuple[srp.Server, dict[str, Any], str, float]] = {}
         self._pair_failures = 0
-        self._find_waiters: dict[str, list[tuple[threading.Event, list[Peer]]]] = {}
+        self._pair_window_until = 0.0
         self._mail: dict[str, list[tuple[float, dict[str, Any]]]] = {}
         self._rotate_code()
         self._rev = 0
         self.public_networks: list[str] = []  # Windows networks set to Public (see network.py)
+        self.blocking_rules: list[str] = []  # Windows Firewall rules blocking this app
         self.port = 0
         self.discovery: Discovery | None = None
         self._executor = ThreadPoolExecutor(max_workers=16, thread_name_prefix="ot-mesh")
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self._hellos: set[Future[bool]] = set()
+        self._move_checks: dict[tuple[str, str], float] = {}  # (device, host) → last challenge
         self.sync = SyncEngine(
             me=lambda: self.identity.to_dict(),
             trust=self.trust,
@@ -404,6 +412,7 @@ class Mesh:
             "port": self.port,
             "rev": self._rev,
             "ver": __version__,
+            **({"pairing": True} if self.pairing_open else {}),
         }
 
     def self_info(self, *, include_visitors: bool = True) -> dict[str, Any]:
@@ -417,6 +426,7 @@ class Mesh:
             "port": self.port,
             "version": __version__,
             "accepts": "paired" if self.config.paired_only else "everyone",
+            **({"pairing": True} if self.pairing_open else {}),
         }
         if include_visitors:
             with self._lock:
@@ -484,7 +494,9 @@ class Mesh:
 
     # ------------------------------------------------------------- peers
 
-    def _upsert_peer(self, info: dict[str, Any], host: str, *, manual: bool = False) -> Peer | None:
+    def _upsert_peer(
+        self, info: dict[str, Any], host: str, *, manual: bool = False, proven: bool = False
+    ) -> Peer | None:
         peer_id = info.get("id")
         port = info.get("port")
         if not valid_id(peer_id) or peer_id == self.id or not str(peer_id).startswith("d-"):
@@ -492,6 +504,14 @@ class Mesh:
         if not isinstance(port, int) or not 1 <= port <= 65535:
             return None
         assert isinstance(peer_id, str)  # noqa: S101 - narrowed by valid_id
+        with self._lock:
+            peer = self._peers.get(peer_id)
+            moved = peer is not None and peer.host != host and not _is_loopback(host)
+        if moved and not (proven or manual) and self.trust.get(peer_id):
+            # Anyone on the Wi-Fi can send this with a paired device's id: move it (or
+            # believe anything else said here) only once it proves it's there.
+            self._check_move(peer_id, host, port)
+            return None
         with self._lock:
             peer = self._peers.get(peer_id)
             is_new = peer is None or not peer.online
@@ -509,6 +529,7 @@ class Mesh:
             peer.version = str(info.get("version") or info.get("ver") or "")[:20]
             peer.accepts = "paired" if info.get("accepts") == "paired" else "everyone"
             peer.manual = peer.manual or manual
+            peer.pairing = info.get("pairing") is True
             peer.last_seen = time.monotonic()
             if isinstance(info.get("visitors"), list):
                 peer.visitors = _clean_visitors(info["visitors"])
@@ -524,16 +545,20 @@ class Mesh:
             return
         kind = packet["type"]
         if kind == "find":
-            if packet.get("find") == code_hint(self.pair_code) and self.discovery:
-                self.discovery.send({"type": "reply", **self._describe(), "found": packet["find"]})
+            if self.pairing_open and self.discovery:
+                self.discovery.send({"type": "reply", **self._describe()})
             return
         if kind == "bye":
             with self._lock:
                 peer = self._peers.get(packet["id"])
-                if peer:
-                    peer.last_seen = 0.0
-                    peer.left_at = time.monotonic()
-                    peer.visitors = []
+                here = peer is not None and peer.host == src
+            if peer and here:  # from where we know it is
+                self._gone(peer)
+            elif peer:
+                # Another of its addresses (two network interfaces), or someone
+                # else's packet: ask it where we know it is.
+                log.info("bye from %s for %s; checking", src, log_safe(peer.name))
+                self._submit(partial(self._check_gone, peer))
             return
         with self._lock:
             known = self._peers.get(packet["id"])
@@ -543,12 +568,6 @@ class Mesh:
         if peer is None:
             return
         peer.rev = packet.get("rev", -1) if isinstance(packet.get("rev"), int) else -1
-        found = packet.get("found")
-        if isinstance(found, str):
-            with self._lock:
-                for event, results in self._find_waiters.get(found, []):
-                    results.append(peer)
-                    event.set()
         if fresh:
             # Answer straight away, and say hello over HTTP so they learn about
             # us even if multicast only works in one direction.
@@ -557,6 +576,16 @@ class Mesh:
             self._say_hello(peer)
         elif changed:
             self._say_hello(peer)
+
+    def _gone(self, peer: Peer) -> None:
+        with self._lock:
+            peer.last_seen = 0.0
+            peer.left_at = time.monotonic()
+            peer.visitors = []
+
+    def _check_gone(self, peer: Peer) -> None:
+        if not self._hello(peer):
+            self._gone(peer)
 
     def _say_hello(self, peer: Peer) -> None:
         """Say hello in the background, remembering it until it lands (see ``stop``)."""
@@ -604,18 +633,84 @@ class Mesh:
         updated = self._upsert_peer(info, peer.host, manual=peer.manual)
         if updated is not None:
             took = (time.monotonic() - started) * 1000
+            you = info.get("you")
+            reaches_us = you.get("reachable") if isinstance(you, dict) else None
             with self._lock:
                 if updated.reachable is not True:
                     updated.reachable = True
                     self._bump()
+                if isinstance(reaches_us, bool) and updated.reaches_us is not reaches_us:
+                    updated.reaches_us = reaches_us
+                    if not reaches_us:
+                        log.warning("%s can't reach this device", log_safe(updated.name))
+                    self._bump()
                 updated.rtt = took if updated.rtt < 0 else updated.rtt * 0.7 + took * 0.3
         return True
 
-    def handle_hello(self, info: dict[str, Any], host: str) -> dict[str, Any]:
+    def handle_hello(
+        self, info: dict[str, Any], host: str, *, signed: bool = False
+    ) -> dict[str, Any]:
+        """``signed``: the caller proved it's the paired device it says (``X-OT-Auth``)."""
         if self._stop.is_set():
             raise MeshError(503, "stopping", "This device is shutting down.")
-        self._upsert_peer(info, host)
-        return self.self_info()
+        peer = self._upsert_peer(info, host, proven=signed)
+        reply = self.self_info()
+        if peer is not None and peer.reachable is not None:
+            reply["you"] = {"reachable": peer.reachable}  # whether we can reach the caller
+        challenge, to = info.get("challenge"), info.get("to")
+        trusted = self.trust.get(str(info.get("id"))) if signed else None
+        # Prove we're here — only for an address that is ours, so someone relaying the
+        # challenge to us can't use the answer for theirs.
+        if (
+            trusted
+            and isinstance(challenge, str)
+            and 16 <= len(challenge) <= 128
+            and isinstance(to, str)
+            and self._is_own_address(to)
+        ):
+            key = bytes.fromhex(trusted.key)
+            reply["proof"] = _move_proof(key, challenge, self.id, trusted.id, to)
+        return reply
+
+    def _is_own_address(self, address: str) -> bool:
+        try:
+            host, port = _parse_address(address)
+        except MeshError:
+            return False
+        return port == self.port and (_is_loopback(host) or host in network.lan_ips())
+
+    def _check_move(self, peer_id: str, host: str, port: int) -> None:
+        """A paired device seems to be at ``host:port`` now: challenge it there (N1)."""
+        now = time.monotonic()
+        with self._lock:
+            if now - self._move_checks.get((peer_id, host), -1e9) < MOVE_CHECK_EVERY:
+                return
+            self._move_checks[(peer_id, host)] = now
+            for key, at in list(self._move_checks.items()):
+                if now - at > MOVE_CHECK_EVERY:
+                    del self._move_checks[key]
+
+        def challenge() -> None:
+            trusted = self.trust.get(peer_id)
+            if trusted is None or self._stop.is_set():
+                return
+            nonce, to = secrets.token_hex(16), f"{host}:{port}"
+            there = Peer(peer_id, "", "computer", "unknown", host, port)  # _http signs for it
+            body = {**self.self_info(include_visitors=False), "challenge": nonce, "to": to}
+            try:
+                status, info = self._http(
+                    there, "POST", f"{P2P}/hello", body=body, timeout=HELLO_TIMEOUT
+                )
+            except OSError:
+                return
+            expected = _move_proof(bytes.fromhex(trusted.key), nonce, peer_id, self.id, to)
+            proof = info.get("proof")
+            if status == 200 and isinstance(proof, str) and hmac.compare_digest(proof, expected):
+                log.info("%s moved to %s", log_safe(trusted.name), to)
+                self._upsert_peer(info, host, proven=True)
+                self._bump()
+
+        self._submit(challenge)
 
     def connect(self, address: str) -> Peer:
         """Add an app by ``host:port`` (for networks where discovery is blocked)."""
@@ -690,12 +785,32 @@ class Mesh:
     def pair_code_expires_in(self) -> int:
         return max(0, round(PAIR_CODE_TTL - (time.monotonic() - self._pair_code_at)))
 
+    @property
+    def pairing_open(self) -> bool:
+        """Is Add device open here? The code only works while it is."""
+        return time.monotonic() < self._pair_window_until
+
+    def open_pairing(self) -> dict[str, Any]:
+        """The owner opened Add device (the page renews this while it stays open)."""
+        opening = not self.pairing_open
+        if opening:
+            self._rotate_code()  # a code seen before the screen opened doesn't work
+        self._pair_window_until = time.monotonic() + PAIR_WINDOW
+        if opening:
+            self._bump()  # announce it, so devices entering the code find us
+        return {"code": self.pair_code, "expires_in": self.pair_code_expires_in()}
+
+    def close_pairing(self) -> None:
+        if self.pairing_open:
+            self._pair_window_until = 0.0
+            self._bump()
+
     def check_visitor_code(self, code: str, client: str) -> bool | float:
         """``True`` if ``code`` is the current pairing code; seconds to wait if rate-limited."""
         wait = self._pair_limiter.attempt(f"visitor:{client}")
         if wait:
             return wait
-        if secrets.compare_digest(str(code).strip(), self.pair_code):
+        if self.pairing_open and secrets.compare_digest(str(code).strip(), self.pair_code):
             self._pair_limiter.reset(f"visitor:{client}")
             self._rotate_code()
             return True
@@ -708,21 +823,43 @@ class Mesh:
             log.warning("Too many wrong pairing codes; showing a new one.")
             self._rotate_code()
 
-    def pair_begin(self, info: dict[str, Any], nonce_b: str, client: str) -> dict[str, Any]:
+    # SRP over the 6-digit code (srp.py): "A" shows the code, "B" enters it.
+    #   1. B → A  {device}             A → B  {salt, B, device}
+    #   2. B → A  {id, A, M1}          A → B  {M2}
+    # Nothing on the wire lets a listener test a guess, and each attempt is one
+    # guess. Both sides derive the pair key from SRP's session key.
+
+    def _not_showing(self) -> MeshError:
+        return MeshError(
+            409,
+            "pairing_not_open",
+            f"{self.identity.name} isn’t showing a pairing code. Open Add device on it first.",
+        )
+
+    def pair_begin(self, info: dict[str, Any], client: str) -> dict[str, Any]:
         """Step 1 on the device showing the code."""
-        if not valid_id(info.get("id")) or not _valid_nonce(nonce_b):
+        device_id = info.get("id")
+        if not valid_id(device_id) or device_id == self.id:
             raise MeshError(400, "bad_request", "Invalid pairing request.")
-        nonce_a = secrets.token_hex(16)
+        if not self.pairing_open:
+            raise self._not_showing()
+        server = srp.Server(f"{self.id}|{device_id}", self.pair_code)
         with self._lock:
             now = time.monotonic()
             for key, pending in list(self._pair_pending.items()):
-                if now - pending[4] > 60:
+                if now - pending[3] > 60:
                     del self._pair_pending[key]
-            self._pair_pending[str(info["id"])] = (nonce_a, nonce_b, info, client, now)
-        return {"nonce": nonce_a, "device": self.self_info(include_visitors=False)}
+            self._pair_pending[str(device_id)] = (server, info, client, now)
+        return {
+            "salt": server.salt.hex(),
+            "b": format(server.b_pub, "x"),
+            "device": self.self_info(include_visitors=False),
+        }
 
-    def pair_confirm(self, device_id: str, proof: str, client: str) -> dict[str, Any]:
+    def pair_prove(self, device_id: str, a_hex: str, m1_hex: str, client: str) -> dict[str, Any]:
         """Step 2 on the device showing the code."""
+        if len(a_hex) > 2 * srp.WIDTH or len(m1_hex) != 64:
+            raise MeshError(400, "bad_request", "Invalid pairing request.")
         wait = self._pair_limiter.attempt(f"pair:{client}")
         if wait:
             raise MeshError(
@@ -730,20 +867,21 @@ class Mesh:
             )
         with self._lock:
             pending = self._pair_pending.pop(device_id, None)
-        if pending is None or pending[3] != client:
+        if pending is None or pending[2] != client:
             raise MeshError(400, "no_pairing", "Start pairing again.")
-        nonce_a, nonce_b, info, _, _ = pending
-        code = self.pair_code
-        expected = pair_proof(code, "b", nonce_a, nonce_b, self.id, device_id)
-        if not secrets.compare_digest(expected, str(proof)):
+        server, info, _, _ = pending
+        if not self.pairing_open:
+            raise self._not_showing()
+        try:
+            m2 = server.verify(int(a_hex, 16), bytes.fromhex(m1_hex))
+        except (srp.SRPError, ValueError):
             self._note_pair_failure()
-            raise MeshError(403, "wrong_code", "That code isn’t right.")
+            raise MeshError(403, "wrong_code", "That code isn’t right.") from None
         self._pair_limiter.reset(f"pair:{client}")
-        key = pair_key(code, nonce_a, nonce_b, self.id, device_id)
         self.trust.add(
             device_id,
             clean_name(info.get("name")),
-            key,
+            derive_pair_key(server.key or b"", self.id, device_id),
             form=clean_form(info.get("form")),
             platform=clean_platform(info.get("platform")),
         )
@@ -752,46 +890,78 @@ class Mesh:
         self._forget_twins(device_id)
         log.info("Paired with %s", log_safe(clean_name(info.get("name"))))
         self._submit(lambda: self.sync.paired(device_id))
-        return {"proof": pair_proof(code, "a", nonce_a, nonce_b, self.id, device_id)}
+        return {"m2": m2.hex()}
 
     def pair_with(self, code: str, address: str | None = None) -> Peer:
-        """Pair with the app showing ``code`` (found on the network, or at ``address``)."""
+        """Pair with the app showing ``code`` (at ``address``, or whichever has Add device open)."""
         code = "".join(ch for ch in str(code) if ch.isdigit())
         if len(code) != 6:
             raise MeshError(400, "bad_code", "Enter the 6-digit code shown on the other device.")
-        found = self.connect(address) if address else self._find_by_code(code)
+        if address:
+            return self._pair_srp(self.connect(address), code)
+        failures: list[MeshError] = []
+        for peer in self._pairing_candidates():
+            try:
+                return self._pair_srp(peer, code)
+            except MeshError as exc:
+                if exc.code == "too_many_attempts":
+                    raise
+                failures.append(exc)
+        wrong = [f for f in failures if f.code == "wrong_code"]
+        raise wrong[0] if wrong else failures[0]
+
+    def _pair_srp(self, found: Peer, code: str) -> Peer:
         # Use one address for both steps: the shared entry's host can change under
         # us (we hear a device on each of its interfaces), and the other side
         # checks that both steps come from the same address.
         peer = dataclasses.replace(found, visitors=[])
-        nonce_b = secrets.token_hex(16)
+        client = srp.Client(f"{peer.id}|{self.id}", code)
         try:
             status, data = self._http(
                 peer,
                 "POST",
-                f"{P2P}/pair",
-                body={"device": self.self_info(include_visitors=False), "nonce": nonce_b},
+                f"{P2P}/pair/begin",
+                body={"device": self.self_info(include_visitors=False)},
             )
-            if status != 200 or not _valid_nonce(data.get("nonce")):
-                raise MeshError(502, "pair_failed", _remote_message(data, "Pairing failed."))
-            nonce_a = str(data["nonce"])
-            proof_b = pair_proof(code, "b", nonce_a, nonce_b, peer.id, self.id)
+            if status == 404:
+                raise MeshError(
+                    409,
+                    "update_needed",
+                    f"{peer.name} runs an older Open Transfer. Update it, then pair again.",
+                )
+            if status != 200:
+                raise _remote_error(status, data, "Pairing failed.")
+            if (data.get("device") or {}).get("id") != peer.id:
+                raise MeshError(
+                    502, "pair_failed", f"The device at {peer.address} isn’t {peer.name}."
+                )
+            m1 = client.respond(bytes.fromhex(str(data["salt"])), int(str(data["b"]), 16))
             status, data = self._http(
-                peer, "POST", f"{P2P}/pair/confirm", body={"id": self.id, "proof": proof_b}
+                peer,
+                "POST",
+                f"{P2P}/pair/prove",
+                body={"id": self.id, "a": format(client.a_pub, "x"), "m1": m1.hex()},
             )
         except OSError as exc:
             raise MeshError(502, "unreachable", f"Lost connection to {peer.name}.") from exc
+        except (KeyError, ValueError, srp.SRPError) as exc:
+            raise MeshError(
+                502, "pair_failed", f"{peer.name} sent an invalid pairing answer."
+            ) from exc
         if status == 403:
             raise MeshError(403, "wrong_code", "That code isn’t right.")
         if status != 200:
-            raise MeshError(status, "pair_failed", _remote_message(data, "Pairing failed."))
-        expected = pair_proof(code, "a", nonce_a, nonce_b, peer.id, self.id)
-        if not secrets.compare_digest(expected, str(data.get("proof", ""))):
-            raise MeshError(502, "pair_failed", "The other device couldn’t prove it has the code.")
+            raise _remote_error(status, data, "Pairing failed.")
+        try:
+            client.check(bytes.fromhex(str(data.get("m2", ""))))
+        except (ValueError, srp.SRPError) as exc:
+            raise MeshError(
+                502, "pair_failed", "The other device couldn’t prove it has the code."
+            ) from exc
         self.trust.add(
             peer.id,
             peer.name,
-            pair_key(code, nonce_a, nonce_b, peer.id, self.id),
+            derive_pair_key(client.key or b"", peer.id, self.id),
             form=peer.form,
             platform=peer.platform,
         )
@@ -800,31 +970,28 @@ class Mesh:
         self._submit(lambda: self.sync.paired(peer.id))
         return peer
 
-    def _find_by_code(self, code: str) -> Peer:
-        if not self.discovery or not self.discovery.working:
-            raise MeshError(
-                400, "no_discovery", "Discovery is off — enter the other device’s address too."
-            )
-        hint = code_hint(code)
-        event = threading.Event()
-        results: list[Peer] = []
+    def _pairing_candidates(self) -> list[Peer]:
+        """Devices with Add device open, ones we aren't paired with first.
+
+        A multicast find reaches devices we haven't heard yet, and every device we
+        know is asked directly: an earlier answer may be stale, and multicast is
+        often blocked.
+        """
+        started = time.monotonic()
+        if self.discovery and self.discovery.working:
+            self.discovery.find()
         with self._lock:
-            self._find_waiters.setdefault(hint, []).append((event, results))
-        try:
-            for _ in range(6):
-                self.discovery.find(hint)
-                if event.wait(0.6):
-                    return results[0]
-        finally:
-            with self._lock:
-                waiters = self._find_waiters.get(hint, [])
-                waiters[:] = [w for w in waiters if w[0] is not event]
-                if not waiters:
-                    self._find_waiters.pop(hint, None)
+            online = [p for p in self._peers.values() if p.online]
+        wait_futures([self._submit(partial(self._refresh_info, p)) for p in online], timeout=2.5)
+        if self.discovery and self.discovery.working:
+            time.sleep(max(0.0, started + 0.6 - time.monotonic()))  # multicast answers
         with self._lock:
+            found = [p for p in self._peers.values() if p.online and p.pairing]
             blocked = sorted(
                 p.name for p in self._peers.values() if p.online and p.reachable is False
             )
+        if found:
+            return sorted(found, key=lambda p: self.trust.get(p.id) is not None)
         if blocked:
             names = " and ".join(blocked) if len(blocked) <= 2 else ", ".join(blocked)
             one = blocked[0] if len(blocked) == 1 else "that device"
@@ -839,8 +1006,15 @@ class Mesh:
         raise MeshError(
             404,
             "code_not_found",
-            "No device on this network is showing that code. Check it, or enter its address.",
+            "No device on this network is showing a pairing code. Open Add device on it, "
+            "or enter its address.",
         )
+
+    def _refresh_info(self, peer: Peer) -> None:
+        with contextlib.suppress(OSError):
+            status, info = self._http(peer, "GET", f"{P2P}/info", timeout=2)
+            if status == 200 and info.get("id") == peer.id:
+                self._upsert_peer(info, peer.host)
 
     def _forget_twins(self, device_id: str) -> None:
         """A device paired again under a new id replaces its old pairing.
@@ -2395,10 +2569,13 @@ class Mesh:
     def check_network(self) -> None:
         """On Windows, notice a Wi-Fi set to Public: others can't reach this PC then."""
         found = network.public_networks()
+        blocks = network.block_rules(sys.executable) if network.can_allow_firewall() else []
         with self._lock:
-            if found == self.public_networks:
+            if (found, blocks) == (self.public_networks, self.blocking_rules):
                 return
-            self.public_networks = found
+            self.public_networks, self.blocking_rules = found, blocks
+        if blocks:
+            log.warning("Windows Firewall rules block this app: %s", ", ".join(blocks))
         if found:
             log.warning(
                 "Windows treats %s as a Public network: other devices can't reach this PC",
@@ -2725,8 +2902,20 @@ class Mesh:
             "signals": len(self._mail.get(viewer.id, [])),
         }
         if viewer.is_owner:
-            state["pairing"] = {"code": self.pair_code, "expires_in": self.pair_code_expires_in()}
-            state["network"] = {"public": list(self.public_networks)}
+            state["pairing"] = {
+                "code": self.pair_code,
+                "expires_in": self.pair_code_expires_in(),
+                "open": self.pairing_open,
+            }
+            here = [p for p in self._peers.values() if p.online]
+            state["network"] = {
+                "public": list(self.public_networks),
+                # Told by the devices themselves: they hear us but can't connect to us.
+                "unreachable_by": sorted(p.name for p in here if p.reaches_us is False),
+                "reachable_by": sum(1 for p in here if p.reaches_us is True),
+                "can_allow": network.can_allow_firewall(),
+                "blocking_rules": list(self.blocking_rules),
+            }
             state["history"] = {"latest": self.history.latest()}
             state["clipboard"] = {
                 "latest": self._clip_latest,
@@ -3077,6 +3266,12 @@ def _clean_mime(value: str) -> str:
     return "application/octet-stream"
 
 
+def _move_proof(key: bytes, nonce: str, prover: str, verifier: str, to: str) -> str:
+    """A paired device's answer to "are you at ``to``?" (needs the pair's key)."""
+    message = f"open-transfer-move/1|{nonce}|{prover}|{verifier}|{to}".encode()
+    return hmac.new(key, message, hashlib.sha256).hexdigest()
+
+
 def _parse_address(address: str) -> tuple[str, int]:
     """``"192.168.1.20:5000"``, ``"http://laptop.local:5001/"`` or a bare host (port 5000)."""
     text = str(address).strip()
@@ -3120,11 +3315,14 @@ def _parse_address(address: str) -> tuple[str, int]:
     return host, port
 
 
-def _valid_nonce(value: object) -> bool:
-    return (
-        isinstance(value, str)
-        and 16 <= len(value) <= 128
-        and all(c in "0123456789abcdef" for c in value)
+def _remote_error(status: int, data: dict[str, Any], fallback: str) -> MeshError:
+    """The other device's error, as ours (its code if it gave one)."""
+    error = data.get("error")
+    code = error.get("code") if isinstance(error, dict) else None
+    return MeshError(
+        status if 400 <= status < 500 else 502,
+        str(code)[:40] if isinstance(code, str) else "pair_failed",
+        _remote_message(data, fallback),
     )
 
 

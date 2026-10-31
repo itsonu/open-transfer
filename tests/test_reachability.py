@@ -4,6 +4,8 @@ app says so, by name, instead of "No device is showing that code"."""
 
 from __future__ import annotations
 
+import os
+import sys
 from typing import Any
 
 import pytest
@@ -26,7 +28,7 @@ class Discovery:
 
     working = True
 
-    def find(self, hint: str) -> None:
+    def find(self) -> None:
         pass
 
 
@@ -89,5 +91,270 @@ def test_pairing_names_the_device_its_firewall_blocks(
 def test_pairing_without_such_a_device_keeps_the_plain_message(make_node: NodeFactory) -> None:
     mac = make_node("Mac")
     mac.mesh.discovery = Discovery()  # type: ignore[assignment]
-    with pytest.raises(MeshError, match="No device on this network is showing that code"):
+    with pytest.raises(MeshError, match="No device on this network is showing a pairing code"):
         mac.mesh.pair_with("822328")
+
+
+# The other side of it: the PC learns from those who can't reach it. Its own hello
+# gets through (outgoing connections are allowed), and the answer says so.
+
+
+def pc_and_mac(make_node: NodeFactory):  # type: ignore[no-untyped-def]
+    pc, mac = make_node("Sonu-PC"), make_node("Mac")
+    pc.mesh.connect(f"127.0.0.1:{mac.port}")  # the PC reaches the Mac
+    assert pc.mesh._hello(pc.mesh._peers[mac.mesh.id])  # and says hello, so the Mac knows it
+    return pc, mac
+
+
+def mac_cannot_reach(pc, mac) -> None:  # type: ignore[no-untyped-def]
+    mac.mesh._peers[pc.mesh.id].reachable = False  # what a dropped connection leaves
+
+
+def test_a_device_that_cant_reach_us_says_so(make_node: NodeFactory) -> None:
+    pc, mac = pc_and_mac(make_node)
+    mac_cannot_reach(pc, mac)
+    assert pc.mesh._hello(pc.mesh._peers[mac.mesh.id]) is True
+    network = owner(pc).state()["network"]
+    assert network["unreachable_by"] == ["Mac"]
+    assert network["reachable_by"] == 0
+
+
+def test_once_it_can_reach_us_the_warning_goes(make_node: NodeFactory) -> None:
+    pc, mac = pc_and_mac(make_node)
+    mac_cannot_reach(pc, mac)
+    pc.mesh._hello(pc.mesh._peers[mac.mesh.id])
+    mac.mesh._peers[pc.mesh.id].reachable = True
+    pc.mesh._hello(pc.mesh._peers[mac.mesh.id])
+    network = owner(pc).state()["network"]
+    assert network["unreachable_by"] == []
+    assert network["reachable_by"] == 1
+
+
+def test_only_devices_still_here_count(make_node: NodeFactory) -> None:
+    pc, mac = pc_and_mac(make_node)
+    mac_cannot_reach(pc, mac)
+    pc.mesh._hello(pc.mesh._peers[mac.mesh.id])
+    pc.mesh._peers[mac.mesh.id].last_seen = 0  # the Mac left
+    assert owner(pc).state()["network"]["unreachable_by"] == []
+
+
+# "Allow on this network": one narrow inbound rule for this app, on the network type
+# in use, through one Windows admin (UAC) prompt — only when the owner asks.
+
+
+def _script(cmd: list[str]) -> str:
+    import base64
+
+    encoded = cmd[cmd.index("-ArgumentList") + 1].split("'-EncodedCommand','")[1].rstrip("';")
+    return base64.b64decode(encoded).decode("utf-16-le")
+
+
+def test_the_firewall_rule_is_narrow() -> None:
+    from open_transfer import network
+
+    cmd = network.allow_command(r"C:\Users\o'neil\Desktop\open-transfer.exe", 5000, "Private")
+    assert cmd[:2] == ["powershell", "-NoProfile"]
+    assert "-Verb RunAs" in cmd[-1]  # Windows asks the person (UAC)
+    assert cmd[-1].endswith("exit $p.ExitCode")  # the elevated copy's result, not Start-Process's
+    script = _script(cmd[-1].split())
+    assert script.startswith("$ErrorActionPreference = 'Stop';")  # a refused rule fails
+    assert "-Program 'C:\\Users\\o''neil\\Desktop\\open-transfer.exe'" in script  # quoted safely
+    assert "-Profile Private" in script
+    assert "-Protocol TCP -LocalPort 5000" in script
+    assert "-Protocol UDP -LocalPort 47823" in script  # nearby devices' announcements
+    assert "-Action Allow" in script
+    assert "Set-NetFirewallProfile" not in script  # never touches the firewall itself
+    assert "Enabled False" not in script
+
+
+@pytest.mark.parametrize(
+    ("returncode", "stderr", "result"),
+    [
+        (0, "", "allowed"),
+        (1, "The operation was canceled by the user.", "cancelled"),
+        (1, "boom", "failed"),
+    ],
+)
+def test_allowing_reports_what_happened(returncode: int, stderr: str, result: str) -> None:
+    from types import SimpleNamespace
+
+    from open_transfer import network
+
+    def run(*_a: Any, **_k: Any) -> SimpleNamespace:
+        return SimpleNamespace(returncode=returncode, stdout="", stderr=stderr)
+
+    assert network.allow_firewall(r"C:\app.exe", 5000, "Private", run=run) == result
+
+
+def test_only_the_owner_of_the_windows_app_can_allow(
+    make_node: NodeFactory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from open_transfer import network
+    from tests.test_mesh import visitor
+
+    pc = make_node("Sonu-PC")
+    status, data = owner(pc)("POST", "/api/network/allow")
+    assert status == 501  # not the packaged Windows app (never python.exe)
+    assert data["error"]["code"] == "unsupported"
+    assert owner(pc).state()["network"]["can_allow"] is False
+
+    asked: list[tuple[Any, ...]] = []
+    monkeypatch.setattr(network, "can_allow_firewall", lambda: True)
+    monkeypatch.setattr(network, "allow_firewall", lambda *a, **k: asked.append(a) or "allowed")
+    assert owner(pc).state()["network"]["can_allow"] is True
+    status, _ = visitor(pc, "Phone")("POST", "/api/network/allow")
+    assert status == 403
+    assert asked == []
+    status, data = owner(pc)("POST", "/api/network/allow")
+    assert (status, data) == (200, {"result": "allowed"})
+    assert asked[0][1:] == (pc.port, "Private")
+
+
+# Windows' own first-run prompt, cancelled, leaves Block rules for the .exe, and Block
+# beats Allow. Only rules for this .exe are ever touched, and only when the owner asks.
+
+
+def test_block_rules_for_this_app_only() -> None:
+    from types import SimpleNamespace
+
+    from open_transfer import network
+
+    seen: list[str] = []
+
+    def run(argv: list[str], **_k: Any) -> SimpleNamespace:
+        seen.append(argv[-1])
+        return SimpleNamespace(
+            returncode=0, stdout="open-transfer.exe\r\nOpen Transfer\r\n", stderr=""
+        )
+
+    exe = r"C:\Users\o'neil\open-transfer.exe"
+    assert network.block_rules(exe, run=run, platform="win32") == [
+        "open-transfer.exe",
+        "Open Transfer",
+    ]
+    assert "-Program 'C:\\Users\\o''neil\\open-transfer.exe'" in seen[0]
+    assert "'Inbound'" in seen[0]
+    assert "'Block'" in seen[0]
+    assert network.block_rules(exe, run=run, platform="darwin") == []
+
+
+def test_unblocking_removes_only_this_apps_inbound_block_rules() -> None:
+    from open_transfer import network
+
+    exe = r"C:\app\open-transfer.exe"
+    plain = _script(network.allow_command(exe, 5000, "Private")[-1].split())
+    assert "Remove-NetFirewallRule" not in plain
+    script = _script(network.allow_command(exe, 5000, "Private", unblock=True)[-1].split())
+    remove, _, rest = script.partition("Remove-NetFirewallRule")
+    assert (
+        remove.count("Get-NetFirewallApplicationFilter -Program 'C:\\app\\open-transfer.exe'") == 1
+    )
+    assert "Direction -eq 'Inbound'" in remove
+    assert "Action -eq 'Block'" in remove
+    assert "New-NetFirewallRule" in rest  # then the narrow Allow rules
+    assert "Set-NetFirewallProfile" not in script
+
+
+def test_the_owner_sees_the_block_and_allowing_removes_it(
+    make_node: NodeFactory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from open_transfer import network
+
+    asked: list[dict[str, Any]] = []
+    monkeypatch.setattr(network, "can_allow_firewall", lambda: True)
+    monkeypatch.setattr(network, "block_rules", lambda exe: ["open-transfer.exe"])
+    monkeypatch.setattr(network, "allow_firewall", lambda *a, **k: asked.append(k) or "allowed")
+    pc = make_node("Sonu-PC")
+    pc.mesh.check_network()
+    assert owner(pc).state()["network"]["blocking_rules"] == ["open-transfer.exe"]
+    assert owner(pc)("POST", "/api/network/allow")[0] == 200
+    assert asked == [{"unblock": True}]
+    monkeypatch.setattr(network, "block_rules", lambda exe: [])
+    pc.mesh.check_network()
+    assert owner(pc).state()["network"]["blocking_rules"] == []
+    assert owner(pc)("POST", "/api/network/allow")[0] == 200
+    assert asked[-1] == {"unblock": False}
+
+
+# The real thing, on GitHub's Windows runners only (admin, no UAC prompt): never on
+# someone's own PC, where it would change their firewall.
+on_windows_ci = pytest.mark.skipif(
+    sys.platform != "win32" or os.environ.get("GITHUB_ACTIONS") != "true",
+    reason="changes the firewall: GitHub's Windows runners only",
+)
+
+
+def _ps(script: str) -> str:
+    import subprocess
+
+    done = subprocess.run(
+        ["powershell", "-NoProfile", "-Command", script],  # noqa: S607 - Windows PowerShell
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    return done.stdout
+
+
+def _rules(program: str) -> list[str]:
+    """Each rule for ``program`` (quoted for PowerShell): "<profile> <action> <proto> <port>"."""
+    out = _ps(
+        f"Get-NetFirewallApplicationFilter -Program '{program}' | Get-NetFirewallRule | "
+        'ForEach-Object { "$($_.Profile) $($_.Action) " + ($_ | Get-NetFirewallPortFilter | '
+        'ForEach-Object { "$($_.Protocol) $($_.LocalPort)" }) }'
+    )
+    return sorted(line.strip() for line in out.splitlines() if line.strip())
+
+
+def _remove(program: str) -> None:
+    _ps(
+        f"Get-NetFirewallApplicationFilter -Program '{program}' | Get-NetFirewallRule | "
+        "Remove-NetFirewallRule"
+    )
+
+
+@on_windows_ci
+def test_windows_really_gets_the_narrow_rule(tmp_path: Any) -> None:
+    from open_transfer import network
+
+    program = str(tmp_path / "o'neil" / "open-transfer.exe")
+    try:
+        assert network.allow_firewall(program, 5123, "Private") == "allowed"
+        assert _rules(program.replace("'", "''")) == [
+            "Private Allow TCP 5123",
+            "Private Allow UDP 47823",
+        ]
+    finally:
+        _remove(program.replace("'", "''"))
+
+
+@on_windows_ci
+def test_a_rule_windows_refuses_is_not_reported_as_allowed(tmp_path: Any) -> None:
+    from open_transfer import network
+
+    program = str(tmp_path / "open-transfer.exe")
+    try:
+        assert network.allow_firewall(program, 5123, "NoSuchProfile") == "failed"
+    finally:
+        _remove(program)
+
+
+@on_windows_ci
+def test_windows_block_rules_for_this_app_are_found_and_removed(tmp_path: Any) -> None:
+    from open_transfer import network
+
+    program, other = str(tmp_path / "open-transfer.exe"), str(tmp_path / "someone-else.exe")
+    try:
+        for exe in (program, other):  # what a cancelled first-run prompt leaves behind
+            _ps(
+                f"New-NetFirewallRule -DisplayName 'probe block' -Direction Inbound "
+                f"-Program '{exe}' -Action Block"
+            )
+        assert network.block_rules(program) == ["probe block"]
+        assert network.allow_firewall(program, 5123, "Private", unblock=True) == "allowed"
+        assert network.block_rules(program) == []
+        assert _rules(program) == ["Private Allow TCP 5123", "Private Allow UDP 47823"]
+        assert network.block_rules(other) == ["probe block"]  # never someone else's
+    finally:
+        _remove(program)
+        _remove(other)

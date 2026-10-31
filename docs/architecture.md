@@ -19,7 +19,8 @@ src/open_transfer/
 ├── desktop.py      desktop app: native window (pywebview), smoke test
 ├── instance.py     one running app per state folder (lock file, bring-to-front)
 ├── android.py      entry points the Android app calls through Chaquopy
-├── devices.py      device identity, paired devices, request signing, pairing proofs
+├── devices.py      device identity, paired devices, request signing, pair keys
+├── srp.py          SRP-6a over the pairing code (RFC 5054, 2048-bit, SHA-256)
 ├── discovery.py    UDP multicast announce / reply / find / bye
 ├── mesh.py         nearby apps, visitors, incoming offers, outgoing fan-out jobs, pairing
 ├── mesh_api.py     HTTP routes: app↔app (/api/p2p/v1) and the UI (/api/state, /api/send…)
@@ -30,7 +31,8 @@ src/open_transfer/
 ├── archive.py      streaming ZIP writer for "Download all"
 ├── network.py      LAN IP detection, host name, free-port search
 ├── templates/      index.html (app shell), error.html
-└── static/         lib.js (helpers) · nearby.js (devices, sending, pairing) · direct.js (WebRTC) · app.js (shell), app.css
+└── static/         lib.js (helpers) · nearby.js (devices, sending, pairing, QR scanning) · direct.js (WebRTC) · app.js (shell), app.css
+                    vendor/jsQR.js (QR decoding where the browser has no BarcodeDetector; loaded only when a scan starts)
 tests/              pytest: storage, API, security, CLI; tests/e2e: Playwright
 android/            Android app: Kotlin shell (WebView, file picker, QR scanner) around this package
 scripts/            build_app.py (standalone + desktop apps, .dmg), build_site.py (website), screenshots.py
@@ -74,7 +76,7 @@ sequenceDiagram
 * **Presence.** Apps are "nearby" for 15 s after the last announce or hello;
   visitors for 25 s after their last poll. Leaving sends `bye`, so others update
   at once. A device dropping out never affects the others' transfers.
-* **Trust.** Pairing (6-digit code, HMAC proofs, never sent in clear) stores a
+* **Trust.** Pairing (SRP over a 6-digit code, only while Add device is open; see `srp.py`) stores a
   shared key; signed requests from a paired app are accepted without asking.
   Everyone else is asked; `--paired-only` refuses strangers outright.
 
@@ -140,7 +142,7 @@ Plus:
 - `safe_filename` keeps Unicode but strips directories, control and reserved characters, leading dots and Windows device names, and caps the length at 240 bytes. `Storage.resolve` re-checks the name and refuses hidden files, symlinks and anything whose real parent isn't the shared folder.
 - Responses carry a strict CSP (`script-src 'self'`, no inline script), `nosniff`, `X-Frame-Options: DENY`, `Referrer-Policy: no-referrer`, COOP/CORP. File downloads add `Content-Security-Policy: sandbox` and are always `attachment`, except `?inline=1` for a short allow-list of image/audio/video types (used for thumbnails).
 - PIN attempts are limited to 5 per minute per client address (per forwarded address with `--behind-proxy`) and compared in constant time. The session key is stored in `.open-transfer/secret` (mode 0600) so logins survive restarts.
-- The QR code embeds `?pin=…`; the server signs the visitor in and immediately redirects to `/` so the PIN doesn't stay in the address bar or history.
+- The QR code never holds the PIN. It carries `?join=<expiry>.<mac>`, a token valid for 10 minutes whose MAC covers the expiry and the current PIN (so it can't be extended or forged, and dies when the PIN changes). The server signs the visitor in and immediately redirects to `/` so the token doesn't stay in the address bar or history. A hand-typed `?pin=` link still works.
 
 ## Front end
 

@@ -576,8 +576,13 @@ main {
   text-align: left;
 }
 
+.dropzone.is-compact > :not(.drop-icon) {
+  grid-column: 2; /* title, link, clipboard, hint: always beside the icon */
+  justify-self: start; /* the clipboard button hugs its label */
+}
+
 .dropzone.is-compact .drop-icon {
-  grid-row: span 3;
+  grid-row: 1 / span 4;
   width: 48px;
   height: 48px;
   margin: 0;
@@ -1411,6 +1416,10 @@ a.row-title:hover {
   gap: 6px;
   color: var(--text-2);
   font-size: 13px;
+}
+
+.me-allow {
+  margin-top: 6px;
 }
 
 .me-status::before {

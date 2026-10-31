@@ -130,6 +130,22 @@ def test_send_clipboard_stages_its_text(mac: Server, clip_page) -> None:  # type
     expect(page.locator("#send-bar-files")).to_contain_text("Clipboard")
 
 
+def test_the_android_app_reads_the_clipboard_itself(mac: Server, browser) -> None:  # type: ignore[no-untyped-def]
+    # Android's WebView never grants the page clipboard access (it has no prompt
+    # to ask with); the app reads it natively through its bridge instead.
+    context = browser.new_context()  # no clipboard permission, like the WebView
+    page = context.new_page()
+    page.add_init_script(
+        "window.OpenTransferAndroid = { readClipboard: () => 'Flight AB123, gate 14' };"
+    )
+    page.goto(mac.url)
+    expect(page.locator("#main-view")).to_be_visible(timeout=10_000)
+    page.locator("#dropzone-clipboard").click()
+    expect(page.locator("#send-bar-files")).to_contain_text("Clipboard")
+    expect(page.locator("#toasts")).not_to_contain_text("Allow clipboard access")
+    context.close()
+
+
 # ------------------------------------------------------------------- sync
 
 
@@ -142,7 +158,7 @@ def pair_of_apps(tmp_path: Path) -> Iterator[tuple[Server, Server]]:
     second = _start(tmp_path, name="Bravo", owner=True)
     bravo = next(second)
     gens.append(second)
-    code = call(bravo, "GET", "/api/state")["pairing"]["code"]
+    code = call(bravo, "POST", "/api/pair/open")["code"]
     port = bravo.url.rsplit(":", 1)[1]
     call(alpha, "POST", "/api/pair", {"code": code, "address": f"127.0.0.1:{port}"})
     yield alpha, bravo
@@ -249,5 +265,31 @@ def test_auto_share_sends_what_you_copy(pair_of_apps: tuple[Server, Server], bro
         a.evaluate("navigator.clipboard.writeText('Tr0ub4dor&3xQ!')")
         expect(a.locator(".toast", has_text="looks private")).to_be_visible(timeout=5000)
         assert received() == ["Copied just now"]
+    finally:
+        ctx.close()
+
+
+def test_where_clipboard_sync_can_run_it_is_the_only_switch(
+    pair_of_apps: tuple[Server, Server], browser
+) -> None:  # type: ignore[no-untyped-def]
+    # U3: with sync off, "Share automatically while this window is open" sat next to the
+    # small "Clipboard sync Off" button and was taken for it. Where the app can reach the
+    # clipboard itself, sync is the switch: the window-only box goes, and stops sharing.
+    alpha, _bravo = pair_of_apps
+    ctx = browser.new_context(permissions=CLIPBOARD)
+    a = ctx.new_page()
+
+    def native_access(route) -> None:  # type: ignore[no-untyped-def]
+        status = route.fetch().json()
+        route.fulfill(json={**status, "clipboard_access": True})
+
+    try:
+        a.add_init_script("localStorage.setItem('ot-clip-auto', '1')")  # ticked before
+        a.route("**/api/sync", native_access)
+        a.goto(alpha.url)
+        expect(a.locator("#clip-sync-state")).to_have_text("Off", timeout=10_000)
+        expect(a.locator("#clip-sync-note")).to_be_visible()
+        expect(a.locator("label.clip-auto")).to_be_hidden()
+        assert a.evaluate("localStorage.getItem('ot-clip-auto')") == "0"
     finally:
         ctx.close()

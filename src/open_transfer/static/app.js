@@ -369,7 +369,7 @@ function fileActions(file, row) {
   const native = nativeApp()?.openFile && owner;
   const items = [];
   if (kind) items.push({ label: "Preview", icon: "eye", run: () => showPreview(file, row.querySelector(".row-more")) });
-  if (native) items.push({ label: "Open", icon: "download", run: () => nativeApp().openFile(file.name) });
+  if (native) items.push({ label: "Open", icon: "file", run: () => nativeApp().openFile(file.name) });
   else if (owner && state.info.local_open && file.kind !== "app") items.push({ label: "Open", icon: "file", run: () => localAction(file, "open") });
   if (owner && state.info.local_open) items.push({ label: "Show in folder", icon: "folder", run: () => localAction(file, "reveal") });
   if (kind === "text" && file.size <= COPYABLE_TEXT_BYTES) items.push({ label: "Copy text", icon: "copy", run: () => copyFileText(file) });
@@ -1004,6 +1004,17 @@ function setupDropAndPaste() {
 
   document.addEventListener("paste", (event) => {
     if (event.target.closest?.("input, textarea, [contenteditable]") || !canDrop()) return;
+    if (document.querySelector("dialog[open]")) {
+      // Never queue a send behind a sheet. On "Enter a code", the paste is the code.
+      const code = $("#pair-input");
+      if (code?.offsetParent) {
+        event.preventDefault();
+        code.value = event.clipboardData?.getData("text/plain") || "";
+        code.dispatchEvent(new Event("input"));
+        code.focus();
+      }
+      return;
+    }
     const files = [...(event.clipboardData?.files || [])];
     if (files.length) {
       event.preventDefault();

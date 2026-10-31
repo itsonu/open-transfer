@@ -36,7 +36,7 @@ def _start(
     port = find_free_port(host, 18000)
     root = tmp_path / name
     env = {**os.environ, "NO_COLOR": "1", "OPEN_TRANSFER_OWNER_LOOPBACK": "1" if owner else "0"}
-    mode = [] if owner else ["--share-folder"]
+    mode = [] if owner else ["--share-folder", "--allow-delete"]  # the classic suite deletes
     proc = subprocess.Popen(
         [sys.executable, "-m", "open_transfer", str(root), "--host", host,
          "--port", str(port), "--no-browser", "--no-qr", "--no-discovery", "--name", name,

@@ -87,6 +87,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="visitors can download but not upload",
     )
     parser.add_argument(
+        "--allow-delete",
+        action="store_true",
+        default=None,
+        help="shared-folder mode: visitors can delete files (off by default)",
+    )
+    parser.add_argument(
         "--no-delete", action="store_true", default=None, help="visitors cannot delete files"
     )
     parser.add_argument(
@@ -198,7 +204,8 @@ def config_from_args(args: argparse.Namespace) -> Config:
         pin=str(pin) if pin else None,
         max_upload_size=parse_size(str(_pick(args.max_size, "MAX_SIZE", "0"))),
         allow_upload=not read_only,
-        allow_delete=not (read_only or bool(args.no_delete) or env_bool("NO_DELETE")),
+        allow_delete=(bool(args.allow_delete) or env_bool("ALLOW_DELETE"))
+        and not (read_only or bool(args.no_delete) or env_bool("NO_DELETE")),
         allow_browse=not (bool(args.receive_only) or env_bool("RECEIVE_ONLY")),
         public_url=_pick(args.public_url, "PUBLIC_URL"),  # type: ignore[arg-type]
         allowed_hosts=tuple(allowed),
@@ -243,7 +250,7 @@ def _print_banner(
         out.write(f"  {style.dim('PIN')}                {style.bold(config.pin)}\n")
     out.write(f"  {style.dim('Saving files to')}    {config.storage_dir}\n")
     if show_qr and (ips or config.public_url):
-        qr_url = share + (f"/?pin={config.pin}" if config.pin else "")
+        qr_url = share  # never the PIN: people type it (it's printed just above)
         try:
             import segno
 

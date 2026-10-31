@@ -207,6 +207,20 @@ def test_read_only_mode(make_app: AppFactory) -> None:
     assert client.get("/api/files").status_code == 200
 
 
+def test_visitors_cant_delete_by_default(tmp_path: Path) -> None:
+    from open_transfer.app import create_app
+    from open_transfer.config import Config
+
+    app = create_app(
+        Config(storage_dir=tmp_path, share_folder=True, owner_loopback=False, discovery=False)
+    )
+    client = app.test_client()
+    (tmp_path / "a.txt").write_bytes(b"abc")
+    assert client.get("/api/info").json["permissions"]["delete"] is False
+    assert client.delete("/api/files/a.txt").status_code == 403
+    assert (tmp_path / "a.txt").exists()
+
+
 def test_no_delete_mode(make_app: AppFactory) -> None:
     client = make_app(allow_delete=False).test_client()
     upload(client, "a.txt")
