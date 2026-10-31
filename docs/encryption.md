@@ -197,6 +197,19 @@ ask. If you click Deny, pairings are locked (above) until you allow it.
 `/api/state` carries only the store's name, whether it's protected, and the
 names of locked pairings.
 
+## Review (nonces, keys, replay, metadata)
+
+| Check | Finding |
+|---|---|
+| File nonces | Unique: every file has its own key (HKDF over the pair or one-off key, a random 32-byte salt per offer, both app ids, target, index, size), and the nonce is the record counter (11 bytes, 2⁸⁸ records) plus the last-flag. A piece sent again after an error is the *same* encrypted body (`_push_chunked` keeps it), never new bytes under an old nonce. **Retry** makes a new offer, so a new salt and new keys. |
+| Metadata nonces | One seal per meta key (the key is new with every offer), random 96-bit nonce. |
+| Vault nonces | Random 96-bit nonces under one vault key; every save reseals every key, but that's thousands of seals, far below the 2³² bound for random nonces. `--rotate-keys` starts a new key. |
+| Key derivation | HKDF-SHA256 with a distinct label per use (`open-transfer-file/1`, `-meta/1`, `-verify/1`, `-eph/1`, `pair-key/2`). The pair key never encrypts anything itself. |
+| One-off keys | X25519 from `cryptography`, which refuses a point that yields an all-zero secret (a 400, tested). The receiver's key lasts one run and is never stored; the sender's is new per offer. |
+| Replay | Signed requests carry a timestamp (±120 s) and are accepted once. A replayed record or piece fails: each transfer and file has its own key. Uploads need the session secret; between unpaired apps a listener can see that secret, but can't make records that decrypt. |
+| Metadata integrity | Sizes are in the file key, so a changed size fails decryption. Names, types and sender are sealed (AES-GCM). The plain `from` of an unpaired offer is not authenticated, like everything about an unpaired app. |
+| Partial files | A file is written to `.part` and kept only after its last record and the MAC check pass; on any failure the `.part` is deleted (`test_a_tampered_*`, `test_unpaired_tampering_leaves_nothing`, `test_a_canceled_encrypted_transfer_leaves_nothing`). |
+
 ## Failure reasons the user sees
 
 | Cause | Receiver | Sender |
@@ -231,9 +244,25 @@ AES-256-GCM on its own (encrypt and decrypt, one core): about 2 GB/s.
 * **Memory.** Flat: the whole process stays near 70 MB for a 1 GB file. A
   file is never held in memory, only one 64 KiB record per stream, or one
   2 MiB piece when resuming.
-* **Not measured here.** Android phones (no CI runner has one) and
-  Windows. On ARMv8 phones AES has hardware instructions, but the cost
-  there is unmeasured until a device run.
+
+**Every OS in CI** (`bench_encryption.py --mb 256` on GitHub's runners, run
+41222156917: shared, slower CPUs than the M5; same one-process setup):
+
+| Runner | AES-GCM alone | Plain, 1 stream | Encrypted, 1 stream | Encrypted, 4 at once | Peak memory | 1 KiB latency (plain / encrypted) |
+|---|---|---|---|---|---|---|
+| Linux x64 | 460 MB/s | 347 MB/s | 178 MB/s | 105 MB/s | 55–78 MB | 4.4 / 4.7 ms |
+| Windows x64 | 460 MB/s | 227 MB/s | 143 MB/s | 105 MB/s | (fixed after this run) | 32 / 9 ms |
+| macOS arm64 | 1839 MB/s | 465 MB/s | 253 MB/s | 173 MB/s | 61–73 MB | 4.3 / 9.8 ms |
+
+**Android emulator** (the CI smoke test, phone → runner over the emulator's
+network, 32 MB): 3.8 MB/s plain, 3.2 MB/s encrypted. The emulator's
+networking is the limit there, not the cipher; it shows the encrypted path
+works on Android and costs little, not what a phone does.
+
+* **Not measured:** a real Android phone, and Windows on real hardware.
+  On ARMv8 phones AES has hardware instructions, but their cost stays
+  unmeasured until a device run. Latency is a few ms either way: a 1 KiB file
+  is one record.
 
 ## Older versions
 

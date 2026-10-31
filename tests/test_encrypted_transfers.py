@@ -296,6 +296,59 @@ def test_a_one_off_key_for_another_run_is_refused(make_node: NodeFactory) -> Non
     assert not (Path(b.config.storage_dir) / "k.txt").exists()
 
 
+def unpaired_accepting(make_node: NodeFactory, *names: str) -> list[Node]:
+    """Alpha plus unpaired receivers that accept by themselves (--auto-accept)."""
+    a = make_node("Alpha")
+    others = [make_node(n, auto_accept=True) for n in names]
+    for other in others:
+        connect(a, other)
+    return [a, *others]
+
+
+def test_unpaired_group_send_gives_each_receiver_its_own_one_off_key(
+    make_node: NodeFactory, tap: Tap
+) -> None:
+    a, b, c = unpaired_accepting(make_node, "Bravo", "Charlie")
+    alice = owner(a)
+    payload = os.urandom(300_000)
+    ids = [device_id(alice, "Bravo"), device_id(alice, "Charlie")]
+    job = send(alice, ids, [("both.bin", payload)])
+    wait_for(lambda: target_states(alice, job) == {"Bravo": "accepted", "Charlie": "accepted"})
+    _, result = upload(alice, job, 0, payload)
+    assert all(t["ok"] for t in result["targets"].values()), result
+    for node in (b, c):
+        assert (Path(node.config.storage_dir) / "both.bin").read_bytes() == payload
+        assert not seen(tap, node, payload)
+    # Different one-off keys: the two ciphertexts share no 64-byte run.
+    wire_b, wire_c = tap.to(b), tap.to(c)
+    assert not any(wire_b[i : i + 64] in wire_c for i in range(0, 200_000, 4999))
+
+
+def test_an_unpaired_big_file_goes_in_encrypted_pieces(make_node: NodeFactory, tap: Tap) -> None:
+    a, b = unpaired_accepting(make_node, "Bravo")
+    alice = owner(a)
+    payload = os.urandom(5_000_000)  # 2 MiB resumable pieces
+    job = send(alice, [device_id(alice, "Bravo")], [("big.bin", payload)])
+    wait_for(lambda: target_states(alice, job) == {"Bravo": "accepted"})
+    result = send_in_chunks(alice, job, payload, "unpaired-big")
+    assert all(t["ok"] for t in result["targets"].values()), result
+    assert (Path(b.config.storage_dir) / "big.bin").read_bytes() == payload
+    assert not seen(tap, b, payload)
+
+
+def test_unpaired_tampering_leaves_nothing(make_node: NodeFactory, tap: Tap) -> None:
+    a, b = unpaired_accepting(make_node, "Bravo")
+    alice = owner(a)
+    payload = os.urandom(200_000)
+    job = send(alice, [device_id(alice, "Bravo")], [("t.bin", payload)])
+    wait_for(lambda: target_states(alice, job) == {"Bravo": "accepted"})
+    tap.flip_at[b.port] = 1_000
+    _, result = upload(alice, job, 0, payload)
+    assert not any(t["ok"] for t in result["targets"].values()), result
+    assert not (Path(b.config.storage_dir) / "t.bin").exists()
+    assert not list((Path(b.config.storage_dir) / ".open-transfer" / "incoming").glob("*.part"))
+
+
 def test_an_older_paired_app_gets_plain_files_labelled(
     make_node: NodeFactory, monkeypatch: pytest.MonkeyPatch
 ) -> None:
