@@ -24,6 +24,7 @@ from tests.test_mesh import owner
 def fetch_tls(port: int, path: str = "/") -> tuple[int, bytes, bytes]:
     """GET over TLS without checking the (self-signed) certificate; returns its DER too."""
     context = ssl.create_default_context()
+    context.minimum_version = ssl.TLSVersion.TLSv1_2
     context.check_hostname = False
     context.verify_mode = ssl.CERT_NONE
     request = f"GET {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n\r\n"

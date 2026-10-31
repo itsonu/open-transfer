@@ -145,6 +145,7 @@ def check_keys_and_https(port: int) -> None:
     if not https.get("port"):
         sys.exit(f"--https didn't start: {state.get('https')}")
     context = ssl.create_default_context()
+    context.minimum_version = ssl.TLSVersion.TLSv1_2
     context.check_hostname, context.verify_mode = False, ssl.CERT_NONE  # self-signed
     url = f"https://127.0.0.1:{https['port']}/api/health"
     with urllib.request.urlopen(url, timeout=5, context=context) as res:

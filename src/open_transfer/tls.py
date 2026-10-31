@@ -17,6 +17,7 @@ import hashlib
 import ipaddress
 import logging
 import os
+import ssl
 import tempfile
 from pathlib import Path
 from typing import Any
@@ -102,4 +103,6 @@ def ssl_adapter(cert_pem: bytes, key_pem: bytes) -> Any:
             fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
             with os.fdopen(fd, "wb") as fh:
                 fh.write(data)
-        return BuiltinSSLAdapter(cert_path, key_path)
+        adapter = BuiltinSSLAdapter(cert_path, key_path)
+    adapter.context.minimum_version = ssl.TLSVersion.TLSv1_2  # Python's default too; said here
+    return adapter
