@@ -85,8 +85,10 @@ def build(spec: Path, packages: list[str]) -> None:
         say("Creating build environment (.build-venv)…")
         venv.EnvBuilder(with_pip=True, clear=True).create(VENV)
     say(f"Installing {', '.join(packages)}…")
+    # A cryptography built from source links the system's OpenSSL, which clashes with
+    # Python's own in the bundle: take a wheel or fail here.
     run(venv_python(), "-m", "pip", "install", "-q", "--disable-pip-version-check",
-        "--upgrade", *packages)  # fmt: skip
+        "--only-binary", "cryptography", "--upgrade", *packages)  # fmt: skip
     if spec == DESKTOP_SPEC:
         say("Making the app icons…")
         run(venv_python(), ROOT / "scripts" / "make_icons.py", "--out", ICONS)
