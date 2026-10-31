@@ -53,7 +53,7 @@ jobs:
           allow-prereleases: true
           cache: pip
       - run: pip install -e ".[dev]"
-      - run: pytest -m "not e2e" --cov --cov-report=term-missing --cov-report=xml
+      - run: pytest -m "not e2e" -rs --cov --cov-report=term-missing --cov-report=xml
       - uses: actions/upload-artifact@v7
         if: matrix.os == 'ubuntu-latest' && matrix.python == '3.13'
         with:

@@ -4,6 +4,8 @@ app says so, by name, instead of "No device is showing that code"."""
 
 from __future__ import annotations
 
+import os
+import sys
 from typing import Any
 
 import pytest
@@ -143,7 +145,7 @@ def test_only_devices_still_here_count(make_node: NodeFactory) -> None:
 def _script(cmd: list[str]) -> str:
     import base64
 
-    encoded = cmd[cmd.index("-ArgumentList") + 1].split("'-EncodedCommand','")[1].rstrip("'")
+    encoded = cmd[cmd.index("-ArgumentList") + 1].split("'-EncodedCommand','")[1].rstrip("';")
     return base64.b64decode(encoded).decode("utf-16-le")
 
 
@@ -153,7 +155,9 @@ def test_the_firewall_rule_is_narrow() -> None:
     cmd = network.allow_command(r"C:\Users\o'neil\Desktop\open-transfer.exe", 5000, "Private")
     assert cmd[:2] == ["powershell", "-NoProfile"]
     assert "-Verb RunAs" in cmd[-1]  # Windows asks the person (UAC)
+    assert cmd[-1].endswith("exit $p.ExitCode")  # the elevated copy's result, not Start-Process's
     script = _script(cmd[-1].split())
+    assert script.startswith("$ErrorActionPreference = 'Stop';")  # a refused rule fails
     assert "-Program 'C:\\Users\\o''neil\\Desktop\\open-transfer.exe'" in script  # quoted safely
     assert "-Profile Private" in script
     assert "-Protocol TCP -LocalPort 5000" in script
@@ -204,3 +208,66 @@ def test_only_the_owner_of_the_windows_app_can_allow(
     status, data = owner(pc)("POST", "/api/network/allow")
     assert (status, data) == (200, {"result": "allowed"})
     assert asked[0][1:] == (pc.port, "Private")
+
+
+# The real thing, on GitHub's Windows runners only (admin, no UAC prompt): never on
+# someone's own PC, where it would change their firewall.
+on_windows_ci = pytest.mark.skipif(
+    sys.platform != "win32" or os.environ.get("GITHUB_ACTIONS") != "true",
+    reason="changes the firewall: GitHub's Windows runners only",
+)
+
+
+def _ps(script: str) -> str:
+    import subprocess
+
+    done = subprocess.run(
+        ["powershell", "-NoProfile", "-Command", script],  # noqa: S607 - Windows PowerShell
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    return done.stdout
+
+
+def _rules(program: str) -> list[str]:
+    """Each rule for ``program`` (quoted for PowerShell): "<profile> <action> <proto> <port>"."""
+    out = _ps(
+        f"Get-NetFirewallApplicationFilter -Program '{program}' | Get-NetFirewallRule | "
+        'ForEach-Object { "$($_.Profile) $($_.Action) " + ($_ | Get-NetFirewallPortFilter | '
+        'ForEach-Object { "$($_.Protocol) $($_.LocalPort)" }) }'
+    )
+    return sorted(line.strip() for line in out.splitlines() if line.strip())
+
+
+def _remove(program: str) -> None:
+    _ps(
+        f"Get-NetFirewallApplicationFilter -Program '{program}' | Get-NetFirewallRule | "
+        "Remove-NetFirewallRule"
+    )
+
+
+@on_windows_ci
+def test_windows_really_gets_the_narrow_rule(tmp_path: Any) -> None:
+    from open_transfer import network
+
+    program = str(tmp_path / "o'neil" / "open-transfer.exe")
+    try:
+        assert network.allow_firewall(program, 5123, "Private") == "allowed"
+        assert _rules(program.replace("'", "''")) == [
+            "Private Allow TCP 5123",
+            "Private Allow UDP 47823",
+        ]
+    finally:
+        _remove(program.replace("'", "''"))
+
+
+@on_windows_ci
+def test_a_rule_windows_refuses_is_not_reported_as_allowed(tmp_path: Any) -> None:
+    from open_transfer import network
+
+    program = str(tmp_path / "open-transfer.exe")
+    try:
+        assert network.allow_firewall(program, 5123, "NoSuchProfile") == "failed"
+    finally:
+        _remove(program)

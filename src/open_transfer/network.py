@@ -154,14 +154,17 @@ def allow_command(exe: str, port: int, profile: str) -> list[str]:
         f"-Program '{program}' -Profile {profile} -Protocol {proto} -LocalPort {int(local)} -Action Allow"
         for proto, local in (("TCP", port), ("UDP", DISCOVERY_PORT))
     )
-    encoded = base64.b64encode(rules.encode("utf-16-le")).decode()
+    # Stop at the first refusal, and pass the elevated copy's result back: Start-Process
+    # alone succeeds whatever happens inside, which would report a rule Windows refused.
+    script = f"$ErrorActionPreference = 'Stop'; {rules}"
+    encoded = base64.b64encode(script.encode("utf-16-le")).decode()
     return [
         "powershell",
         "-NoProfile",
         "-NonInteractive",
         "-Command",
-        "Start-Process powershell -Verb RunAs -WindowStyle Hidden -Wait "
-        f"-ArgumentList '-NoProfile','-EncodedCommand','{encoded}'",
+        "$p = Start-Process powershell -Verb RunAs -WindowStyle Hidden -Wait -PassThru "
+        f"-ArgumentList '-NoProfile','-EncodedCommand','{encoded}'; exit $p.ExitCode",
     ]
 
 
