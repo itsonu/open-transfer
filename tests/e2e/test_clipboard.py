@@ -135,7 +135,9 @@ def test_the_android_app_reads_the_clipboard_itself(mac: Server, browser) -> Non
     # to ask with); the app reads it natively through its bridge instead.
     context = browser.new_context()  # no clipboard permission, like the WebView
     page = context.new_page()
-    page.add_init_script("window.OpenTransferAndroid = { readClipboard: () => 'Flight AB123, gate 14' };")
+    page.add_init_script(
+        "window.OpenTransferAndroid = { readClipboard: () => 'Flight AB123, gate 14' };"
+    )
     page.goto(mac.url)
     expect(page.locator("#main-view")).to_be_visible(timeout=10_000)
     page.locator("#dropzone-clipboard").click()

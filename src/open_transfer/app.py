@@ -67,6 +67,7 @@ PUBLIC_ENDPOINTS = {
 
 
 JOIN_TTL = 600  # seconds a QR code lets browsers in without the PIN
+DRAIN_MAX = 1 << 20  # unread request bytes read before answering (see finish)
 
 
 def _load_secret(state_dir: Path) -> bytes:
@@ -313,6 +314,11 @@ def create_app(config: Config | None = None) -> Flask:
     @app.after_request
     def finish(response: Response) -> Response:
         apply_security_headers(response)
+        # Answered before reading the body (a 401/403)? Read it now: closing with it
+        # unread makes the OS reset the connection, and the client can lose the answer.
+        # ponytail: bigger uploads refused early still reset; reading them invites abuse.
+        if 0 < (request.content_length or 0) <= DRAIN_MAX:
+            request.stream.read()
         if request.path.startswith("/api/"):
             response.headers.setdefault("Cache-Control", "no-store")
         elif request.path.endswith((".js", ".css")):
