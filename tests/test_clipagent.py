@@ -288,6 +288,32 @@ def test_desktops_sync_both_ways_with_no_window(make_node: NodeFactory) -> None:
             node.watcher.stop()
 
 
+def test_a_clip_lands_on_the_real_clipboard_with_no_window(make_node: NodeFactory) -> None:
+    # K4's last hop: a copy from another device ends up on this computer's own clipboard
+    # (on Windows CI, the real Windows clipboard), with no window open.
+    agent = real_agent()
+    mac, pc = make_node("Mac"), make_node("PC")
+    for node in (mac, pc):
+        sync_on(node)
+    code = owner(pc)("POST", "/api/pair/open")[1]["code"]
+    status, data = owner(mac)(
+        "POST", "/api/pair", {"code": code, "address": f"127.0.0.1:{pc.port}"}
+    )
+    assert status == 200, data
+    mac_clip = FakeAgent()
+    mac.start_clipboard(mac_clip).interval = 0.02
+    pc.start_clipboard(agent).interval = 0.02
+    text = f"to the PC {time.time()} ✓"
+    try:
+        mac_clip.user_copies(text)
+        wait_for(lambda: agent.read().text == text)
+        assert agent.read().ours is (agent.name in ("macos", "windows"))  # not sent back
+    finally:
+        for node in (mac, pc):
+            assert node.watcher is not None
+            node.watcher.stop()
+
+
 def test_the_clipboard_flag_starts_the_native_agent(
     make_node: NodeFactory, monkeypatch: pytest.MonkeyPatch
 ) -> None:
