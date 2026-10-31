@@ -130,6 +130,20 @@ def test_send_clipboard_stages_its_text(mac: Server, clip_page) -> None:  # type
     expect(page.locator("#send-bar-files")).to_contain_text("Clipboard")
 
 
+def test_the_android_app_reads_the_clipboard_itself(mac: Server, browser) -> None:  # type: ignore[no-untyped-def]
+    # Android's WebView never grants the page clipboard access (it has no prompt
+    # to ask with); the app reads it natively through its bridge instead.
+    context = browser.new_context()  # no clipboard permission, like the WebView
+    page = context.new_page()
+    page.add_init_script("window.OpenTransferAndroid = { readClipboard: () => 'Flight AB123, gate 14' };")
+    page.goto(mac.url)
+    expect(page.locator("#main-view")).to_be_visible(timeout=10_000)
+    page.locator("#dropzone-clipboard").click()
+    expect(page.locator("#send-bar-files")).to_contain_text("Clipboard")
+    expect(page.locator("#toasts")).not_to_contain_text("Allow clipboard access")
+    context.close()
+
+
 # ------------------------------------------------------------------- sync
 
 

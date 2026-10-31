@@ -42,7 +42,9 @@ export async function readClipboard({ quiet = false } = {}) {
     /* no image access: try text */
   }
   try {
-    const text = await navigator.clipboard.readText();
+    // Android's WebView never grants clipboard access; the app reads it for us.
+    const native = window.OpenTransferAndroid;
+    const text = native?.readClipboard ? native.readClipboard() : await navigator.clipboard.readText();
     if (text.trim()) return { text };
     if (!quiet) toast("The clipboard is empty.", { icon: "copy" });
   } catch {
