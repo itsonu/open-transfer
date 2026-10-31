@@ -4,8 +4,9 @@
     python scripts/bench_encryption.py --mb 1024
 
 Two apps run in one process on 127.0.0.1, so the network is never the limit:
-what's measured is the apps' own cost. "plain" is an unpaired pair of apps,
-"encrypted" a paired one. Each run is its own process (clean peak memory).
+what's measured is the apps' own cost. "plain" is an app sending to an older
+one (no encryption), "one-off" to an unpaired app (one-off key), "encrypted"
+to a paired one. Each run is its own process (clean peak memory).
 Latency is the median time to send a 1 KiB file once it's accepted.
 """
 
@@ -116,6 +117,11 @@ def one(mode: str, mb: int, streams: int) -> dict[str, Any]:
                 call(pa, "POST", "/api/pair", {"code": code, "address": f"127.0.0.1:{pb}"})
                 wait(lambda: a.mesh.trust.get(b.mesh.id) and a.mesh.trust.get(b.mesh.id).enc)
             else:
+                if mode == "plain":  # Bravo is from before one-off keys: no "kx" to encrypt to
+                    real = b.mesh.self_info
+                    b.mesh.self_info = lambda **kw: {  # type: ignore[method-assign]
+                        k: v for k, v in real(**kw).items() if k != "kx"
+                    }
                 call(pa, "POST", "/api/devices", {"address": f"127.0.0.1:{pb}"})
 
             def small() -> float:
@@ -172,7 +178,7 @@ def one(mode: str, mb: int, streams: int) -> dict[str, Any]:
                 raise SystemExit(f"a transfer failed: {results}")
             state = call(pa, "GET", "/api/state")
             encrypted = {t["encrypted"] for j in state["outgoing"] for t in j["targets"]}
-            if encrypted != {mode == "encrypted"}:
+            if encrypted != {mode != "plain"}:
                 raise SystemExit(f"expected {mode}, got encrypted={encrypted}")
             return {
                 "mode": mode,
@@ -205,7 +211,7 @@ def cipher_only(mb: int) -> dict[str, Any]:
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--mb", type=int, default=256)
-    parser.add_argument("--one", choices=["plain", "encrypted"])
+    parser.add_argument("--one", choices=["plain", "one-off", "encrypted"])
     parser.add_argument("--streams", type=int, default=1)
     args = parser.parse_args()
     if args.one:
@@ -213,7 +219,7 @@ def main() -> None:
         return
     rows = []
     for streams in (1, 4):
-        for mode in ("plain", "encrypted"):
+        for mode in ("plain", "one-off", "encrypted"):
             out = subprocess.run(  # noqa: S603 - this script, by its own path
                 [sys.executable, __file__, "--one", mode, "--mb", str(args.mb), "--streams", str(streams)],
                 capture_output=True, text=True, check=True,
