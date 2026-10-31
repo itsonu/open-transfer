@@ -110,7 +110,7 @@ def smoke_test() -> None:
     with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as share:
         proc = subprocess.Popen(  # noqa: S603
             [str(EXE), share, "--host", "127.0.0.1", "--port", str(port),
-             "--no-browser", "--no-qr"],
+             "--no-browser", "--no-qr", "--https"],
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
         )  # fmt: skip
         try:
@@ -126,8 +126,31 @@ def smoke_test() -> None:
                         output = proc.stdout.read().decode(errors="replace") if proc.stdout else ""
                         sys.exit(f"The built app did not start:\n{output}")
                     time.sleep(0.5)
+            check_keys_and_https(port)
         finally:
             stop_tree(proc)
+
+
+def check_keys_and_https(port: int) -> None:
+    """The bundle has what the key store and --https import lazily (ctypes, cheroot.ssl)."""
+    import json
+    import ssl
+
+    with urllib.request.urlopen(f"http://127.0.0.1:{port}/api/state", timeout=5) as res:
+        state = json.loads(res.read())
+    keys, https = state.get("keys") or {}, state.get("https") or {}
+    say(f"Pairing keys: {keys.get('store')} (OS-protected: {keys.get('protected')})")
+    if os.name == "nt" and keys.get("store") != "windows-dpapi":
+        sys.exit(f"The Windows app doesn't keep its keys with DPAPI: {keys}")
+    if not https.get("port"):
+        sys.exit(f"--https didn't start: {state.get('https')}")
+    context = ssl.create_default_context()
+    context.check_hostname, context.verify_mode = False, ssl.CERT_NONE  # self-signed
+    url = f"https://127.0.0.1:{https['port']}/api/health"
+    with urllib.request.urlopen(url, timeout=5, context=context) as res:
+        if res.status != 200:
+            sys.exit(f"HTTPS answered {res.status}")
+    say(f"HTTPS works (certificate {https['fingerprint'][:23]}…)")
 
 
 def stop_tree(proc: subprocess.Popen[bytes]) -> None:

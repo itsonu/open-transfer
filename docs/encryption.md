@@ -164,7 +164,7 @@ its store and key id and is bound to what it is (`pair|<device id>`,
 | Windows | `keys/<id>.dpapi`, encrypted with **DPAPI** for this user | Copies of the folder to another PC or user; offline disk reads without your Windows password |
 | Android | `keys/<id>.wrapped`, wrapped by an AES key in the **Android Keystore** (hardware-backed where the phone has it; can't be exported) | Copies of the app's data (backups are off too: `allowBackup="false"`) |
 | Linux desktop | the **Secret Service** keyring (GNOME Keyring, KWallet) via `secret-tool`; the key goes over stdin, never on a command line | Copies and backups of the folder |
-| Docker, Linux without a keyring | `keys/<id>`, mode 0600: **a plain file, not OS-protected** | Nothing more than file permissions. `open-transfer --keys` and `/api/state` (`keys.protected: false`) say so; it's never called protected. |
+| Docker, Linux without a keyring | `keys/<id>`, mode 0600: **a plain file, not OS-protected** | Nothing more than file permissions. `open-transfer --keys` and `/api/state` (`keys.protected: false`) say so; it's never called protected. `OPEN_TRANSFER_KEYSTORE=file` picks this store on purpose (the tests do). |
 
 | What's sealed | File | Without its vault key |
 |---|---|---|

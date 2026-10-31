@@ -225,6 +225,24 @@ Each row: share from the named app → pick **Open Transfer** → the items are 
 | 9.12 | A received file → ⋯ → **Share…** → the system share sheet → send it to another app (Gmail, Drive) | |
 | 9.13 | A paired receiver: the transfer shows **encrypted** (§3) | |
 
+## 10. Keys at rest, unpaired encryption and `--https`
+
+1. **Mac, after an update** of an ad-hoc signed build: macOS asks once to let
+   Open Transfer use its Keychain item → **Always Allow** → paired devices are
+   still paired (`open-transfer --keys` from source, or Add device shows them).
+   Click **Deny** instead on a second update → the status line names the
+   locked pairings (“Couldn’t unlock the pairing with …”); allow it again →
+   they're back after a restart.
+2. **Windows, after replacing the .exe:** paired devices still paired
+   (DPAPI is per user, not per build).
+3. **Android, after an in-place update** (same signing key): still paired.
+4. **Unpaired send** Mac ↔ phone: the sender shows **Direct · encrypted, not
+   verified**; hovering says to pair to be sure.
+5. **`--https`:** start the Mac with `--https`, scan its QR code with the
+   phone's browser → one certificate warning → its fingerprint (browser's
+   certificate details) matches the one under the QR code → proceed → the
+   page says **encrypted (HTTPS)**; send a photo from that page.
+
 ## If devices don't see each other
 
 1. Same Wi‑Fi? Guest networks and many routers isolate devices.

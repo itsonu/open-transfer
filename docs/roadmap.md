@@ -87,7 +87,8 @@ The eight product phases asked for on 2026-10-31 map onto what's shipped:
 
 Reliability and security follow-ups from the audit ([audit-2026-10-26.md](audit-2026-10-26.md)):
 
-1. ✅ **Encrypt file transfers between paired apps:** done as [`ot-file/1`](encryption.md). Still plain: a browser's own hop to its app, and unpaired or older apps (labelled). Pair keys are sealed with a vault key in the OS keystore (Keychain, DPAPI, Android Keystore, Secret Service) — [keys at rest](encryption.md#keys-at-rest).
+1. ✅ **Encrypt file transfers:** paired apps as [`ot-file/1`](encryption.md); unpaired apps with a one-off key (“encrypted, not verified”); a browser's hop with `--https` (opt-in). Pair keys are sealed with a vault key in the OS keystore (Keychain, DPAPI, Android Keystore, Secret Service) — [keys at rest](encryption.md#keys-at-rest). Still plain: a browser's hop without `--https`, older apps (labelled), and WebRTC signalling between two apps.
+   Next: carry WebRTC signalling between apps inside `ot-file/1` (paired) so the DTLS fingerprints can't be swapped; a Developer ID build so macOS stops asking for the Keychain after updates.
 2. **Checksum the browser → its own app hop** (today only app → app is verified).
 3. **Windows on a Domain network:** make the Allow rule for the current profile (Domain) instead of Private.
 4. **Paired devices pass on each other's new addresses** (today each device must hear the move itself).
