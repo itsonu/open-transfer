@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import random
 from collections.abc import Callable, Iterator
 from pathlib import Path
@@ -14,6 +15,10 @@ from open_transfer.config import Config
 from open_transfer.node import Node
 
 AppFactory = Callable[..., Flask]
+
+# Never the real Keychain / DPAPI / keyring from tests (servers started by session
+# fixtures too); tests/test_keystore.py tests those on purpose.
+os.environ.setdefault("OPEN_TRANSFER_KEYSTORE", "file")
 
 
 @pytest.fixture(autouse=True)

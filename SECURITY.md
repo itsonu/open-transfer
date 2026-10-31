@@ -20,6 +20,7 @@ Out of scope — by design, and documented in the README:
 
 - Anyone on the network can use an instance started **without** a PIN.
 - Browser traffic is unencrypted HTTP unless you add an HTTPS reverse proxy. Files between **paired apps** are encrypted end to end; transfers with unpaired or older apps are plain HTTP and labelled so ([docs/encryption.md](docs/encryption.md)).
+- Pairing keys and the browser sign-in key are sealed with a vault key in the OS keystore (Keychain, DPAPI, Android Keystore, Secret Service). Where there is none (Docker, Linux without a keyring) it's a private file, and the app says it isn't OS-protected ([keys at rest](docs/encryption.md#keys-at-rest)).
 - Brute-forcing a 4-digit PIN over a long time (5 attempts/min per address); use a longer alphanumeric PIN for exposed setups.
 
 ## Hardening already in place

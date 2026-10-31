@@ -7,8 +7,6 @@ import hmac
 import io
 import ipaddress
 import logging
-import os
-import secrets
 import time
 from collections import OrderedDict
 from pathlib import Path
@@ -33,7 +31,7 @@ from flask import (
 from werkzeug.exceptions import ClientDisconnected, HTTPException
 from werkzeug.middleware.proxy_fix import ProxyFix
 
-from open_transfer import __version__, network, opener
+from open_transfer import __version__, keystore, network, opener
 from open_transfer.archive import zip_stream
 from open_transfer.config import Config
 from open_transfer.mesh import Mesh, Viewer, visitor_identity
@@ -70,25 +68,6 @@ JOIN_TTL = 600  # seconds a QR code lets browsers in without the PIN
 DRAIN_MAX = 1 << 20  # unread request bytes read before answering (see finish)
 
 
-def _load_secret(state_dir: Path) -> bytes:
-    """Keep the session key across restarts so PIN logins survive them."""
-    path = state_dir / "secret"
-    try:
-        data = path.read_bytes()
-        if len(data) >= 32:
-            return data
-    except OSError:
-        log.debug("no stored session secret yet; creating one")
-    data = secrets.token_bytes(32)
-    try:
-        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-        with os.fdopen(fd, "wb") as fh:
-            fh.write(data)
-    except OSError:  # read-only volume: fall back to a per-process key
-        log.debug("could not persist session secret", exc_info=True)
-    return data
-
-
 def create_app(config: Config | None = None) -> Flask:
     config = config or Config()
     storage = Storage(
@@ -99,7 +78,7 @@ def create_app(config: Config | None = None) -> Flask:
     mesh = Mesh(config, storage)
     app = Flask(__name__, static_folder="static", template_folder="templates")
     app.config.update(
-        SECRET_KEY=_load_secret(config.state_path),
+        SECRET_KEY=keystore.session_secret(config.state_path),
         SESSION_COOKIE_NAME="open_transfer",
         SESSION_COOKIE_SAMESITE="Lax",
         SESSION_COOKIE_HTTPONLY=True,

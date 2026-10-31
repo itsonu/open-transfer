@@ -162,3 +162,20 @@ def test_a_windows_block_rule_is_named_and_offered_for_removal(page, devices: li
     expect(status).to_contain_text("open-transfer-windows-x64.exe", timeout=10_000)
     expect(status).to_contain_text("blocks Open Transfer")
     expect(page.locator("#me-allow")).to_have_text("Remove the block and allow")
+
+
+def test_a_pairing_whose_key_cant_be_unlocked_is_named(page, devices: list[Server]) -> None:  # type: ignore[no-untyped-def]
+    """Phase I: the keychain didn't give the vault key back; the pairing is kept, and said."""
+
+    def patch(route) -> None:  # type: ignore[no-untyped-def]
+        response = route.fetch()
+        data = response.json()
+        data["keys"] = {"store": "macos-keychain", "protected": True, "locked": ["Pixel"]}
+        route.fulfill(response=response, body=json.dumps(data))
+
+    page.route("**/api/state*", patch)
+    page.goto(devices[0].url)
+    status = page.locator("#me-status")
+    expect(status).to_contain_text("Couldn’t unlock the pairing with Pixel", timeout=10_000)
+    expect(status).to_contain_text("Pair again")
+    expect(status).to_have_attribute("data-tone", "warn")

@@ -6,6 +6,7 @@
 Two apps run in one process on 127.0.0.1, so the network is never the limit:
 what's measured is the apps' own cost. "plain" is an unpaired pair of apps,
 "encrypted" a paired one. Each run is its own process (clean peak memory).
+Latency is the median time to send a 1 KiB file once it's accepted.
 """
 
 from __future__ import annotations
@@ -14,7 +15,7 @@ import argparse
 import http.client
 import json
 import os
-import resource
+import statistics
 import subprocess
 import sys
 import tempfile
@@ -23,6 +24,28 @@ from pathlib import Path
 from typing import Any
 
 BLOCK = os.urandom(1 << 20)
+os.environ.setdefault("OPEN_TRANSFER_KEYSTORE", "file")  # leave the real keychain alone
+
+
+def peak_mb() -> int:
+    if sys.platform == "win32":
+        import ctypes
+
+        class Counters(ctypes.Structure):
+            _fields_ = [("cb", ctypes.c_ulong), ("faults", ctypes.c_ulong)] + [
+                (f"f{i}", ctypes.c_size_t)
+                for i in range(8)  # f0 = PeakWorkingSetSize
+            ]
+
+        counters = Counters()
+        counters.cb = ctypes.sizeof(counters)
+        process = ctypes.windll.kernel32.GetCurrentProcess()  # type: ignore[attr-defined]
+        ctypes.windll.psapi.GetProcessMemoryInfo(process, ctypes.byref(counters), counters.cb)  # type: ignore[attr-defined]
+        return round(counters.f0 / (1 << 20))
+    import resource
+
+    rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    return round(rss / (1 << 20 if sys.platform == "darwin" else 1 << 10))
 
 
 class Payload:
@@ -89,6 +112,23 @@ def one(mode: str, mb: int, streams: int) -> dict[str, Any]:
                 wait(lambda: a.mesh.trust.get(b.mesh.id) and a.mesh.trust.get(b.mesh.id).enc)
             else:
                 call(pa, "POST", "/api/devices", {"address": f"127.0.0.1:{pb}"})
+
+            def small() -> float:
+                job = call(
+                    pa,
+                    "POST",
+                    "/api/send",
+                    {"to": [b.mesh.id], "files": [{"name": "s", "size": 1024}]},
+                )["job"]["id"]
+                wait(lambda: any(
+                    t["state"] == "accepted" for j in call(pa, "GET", "/api/state")["outgoing"]
+                    if j["id"] == job for t in j["targets"]
+                ))  # fmt: skip
+                start = time.perf_counter()
+                call(pa, "PUT", f"/api/send/{job}/files/0", data=BLOCK[:1024], length=1024)
+                return time.perf_counter() - start
+
+            latency = statistics.median(small() for _ in range(5))
             size = mb * 1024 * 1024 // streams
             jobs = [
                 call(
@@ -103,7 +143,10 @@ def one(mode: str, mb: int, streams: int) -> dict[str, Any]:
             def accepted() -> bool:
                 state = call(pa, "GET", "/api/state")
                 return all(
-                    t["state"] == "accepted" for j in state["outgoing"] for t in j["targets"]
+                    t["state"] == "accepted"
+                    for j in state["outgoing"]
+                    if j["id"] in jobs
+                    for t in j["targets"]
                 )
 
             wait(accepted)
@@ -126,7 +169,6 @@ def one(mode: str, mb: int, streams: int) -> dict[str, Any]:
             encrypted = {t["encrypted"] for j in state["outgoing"] for t in j["targets"]}
             if encrypted != {mode == "encrypted"}:
                 raise SystemExit(f"expected {mode}, got encrypted={encrypted}")
-            rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
             return {
                 "mode": mode,
                 "streams": streams,
@@ -134,7 +176,8 @@ def one(mode: str, mb: int, streams: int) -> dict[str, Any]:
                 "seconds": round(seconds, 2),
                 "mb_s": round(mb / seconds),
                 "cpu_s": round(time.process_time() - cpu, 2),
-                "peak_mb": round(rss / (1 << 20 if sys.platform == "darwin" else 1 << 10)),
+                "peak_mb": peak_mb(),
+                "latency_ms": round(latency * 1000, 1),
             }
         finally:
             a.stop()
@@ -172,12 +215,12 @@ def main() -> None:
             )  # fmt: skip
             rows.append(json.loads(out.stdout.strip().splitlines()[-1]))
     print(f"AES-256-GCM alone (encrypt + decrypt, one core): {cipher_only(args.mb)['mb_s']} MB/s\n")
-    print("| Mode | Streams | Size | Time | Throughput | CPU | Peak memory |")
-    print("|---|---|---|---|---|---|---|")
+    print("| Mode | Streams | Size | Time | Throughput | CPU | Peak memory | 1 KiB latency |")
+    print("|---|---|---|---|---|---|---|---|")
     for r in rows:
         print(
             f"| {r['mode']} | {r['streams']} | {r['mb']} MB | {r['seconds']} s | {r['mb_s']} MB/s"
-            f" | {r['cpu_s']} s | {r['peak_mb']} MB |"
+            f" | {r['cpu_s']} s | {r['peak_mb']} MB | {r['latency_ms']} ms |"
         )
 
 

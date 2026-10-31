@@ -3120,6 +3120,11 @@ class Mesh:
                 "auto_accept": self.config.auto_accept,
                 "paired_only": self.config.paired_only,
             }
+            state["keys"] = {
+                "store": self.trust.vault.store,
+                "protected": self.trust.vault.protected,  # False: a plain file, say so
+                "locked": self.trust.locked_names(),
+            }
         elif self.has_inbox(viewer.id):
             store = self.inbox(viewer.id)
             state["inbox"] = [f.to_dict() for f in store.files()]

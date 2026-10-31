@@ -188,7 +188,8 @@ A accepts the code only while its **Add device** screen is open: the page
 renews a 30-second window while it shows, and opening it shows a fresh code.
 A rate-limits proofs (5 per minute per address) and shows a new code after 10
 wrong guesses, after every successful pairing, and every 10 minutes. Keys are
-stored in `<state>/trusted.json` (mode 0600). An app from before SRP answers
+stored in `<state>/trusted.json`, sealed with a vault key from the OS keystore
+([encryption.md](encryption.md#keys-at-rest)). An app from before SRP answers
 `/pair/begin` with 404, and B says to update it.
 
 Entering a code without an address: B sends a multicast **find** and asks every

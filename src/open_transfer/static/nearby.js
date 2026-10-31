@@ -225,7 +225,12 @@ function renderMe() {
   const cantReach = network.unreachable_by || [];
   // Only a guess: a device that does reach us proves this PC's firewall lets it in.
   const blocked = network.reachable_by ? [] : network.public || [];
-  if (me.kind === "owner" && cantReach.length) {
+  const locked = mesh.data.keys?.locked || [];
+  if (me.kind === "owner" && locked.length) {
+    // Their keys are kept, sealed, until the system keystore gives the vault key back.
+    status.textContent = `Couldn’t unlock the pairing with ${locked.join(", ")} (the system keychain didn’t give its key back). Pair again to send to ${locked.length > 1 ? "them" : "it"}.`;
+    status.dataset.tone = "warn";
+  } else if (me.kind === "owner" && cantReach.length) {
     // Told by the devices themselves (they hear us, but can't connect).
     const kind = network.public?.length ? "Public" : "Private";
     const blocks = network.blocking_rules || [];

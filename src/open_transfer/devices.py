@@ -2,7 +2,8 @@
 
 Every Open Transfer app has a stable random **device id** (kept in
 ``<state>/device.json``) and a human name. Pairing two devices stores a
-shared secret key on both sides (``<state>/trusted.json``); requests between
+shared secret key on both sides (``<state>/trusted.json``, sealed with a key
+from the OS keystore: see :mod:`open_transfer.keystore`); requests between
 paired devices are signed with it (see :func:`sign` / :func:`verify`), which
 lets them skip the "Accept?" prompt.
 """
@@ -20,9 +21,12 @@ import sys
 import threading
 import time
 import unicodedata
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from open_transfer.keystore import Vault
 
 log = logging.getLogger("open_transfer")
 
@@ -151,7 +155,7 @@ def _default_name() -> str:
 class TrustedDevice:
     id: str
     name: str
-    key: str  # hex
+    key: str = field(repr=False)  # hex; never in a log line
     paired_at: float
     form: str = ""  # remembered so an away device keeps its icon ("" = not known yet)
     platform: str = ""
@@ -161,17 +165,35 @@ class TrustedDevice:
 class TrustStore:
     """Devices this one is paired with, and the key each pair shares."""
 
-    def __init__(self, state_dir: Path) -> None:
+    def __init__(self, state_dir: Path, vault: Vault | None = None) -> None:
+        from open_transfer.keystore import Locked, open_vault
+
+        self.vault = vault or open_vault(state_dir)
         self._path = state_dir / "trusted.json"
         self._lock = threading.Lock()
         self._devices: dict[str, TrustedDevice] = {}
+        # Entries whose key can't be opened (its vault key is gone, or it's damaged):
+        # kept as they are, never trusted, until the key is back or they're paired again.
+        self._locked: dict[str, dict[str, Any]] = {}
+        stale = False  # plain (from before the vault) or sealed with an older vault key
         for device_id, item in _read_json(self._path).items():
             try:
-                if valid_id(device_id) and len(bytes.fromhex(item["key"])) >= 16:
+                stored = item["key"]
+                if self.vault.is_sealed(stored):
+                    try:
+                        key = self.vault.open(stored, f"pair|{device_id}")
+                    except (Locked, ValueError):
+                        self._locked[device_id] = item
+                        continue
+                    stale |= not self.vault.is_current(stored)
+                else:
+                    key = bytes.fromhex(stored)
+                    stale = True
+                if valid_id(device_id) and len(key) >= 16:
                     self._devices[device_id] = TrustedDevice(
                         device_id,
                         clean_name(item.get("name")),
-                        item["key"],
+                        key.hex(),
                         float(item.get("paired_at", 0)),
                         clean_form(item["form"]) if item.get("form") else "",
                         clean_platform(item["platform"]) if item.get("platform") else "",
@@ -179,6 +201,18 @@ class TrustStore:
                     )
             except (KeyError, TypeError, ValueError):
                 continue
+        if self._locked:
+            log.warning(
+                "Couldn't unlock the pairing keys for %s; pair again to send to them.",
+                ", ".join(self.locked_names()),
+            )
+        if stale:
+            with self._lock:
+                self._save()
+
+    def locked_names(self) -> list[str]:
+        with self._lock:
+            return sorted(clean_name(item.get("name")) for item in self._locked.values())
 
     def get(self, device_id: str) -> TrustedDevice | None:
         with self._lock:
@@ -213,6 +247,7 @@ class TrustStore:
         )
         with self._lock:
             self._devices[device_id] = device
+            self._locked.pop(device_id, None)
             self._save()
         return device
 
@@ -241,15 +276,17 @@ class TrustStore:
     def remove(self, device_id: str) -> bool:
         with self._lock:
             removed = self._devices.pop(device_id, None) is not None
+            removed |= self._locked.pop(device_id, None) is not None
             if removed:
                 self._save()
         return removed
 
     def _save(self) -> None:
-        data = {
+        data: dict[str, Any] = dict(self._locked)
+        data |= {
             d.id: {
                 "name": d.name,
-                "key": d.key,
+                "key": self.vault.seal(bytes.fromhex(d.key), f"pair|{d.id}"),
                 "paired_at": d.paired_at,
                 **({"form": d.form} if d.form else {}),
                 **({"platform": d.platform} if d.platform else {}),

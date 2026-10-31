@@ -161,6 +161,14 @@ def build_parser() -> argparse.ArgumentParser:
         "--no-browser", action="store_true", default=None, help="don't open a browser"
     )
     parser.add_argument("--no-qr", action="store_true", default=None, help="don't print a QR code")
+    parser.add_argument(
+        "--keys", action="store_true", help="say where pairing keys are kept, then exit"
+    )
+    parser.add_argument(
+        "--rotate-keys",
+        action="store_true",
+        help="reseal pairing keys with a new vault key, then exit (Open Transfer must be stopped)",
+    )
     parser.add_argument("-v", "--verbose", action="store_true", help="log every request")
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     return parser
@@ -275,6 +283,21 @@ def _configure_logging(verbose: bool, style: _Style) -> None:
     root.propagate = False
 
 
+def _show_keys(state: Path) -> int:
+    from open_transfer import keystore
+    from open_transfer.devices import TrustStore
+
+    trust = TrustStore(state)
+    vault = trust.vault
+    print(f"Pairing keys are kept in {keystore.LABELS.get(vault.store, vault.store)}.")
+    if not vault.protected:
+        print("They're in an owner-only file, not protected by the operating system.")
+    print(f"Paired devices: {len(trust.all())}")
+    if trust.locked_names():
+        print(f"Locked (pair again): {', '.join(trust.locked_names())}")
+    return 0
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     code = _run(argv)
     if code and is_frozen_app() and sys.stdin and sys.stdin.isatty():
@@ -300,6 +323,9 @@ def _run(argv: Sequence[str] | None) -> int:
     from open_transfer.instance import InstanceLock
     from open_transfer.node import Node
 
+    if args.keys and not args.rotate_keys:
+        return _show_keys(config.state_path)
+
     # Two copies on one state folder would announce the same device id.
     lock = InstanceLock(config.state_path)
     if not lock.acquire():
@@ -310,6 +336,13 @@ def _run(argv: Sequence[str] | None) -> int:
             file=sys.stderr,
         )
         return 1
+    if args.rotate_keys:
+        from open_transfer import keystore
+
+        keystore.rotate(config.state_path)
+        lock.release()
+        print("New vault key: pairing keys and browser sign-ins resealed with it.")
+        return _show_keys(config.state_path)
     try:
         node = Node(config)
     except OSError as exc:

@@ -14,7 +14,8 @@ text.
 | **Active attacker** on the LAN (ARP spoofing, rogue hotspot, a spoofed multicast packet) | Change, drop, replay or inject packets; strip headers | Changed or injected bytes are rejected per 64 KiB record. Replays into another file or transfer fail because each uses a different key. Truncation fails. A downgrade to plain text is refused (see below). Dropping packets can still stop a transfer, which is a denial of service, not a disclosure. |
 | **A paired device** | Decrypt what was sent *to it* | Each recipient's key is its own pair key, so in a group send, B can't decrypt what went to C. |
 | **An unpaired app** | Send offers (asked first), receive what you choose to send it | No shared key: transfers to and from unpaired apps are plain HTTP and are **labelled “Not encrypted”**. |
-| **Someone with your disk** | Read `trusted.json` | Out of scope. Pair keys sit in `<state>/trusted.json` with mode 0600 (owner only), like an SSH key. Files you receive are stored unencrypted. |
+| **Someone with a copy of your files** (a backup, a synced or copied folder, a stolen disk image) | Read the state folder | Pair keys and the browser sign-in key are sealed with a vault key kept in the OS keystore (see [Keys at rest](#keys-at-rest)); the copy alone opens nothing. Not where the keystore is a plain file (Docker, Linux without a keyring), which the app says. Files you receive are stored unencrypted. |
+| **Malware running as you** | Anything you can | Out of scope on every desktop OS. On macOS it would at least trigger a Keychain prompt. |
 
 Not in scope: hiding *that* two devices talk, file sizes, or timing; a
 compromised OS on either end.
@@ -111,13 +112,52 @@ the transfer list and in history.
 | Re-pair / reinstall | A new pair key; the `enc` flag starts over and is learned again from the next signed hello | `test_re_pairing_gives_a_new_key_and_transfers_still_work` |
 | History | Records hold names, sizes and states, never keys, so re-pairing never touches them | — |
 
-**At rest.** Pair keys live in `<state>/trusted.json`, written atomically
-with mode 0600. By default `<state>` is `<storage folder>/.open-transfer`,
-which is never served: hidden names are refused (`test_storage`). On
-Windows, mode bits don't apply; the file has the folder's ACL (the user's
-profile). On Android it's in app-private storage. Moving the keys into the
-OS keystore (Keychain, DPAPI, Android Keystore) is a backlog item. Anyone
-who can read your user files can already read the files you received.
+## Keys at rest
+
+Secrets in the state folder are **sealed** (AES-256-GCM) with a random
+32-byte *vault key* that lives in the operating system's keystore
+([`keystore.py`](../src/open_transfer/keystore.py)). Each sealed value names
+its store and key id and is bound to what it is (`pair|<device id>`,
+`session`), so it can't be moved onto another entry.
+
+| Platform | Vault key kept in | Protects against |
+|---|---|---|
+| macOS | the login **Keychain** (generic password, default access: only this app reads it without a prompt) | Copies and backups of the state folder; other apps (they trigger a prompt) |
+| Windows | `keys/<id>.dpapi`, encrypted with **DPAPI** for this user | Copies of the folder to another PC or user; offline disk reads without your Windows password |
+| Android | `keys/<id>.wrapped`, wrapped by an AES key in the **Android Keystore** (hardware-backed where the phone has it; can't be exported) | Copies of the app's data (backups are off too: `allowBackup="false"`) |
+| Linux desktop | the **Secret Service** keyring (GNOME Keyring, KWallet) via `secret-tool`; the key goes over stdin, never on a command line | Copies and backups of the folder |
+| Docker, Linux without a keyring | `keys/<id>`, mode 0600: **a plain file, not OS-protected** | Nothing more than file permissions. `open-transfer --keys` and `/api/state` (`keys.protected: false`) say so; it's never called protected. |
+
+| What's sealed | File | Without its vault key |
+|---|---|---|
+| Pair keys | `trusted.json` (`"key": "ot-vault/1:…"`) | The pairing is **kept, locked**: never trusted, shown as “Couldn't unlock the pairing with *X* … Pair again”, and back as soon as the key is (keychain access restored) |
+| Browser sign-in key | `secret` | A new one is made: browsers enter the PIN again |
+
+**Migration.** An older `trusted.json` (keys in hex) and `secret` (raw
+bytes) are sealed the first time the new version starts, in place; names,
+`enc` flags and platforms are kept (`test_old_trusted_json_is_migrated…`).
+
+**Recovery, never silent loss.**
+
+* The keystore refuses or can't read back what it stored: the vault key goes
+  to a file instead, labelled unprotected, and moves into the keystore by
+  itself once that works again.
+* The vault key is gone (reinstall, keychain reset, the folder copied to
+  another computer, access denied): entries stay on disk locked and are
+  never trusted (an empty key would let anyone sign as that device). Pairing
+  again replaces a locked entry; unpairing removes it.
+* A damaged entry is locked the same way, never dropped.
+* `open-transfer --rotate-keys` (app stopped) reseals everything with a new
+  vault key, then deletes the old one.
+
+**macOS and updates.** An ad-hoc signed build counts as a new app after each
+update, so macOS asks once to let it read its Keychain item (“Always
+Allow”). Builds signed with a Developer ID keep their identity and won't
+ask. If you click Deny, pairings are locked (above) until you allow it.
+
+**Logs and API.** A `TrustedDevice` never prints its key (`repr=False`);
+`/api/state` carries only the store's name, whether it's protected, and the
+names of locked pairings.
 
 ## Failure reasons the user sees
 
