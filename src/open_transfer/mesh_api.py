@@ -48,6 +48,7 @@ PUBLIC_P2P_ENDPOINTS = {
     "p2p_offer_status",
     "p2p_offer_upload",
     "p2p_offer_file_status",
+    "p2p_offer_verify",
     "p2p_offer_cancel",
     "p2p_pair_begin",
     "p2p_pair_prove",

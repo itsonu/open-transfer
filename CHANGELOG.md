@@ -28,6 +28,7 @@ All notable changes are documented here. The format follows [Keep a Changelog](h
 - Android: the background service runs as a *connected device* service, so Android 15+ no longer stops it after about 6 hours a day.
 
 ### Fixed
+- **Every file is checked end to end again when the receiver has a PIN.** The receiving app asked the sending app for the PIN when it reported its checksum, so the check was quietly skipped.
 - **Clipboard sync says who didn't take a clip:** a device with sync off used to look like it simply wasn't sent; Recently now names it ("MAYA didn't take it").
 - **A PC others can't reach now says so, whatever the reason.** Devices that hear it but can't connect tell it when it says hello, and it names them ("Mac can't reach this device — usually its firewall"). Before, it only warned on a *Public* network, so a firewall rule made for Public left it silent on Private — and its advice to switch to Private was what broke it.
 - **Windows: Allow on this network.** That warning has a button that asks Windows (one admin prompt) to let other devices reach Open Transfer on this kind of network: only its own port and discovery, never the firewall as a whole.
