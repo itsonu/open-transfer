@@ -18,6 +18,7 @@ from typing import Any, Protocol
 
 from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey, X25519PublicKey
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 
@@ -56,6 +57,43 @@ def file_key(
 def meta_key(pair_key: bytes, salt: bytes, sender: str, receiver: str, target: str) -> bytes:
     info = f"open-transfer-meta/{VERSION}|{sender}|{receiver}|{target}"
     return hkdf(pair_key, salt=salt, info=info.encode())
+
+
+def new_kx() -> tuple[X25519PrivateKey, bytes]:
+    """An app's per-run X25519 key, which unpaired apps encrypt to (never stored)."""
+    key = X25519PrivateKey.generate()
+    return key, key.public_key().public_bytes_raw()
+
+
+def ephemeral_to(kx: bytes, salt: bytes, sender: str, receiver: str) -> tuple[bytes, bytes]:
+    """Unpaired sender: a one-off base key to the receiver's ``kx``, and our half to send.
+
+    Stands in for the pair key in :func:`file_key` / :func:`meta_key`. Unauthenticated:
+    it stops a listener, not someone who can answer in the receiver's place.
+    """
+    mine = X25519PrivateKey.generate()
+    eph = mine.public_key().public_bytes_raw()
+    shared = mine.exchange(X25519PublicKey.from_public_bytes(kx))
+    return _one_off(shared, salt, eph, kx, sender, receiver), eph
+
+
+def ephemeral_from(
+    kx: X25519PrivateKey, eph: bytes, salt: bytes, sender: str, receiver: str
+) -> bytes:
+    """Unpaired receiver: the base key :func:`ephemeral_to` made."""
+    try:
+        shared = kx.exchange(X25519PublicKey.from_public_bytes(eph))
+    except ValueError as exc:  # wrong length, or a point that gives an all-zero secret
+        raise DecryptError("bad one-off key") from exc
+    mine = kx.public_key().public_bytes_raw()
+    return _one_off(shared, salt, eph, mine, sender, receiver)
+
+
+def _one_off(
+    shared: bytes, salt: bytes, eph: bytes, kx: bytes, sender: str, receiver: str
+) -> bytes:
+    info = f"open-transfer-eph/{VERSION}|{eph.hex()}|{kx.hex()}|{sender}|{receiver}"
+    return hkdf(shared, salt=salt, info=info.encode())
 
 
 def verify_mac(key: bytes, sha256_hex: str) -> str:

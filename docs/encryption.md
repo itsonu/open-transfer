@@ -2,9 +2,11 @@
 
 Files sent between two **paired** apps are encrypted end to end: only the
 receiving app can read them, and any change, reordering, replay or
-truncation is detected before a file is kept. This page covers the threat
-model, the design, every path a file can take, and what is still in plain
-text.
+truncation is detected before a file is kept. Between **unpaired** apps the
+same encryption runs on a one-off key, which stops a listener but not
+someone who can pose as the other app. A browser's own hop to its app is
+encrypted only with `--https`. This page covers the threat model, the
+design, every path a file can take, and what is still in plain text.
 
 ## Threat model
 
@@ -13,7 +15,7 @@ text.
 | **Passive listener** on the Wi‑Fi or hotspot (another guest, a compromised router) | Read every packet | Paired app ↔ app: file contents and file names are unreadable. Sizes and timing are visible. |
 | **Active attacker** on the LAN (ARP spoofing, rogue hotspot, a spoofed multicast packet) | Change, drop, replay or inject packets; strip headers | Changed or injected bytes are rejected per 64 KiB record. Replays into another file or transfer fail because each uses a different key. Truncation fails. A downgrade to plain text is refused (see below). Dropping packets can still stop a transfer, which is a denial of service, not a disclosure. |
 | **A paired device** | Decrypt what was sent *to it* | Each recipient's key is its own pair key, so in a group send, B can't decrypt what went to C. |
-| **An unpaired app** | Send offers (asked first), receive what you choose to send it | No shared key: transfers to and from unpaired apps are plain HTTP and are **labelled “Not encrypted”**. |
+| **An unpaired app** | Send offers (asked first), receive what you choose to send it | No shared key, so a one-off one: X25519 to the receiver's per-run key. A listener reads nothing; an active attacker could pose as either app, so these are **labelled “encrypted, not verified”**. Pair to be sure. |
 | **Someone with a copy of your files** (a backup, a synced or copied folder, a stolen disk image) | Read the state folder | Pair keys and the browser sign-in key are sealed with a vault key kept in the OS keystore (see [Keys at rest](#keys-at-rest)); the copy alone opens nothing. Not where the keystore is a plain file (Docker, Linux without a keyring), which the app says. Files you receive are stored unencrypted. |
 | **Malware running as you** | Anything you can | Out of scope on every desktop OS. On macOS it would at least trigger a Keychain prompt. |
 
@@ -91,14 +93,50 @@ the transfer list and in history.
 | Paired app → app, small file (single `PUT`) | Plain HTTP | **AES-256-GCM STREAM** | `_Sink._put_remote` encrypts and `receive_file` decrypts on the fly, 64 KiB at a time. |
 | Paired app → app, big file (2 MiB `Content-Range` pieces, resumable) | Plain HTTP | **AES-256-GCM STREAM** | Each piece is 32 whole records. `Content-Range` stays in plaintext positions. The receiver decrypts each piece before staging it, so a resumed transfer still lines up. |
 | Group send (one upload, many receivers) | Plain HTTP to each | **Per-receiver keys** | One plaintext stream fans out. Each receiver's thread encrypts with that pair's key. |
-| Unpaired app ↔ app | Plain HTTP | Plain HTTP, **labelled** | There is no key to use. Pair the devices to encrypt. |
+| Unpaired app ↔ app | Plain HTTP | **AES-256-GCM STREAM, one-off key**, labelled “encrypted, not verified” | X25519 between the sender's one-off key and the receiver's per-run key (never stored: forward secrecy), then HKDF as for a pair key. Contents and names are hidden from a listener. Not authenticated: someone who can answer in the receiver's place gets the file. A stripped key is refused, never sent plain. |
 | Paired, but the other app is older | Plain HTTP | Plain HTTP, **labelled** | Until it updates. |
 | App's own window → its app | Loopback | Loopback | Never on the network. |
-| **Visitor browser → its app** (web page opened from a link or QR code) | Plain HTTP | Plain HTTP | A page on `http://<lan-ip>` isn't a secure context (no WebCrypto) and shares no key. **Remaining plaintext path.** |
-| **App → visitor browser** (download, or pushed to a visitor) | Plain HTTP | Plain HTTP | Same reason. **Remaining plaintext path.** |
+| **Visitor browser → its app** (web page opened from a link or QR code) | Plain HTTP | Plain HTTP by default; **TLS with `--https`** | See [Browsers](#browsers). The visitor's page says “not encrypted” or “encrypted (HTTPS)”. |
+| **App → visitor browser** (download, or pushed to a visitor) | Plain HTTP | Same as above | Same hop, same answer. |
+| Android share sheet → the app | In-process | In-process | `content://` streams are copied inside the app (no network). |
+| Over a phone's hotspot | — | Same as the path used | A hotspot is just another LAN: nothing changes per path. |
 | Browser ↔ browser (WebRTC data channel) | DTLS | DTLS (unchanged) | Browsers always encrypt data channels. The file name and type travel inside DTLS. The connection messages (SDP) cross the visitor's plain-HTTP hop, so an active attacker there could swap the DTLS fingerprints and sit in the middle. A passive listener can't read anything. |
 | Clipboard sync | Sealed per recipient (`sync/1`) | Unchanged | See [sync.md](sync.md). |
 | Android ↔ desktop, Windows ↔ macOS | — | Same as paired app ↔ app | Every app runs the same Python code (`cryptography` 42+ on Android via Chaquopy). |
+
+## Browsers
+
+A browser's own hop to its app can't use `ot-file/1`:
+
+* a page on `http://<LAN address>` isn't a *secure context*, so it has no
+  WebCrypto; JavaScript crypto from a library would be served over the same
+  plain HTTP, so an active attacker could replace it;
+* the browser shares no key with the app, and putting the device's long-term
+  keys in JavaScript is out of the question.
+
+The one sound answer is TLS, which gives the hop ephemeral ECDHE session keys
+from the browser's own vetted stack. **`--https`** (`OPEN_TRANSFER_HTTPS=1`)
+serves browsers on the next port over TLS 1.2+ with a self-signed P-256
+certificate (`tls.py`); links and QR codes then use `https://`. Apps keep
+talking to each other on the plain port, encrypted with `ot-file/1`.
+
+* **Authentication.** There's no CA for a LAN address, so a browser warns
+  once per device; the owner's Add device sheet shows the certificate's
+  SHA-256 fingerprint to compare with the browser's certificate details. The
+  certificate is kept (397 days, renewed 30 days before it ends), so the
+  browser's "proceed" keeps holding.
+* **The key** is sealed in the vault (`tls.json`), like the pair keys.
+  Python's `ssl` loads keys only from files, so it's written to an
+  owner-only temporary file for the moment it's read.
+* **Off by default** because of that warning: Open Transfer stays "just open
+  a link". Without it, a browser's hop is plain HTTP and its page says so
+  (“· not encrypted”). On the device's own window (127.0.0.1) it's never on
+  the network.
+* **WebRTC** (browser ↔ browser) is always DTLS. Its connection messages
+  (SDP, with the DTLS fingerprints) go over each browser's hop to its app:
+  with `--https` that hop is protected. Two browsers on *different* apps also
+  pass them over the apps' own link, which carries them as plain HTTP, so an
+  active attacker there could still swap the fingerprints. Not closed.
 
 ## Key lifecycle
 
@@ -204,4 +242,6 @@ AES-256-GCM on its own (encrypt and decrypt, one core): about 2 GB/s.
 | New | New, paired | Encrypted (required) |
 | New | Old, paired | Plain, labelled; refused once the receiver has advertised `enc` |
 | Old | New, paired | Plain, labelled on the receiver |
-| Any | Unpaired | Plain, labelled |
+| New | New, unpaired | Encrypted with a one-off key, labelled “not verified” |
+| New | Old, unpaired (no `kx`) | Plain, labelled |
+| Old | New, unpaired | Plain, labelled |

@@ -184,6 +184,8 @@ def create_app(config: Config | None = None) -> Flask:
         host, port = request_host_port()
         if host in {"localhost", "127.0.0.1", "::1", "0.0.0.0"}:
             host = next(iter(network.lan_ips()), None) or host  # a hotspot's own, too
+        if https_port := app.config.get("OT_HTTPS_PORT"):  # --https: browsers come in over TLS
+            return f"https://{f'[{host}]' if ':' in host else host}:{https_port}"
         return origin_for(host, port)
 
     def all_urls() -> list[str]:
@@ -191,7 +193,10 @@ def create_app(config: Config | None = None) -> Flask:
         if not config.public_url:
             # LAN addresses reach the server directly, so use the listen port.
             port = int(app.config.get("OT_PORT") or request_host_port()[1])
-            urls += [f"http://{ip}:{port}" for ip in network.lan_ips()]
+            if https_port := app.config.get("OT_HTTPS_PORT"):
+                urls += [f"https://{ip}:{https_port}" for ip in network.lan_ips()]
+            else:
+                urls += [f"http://{ip}:{port}" for ip in network.lan_ips()]
         return list(dict.fromkeys(urls))
 
     def client_id() -> str:

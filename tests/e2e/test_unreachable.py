@@ -179,3 +179,22 @@ def test_a_pairing_whose_key_cant_be_unlocked_is_named(page, devices: list[Serve
     expect(status).to_contain_text("Couldn’t unlock the pairing with Pixel", timeout=10_000)
     expect(status).to_contain_text("Pair again")
     expect(status).to_have_attribute("data-tone", "warn")
+
+
+def test_with_https_the_share_sheet_shows_the_certificate(page, devices: list[Server]) -> None:  # type: ignore[no-untyped-def]
+    """--https: browsers warn once; the owner can compare the fingerprint."""
+    print_ = "AB:CD:EF:01:23:45:67:89:AB:CD:EF:01:23:45:67:89:AB:CD:EF:01:23:45:67:89:AB:CD:EF:01:23:45:67:89"
+
+    def patch(route) -> None:  # type: ignore[no-untyped-def]
+        response = route.fetch()
+        data = response.json()
+        data["https"] = {"port": 5001, "fingerprint": print_}
+        route.fulfill(response=response, body=json.dumps(data))
+
+    page.route("**/api/state*", patch)
+    page.goto(devices[0].url)
+    expect(page.locator("#me-status")).to_be_visible(timeout=10_000)
+    page.click("#connect-button")
+    note = page.locator("#tls-note")
+    expect(note).to_be_visible()
+    expect(note).to_contain_text(print_)

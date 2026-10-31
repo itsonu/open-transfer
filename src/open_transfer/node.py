@@ -33,7 +33,9 @@ class Node:
         self.app = create_app(config)
         self.mesh: Mesh = self.app.extensions["open_transfer"]["mesh"]
         self.port = 0
+        self.https_port = 0  # --https: browsers over TLS here (apps stay on ``port``)
         self._server: Any = None
+        self._https: Any = None
         self._thread: threading.Thread | None = None
         self.watcher: Watcher | None = None
 
@@ -58,7 +60,30 @@ class Node:
         server.prepare()
         self._server = server
         self.port = port
+        if self.config.https:
+            self._bind_https(port)
         return port
+
+    def _bind_https(self, port: int) -> None:
+        from cheroot import wsgi
+
+        from open_transfer import tls
+
+        cert, key = tls.certificate(self.config.state_path)
+        https_port = network.find_free_port(self.config.host, port + 1)
+        server = wsgi.Server(
+            (self.config.host, https_port),
+            self.app,
+            numthreads=self.config.threads,
+            server_name=f"open-transfer/{__version__}",
+            timeout=60,
+        )
+        server.ssl_adapter = tls.ssl_adapter(cert, key)
+        server.max_request_body_size = 0
+        server.prepare()
+        self._https, self.https_port = server, https_port
+        self.app.config["OT_HTTPS_PORT"] = https_port
+        self.mesh.https = {"port": https_port, "fingerprint": tls.fingerprint(cert)}
 
     def start_mesh(self) -> None:
         self.mesh.start(self.port)
@@ -74,7 +99,12 @@ class Node:
         self.watcher = Watcher(agent, self.mesh.sync).start()
         return self.watcher
 
+    def _serve_https(self) -> None:
+        if self._https is not None:
+            threading.Thread(target=self._https.serve, name="ot-https", daemon=True).start()
+
     def serve_forever(self) -> None:
+        self._serve_https()
         try:
             self._server.serve()
         finally:
@@ -86,6 +116,7 @@ class Node:
             self.bind()
         self._thread = threading.Thread(target=self._server.serve, name="ot-http", daemon=True)
         self._thread.start()
+        self._serve_https()
         self.start_mesh()
         return self.port
 
@@ -94,6 +125,7 @@ class Node:
             self.watcher.stop()
         with contextlib.suppress(Exception):
             self.mesh.stop()
-        if self._server is not None:
-            with contextlib.suppress(Exception):
-                self._server.stop()
+        for server in (self._server, self._https):
+            if server is not None:
+                with contextlib.suppress(Exception):
+                    server.stop()

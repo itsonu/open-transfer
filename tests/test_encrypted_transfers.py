@@ -209,11 +209,49 @@ def test_the_receiver_refuses_plain_bytes_for_an_encrypted_transfer(
     assert not (Path(b.config.storage_dir) / "x.txt").exists()
 
 
-# ----------------------------------------------- not encrypted, and says so
+# ------------------------------------------- unpaired: one-off keys (Phase J)
 
 
-def test_unpaired_transfers_are_labelled_not_encrypted(make_node: NodeFactory, tap: Tap) -> None:
+def test_unpaired_apps_encrypt_with_one_off_keys(make_node: NodeFactory, tap: Tap) -> None:
+    """X25519 to the receiver's per-run key: a listener reads nothing; nobody is verified."""
     a, b = make_node("Alpha"), make_node("Bravo")
+    connect(a, b)
+    alice, bob = owner(a), owner(b)
+    payload = os.urandom(200_000)
+    job = send(alice, [device_id(alice, "Bravo")], [("open.bin", payload)])
+    offer = incoming(bob)
+    assert offer["encrypted"] is True
+    assert offer["authenticated"] is False  # unpaired: "encrypted, not verified"
+    assert offer["files"][0]["name"] == "open.bin"  # Bravo sees the real name...
+    bob("POST", f"/api/incoming/{offer['id']}/accept")
+    wait_for(lambda: target_states(alice, job) == {"Bravo": "accepted"})
+    assert upload(alice, job, 0, payload)[0] == 200
+    assert (Path(b.config.storage_dir) / "open.bin").read_bytes() == payload
+    assert target(a, job)["encrypted"] is True
+    assert target(a, job)["authenticated"] is False
+    assert not seen(tap, b, payload)
+    assert b"open.bin" not in tap.to(b)  # ...the Wi-Fi doesn't
+    done = incoming(bob, "done")
+    assert done["files"][0]["verified"]
+
+
+def test_paired_transfers_are_authenticated(make_node: NodeFactory) -> None:
+    a, b = paired(make_node)
+    alice = owner(a)
+    job = send(alice, [b.mesh.id], [("p.txt", b"p")])
+    wait_for(lambda: target_states(alice, job) == {"Bravo": "accepted"})
+    assert target(a, job)["authenticated"] is True
+    assert incoming(owner(b), "accepted")["authenticated"] is True
+
+
+def test_an_older_unpaired_app_gets_plain_files_labelled(
+    make_node: NodeFactory, monkeypatch: pytest.MonkeyPatch, tap: Tap
+) -> None:
+    a, b = make_node("Alpha"), make_node("Bravo")
+    real_info = b.mesh.self_info  # from before Phase J: no per-run key to encrypt to
+    monkeypatch.setattr(
+        b.mesh, "self_info", lambda **kw: {k: v for k, v in real_info(**kw).items() if k != "kx"}
+    )
     connect(a, b)
     alice, bob = owner(a), owner(b)
     payload = os.urandom(200_000)
@@ -225,6 +263,37 @@ def test_unpaired_transfers_are_labelled_not_encrypted(make_node: NodeFactory, t
     assert upload(alice, job, 0, payload)[0] == 200
     assert target(a, job)["encrypted"] is False
     assert seen(tap, b, payload)  # the tap works: plain HTTP is readable
+
+
+def test_stripping_the_one_off_key_is_refused(
+    make_node: NodeFactory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Bravo advertised a key; an offer answered without encryption means someone in between."""
+    a, b = make_node("Alpha"), make_node("Bravo")
+    connect(a, b)
+    real = b.mesh.open_offer
+
+    def stripped(sender: str, target: str, enc: Any, **kw: Any) -> Any:
+        return real(sender, target, None, **kw)  # as if "enc" never arrived
+
+    monkeypatch.setattr(b.mesh, "open_offer", stripped)
+    alice = owner(a)
+    job = send(alice, [device_id(alice, "Bravo")], [("s.txt", b"s")])
+    wait_for(lambda: target_states(alice, job) == {"Bravo": "failed"})
+    assert "encryption" in target(a, job)["reason"]
+
+
+def test_a_one_off_key_for_another_run_is_refused(make_node: NodeFactory) -> None:
+    a, b = make_node("Alpha"), make_node("Bravo")
+    connect(a, b)
+    alice = owner(a)
+    bravo = device_id(alice, "Bravo")
+    with a.mesh._lock:
+        peer = a.mesh._peers[bravo]
+    peer.kx = filecrypt.new_kx()[1].hex()  # Bravo restarted: not the key it holds now
+    job = send(alice, [bravo], [("k.txt", b"k")])
+    wait_for(lambda: target_states(alice, job) == {"Bravo": "failed"})
+    assert not (Path(b.config.storage_dir) / "k.txt").exists()
 
 
 def test_an_older_paired_app_gets_plain_files_labelled(
@@ -256,7 +325,9 @@ def test_an_older_paired_app_gets_plain_files_labelled(
 
 def test_apps_advertise_ot_file_1(make_node: NodeFactory) -> None:
     a = make_node("Alpha")
-    assert owner(a)("GET", "/api/p2p/v1/info")[1]["enc"] == 1
+    info = owner(a)("GET", "/api/p2p/v1/info")[1]
+    assert info["enc"] == 1
+    assert len(bytes.fromhex(info["kx"])) == 32  # X25519, new each run, for unpaired senders
 
 
 # ---------------------------------------------------------------- lifecycle

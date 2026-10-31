@@ -68,6 +68,8 @@ class Config:
     public_url: str | None = None
     #: Extra Host header values to accept (DNS-rebinding protection). "*" disables the check.
     allowed_hosts: tuple[str, ...] = ()
+    #: Also serve browsers over TLS (self-signed) on a second port; links and QR use it.
+    https: bool = False
     #: Trust X-Forwarded-* headers from one reverse proxy in front of the app.
     trust_proxy: bool = False
     #: Always keep this many bytes of disk free.

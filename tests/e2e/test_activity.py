@@ -144,7 +144,10 @@ def test_devices_and_transfers_show_their_connection(
     send_file(page, "Bravo", path)
     target = page.locator(".job", has_text="path.txt").locator(".job-target")
     expect(target).to_have_attribute("data-path", "app")
-    expect(target.locator(".job-target-path")).to_have_text("Direct · not encrypted")  # unpaired
+    # Unpaired: a one-off key hides it from the Wi-Fi, but nobody vouched for Bravo.
+    path_label = target.locator(".job-target-path")
+    expect(path_label).to_have_text("Direct · encrypted, not verified")
+    expect(path_label).to_have_attribute("title", re.compile("Pair"))
 
 
 def test_a_send_between_paired_apps_says_it_is_encrypted(

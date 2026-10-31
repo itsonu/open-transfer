@@ -252,7 +252,10 @@ function renderMe() {
     status.textContent = discovery ? "Visible to nearby devices" : "Not discoverable — add devices by code or address";
     status.dataset.tone = discovery ? "ok" : "warn";
   } else {
-    status.textContent = me.paired ? `Paired with ${host.name}` : `Connected through ${host.name}`;
+    // This page's own hop to its app: TLS with --https, else plain HTTP (unless on this machine).
+    const local = ["127.0.0.1", "localhost", "[::1]"].includes(location.hostname);
+    const hop = location.protocol === "https:" ? " · encrypted (HTTPS)" : local ? "" : " · not encrypted";
+    status.textContent = (me.paired ? `Paired with ${host.name}` : `Connected through ${host.name}`) + hop;
     status.dataset.tone = "ok";
   }
 }
@@ -1247,7 +1250,10 @@ const PATH_HINT = {
 
 // ot-file/1 between paired apps (docs/encryption.md). Only said for an app-to-app hop:
 // a browser behind an app also crossed a plain-HTTP hop.
-const sealLabel = (encrypted) => (encrypted === true ? " · encrypted" : encrypted === false ? " · not encrypted" : "");
+// Unpaired apps get a one-off key: a listener can't read it, but nobody vouched for the other app.
+const sealLabel = (encrypted, authenticated = true) =>
+  encrypted === true ? (authenticated === false ? " · encrypted, not verified" : " · encrypted") : encrypted === false ? " · not encrypted" : "";
+const UNVERIFIED_HINT = "Encrypted with a one-off key, so others on the network can’t read it. Pair the devices to be sure it’s really them.";
 
 function pathLabel(path, target) {
   if (path === "via") return `Via ${target.via_name || "its app"}`;
@@ -1347,7 +1353,11 @@ function renderJobs() {
             { class: "job-target", dataset: { state: t.state, path } },
             h("span", { class: "mini-avatar", "aria-hidden": "true" }, icon(deviceIcon(t))),
             h("span", { class: "job-target-name" }, t.name),
-            h("span", { class: "job-target-path", title: PATH_HINT[path] }, pathLabel(path, original) + (path === "app" ? sealLabel(original.encrypted) : "")),
+            h(
+              "span",
+              { class: "job-target-path", title: path === "app" && original.authenticated === false ? UNVERIFIED_HINT : PATH_HINT[path] },
+              pathLabel(path, original) + (path === "app" ? sealLabel(original.encrypted, original.authenticated) : ""),
+            ),
             h("span", { class: "job-target-state" }, text),
             canRetryTarget &&
               h(
@@ -1513,7 +1523,7 @@ function fillPrompt(s) {
   $("#incoming-title").textContent = `${from.name} wants to send you ${s.files.length === 1 ? "a file" : `${s.files.length} files`}`;
   const host = mesh.data.host;
   const via = from.via_name && from.via_name !== host.name ? ` · via ${from.via_name}` : "";
-  const seal = from.via_name && s.encrypted ? "" : sealLabel(s.encrypted);
+  const seal = from.via_name && s.encrypted ? "" : sealLabel(s.encrypted, s.authenticated);
   $("#incoming-sub").textContent = `${formatBytes(s.total)}${via}${s.paired ? " · paired" : ""}${seal}`;
   const shown = s.files.slice(0, 5);
   $("#incoming-files").replaceChildren(
@@ -1779,6 +1789,9 @@ export function openAddDevice({ tab = "show" } = {}) {
   } else $("#qr-image").src = `/api/qr.svg?v=${encodeURIComponent(info.share_url)}`;
   $("#pin-note").hidden = !info.pin;
   $("#pin-note-value").textContent = info.pin || "";
+  const tls = owner ? mesh.data?.https : null; // --https: the self-signed certificate to compare
+  $("#tls-note").hidden = !tls;
+  $("#tls-note-value").textContent = tls ? tls.fingerprint : "";
   $("#share-url-button").hidden = !navigator.share;
   const others = (info.urls || []).filter((u) => u !== info.share_url);
   $("#other-urls").hidden = others.length === 0;

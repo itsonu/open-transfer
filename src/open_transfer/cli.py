@@ -162,6 +162,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--no-qr", action="store_true", default=None, help="don't print a QR code")
     parser.add_argument(
+        "--https",
+        action="store_true",
+        default=None,
+        help="also serve browsers over HTTPS (self-signed: they warn once), on the next port",
+    )
+    parser.add_argument(
         "--keys", action="store_true", help="say where pairing keys are kept, then exit"
     )
     parser.add_argument(
@@ -218,6 +224,7 @@ def config_from_args(args: argparse.Namespace) -> Config:
         public_url=_pick(args.public_url, "PUBLIC_URL"),  # type: ignore[arg-type]
         allowed_hosts=tuple(allowed),
         trust_proxy=bool(args.behind_proxy) or env_bool("BEHIND_PROXY"),
+        https=bool(args.https) or env_bool("HTTPS"),
         device_name=_pick(args.name, "NAME"),  # type: ignore[arg-type]
         device_form=str(_pick(args.form, "FORM", "computer")),
         state_dir=Path(str(env("STATE_DIR"))) if env("STATE_DIR") else None,

@@ -168,10 +168,8 @@ def register(
             raise MeshError(429, "busy", "Too many unanswered transfers. Try again shortly.")
         target = str(data.get("to", ""))
         files = data.get("files")
-        # ot-file/1 only from the paired app that signed this: an unsigned block means nothing.
-        salt, meta = (
-            mesh.open_offer(sender_id, target, data.get("enc")) if verified else (b"", None)
-        )
+        # ot-file/1: keyed by pairing if the paired app signed this, else a one-off key.
+        salt, meta, base = mesh.open_offer(sender_id, target, data.get("enc"), signed=verified)
         if meta is not None:  # names and who's sending were sealed
             origin, files = meta.get("origin"), meta.get("files")
             if not isinstance(origin, dict):
@@ -185,6 +183,7 @@ def register(
             job=str(data.get("job") or ""),
             sender_node=sender_id,
             enc_salt=salt,
+            enc_base=base,
         )
         return jsonify(
             {

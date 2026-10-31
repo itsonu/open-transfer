@@ -116,6 +116,14 @@ POST /api/p2p/v1/offers
   checksum. `meta` (names, types and sender, sealed) is sent once the
   receiver has said `"enc": 1` in a signed hello; the plain `files` then
   carry placeholder names.
+* Between **unpaired** apps the offer carries
+  `"enc": {"v": 1, "salt", "eph": "<sender's one-off X25519 key>", "kx": "<the receiver's key it used>", "meta"}`,
+  where `kx` is the per-run X25519 key the receiver advertises in `/info` and
+  hellos. Both sides derive a one-off base key (X25519 + HKDF) that stands in
+  for the pair key; everything else is the same `ot-file/1`. It isn't
+  authenticated: it stops a listener, not an active attacker. A `kx` from an
+  earlier run is refused (`400`). If the receiver advertised `kx` and the
+  answer lacks `"enc": 1`, the sender refuses.
 
 **States:** `pending` → `accepted` → `receiving` → `done`, or `declined`,
 `expired` (no answer in 120 s), `canceled`, `failed`. Offers to an owner from

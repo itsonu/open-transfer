@@ -229,6 +229,7 @@ Every option works as a command-line flag or an environment variable (flags win)
 | `--public-url` | `OPEN_TRANSFER_PUBLIC_URL` | auto | Address shown in the QR code (Docker, proxies, DNS names) |
 | `--allow-host NAME` | `OPEN_TRANSFER_ALLOWED_HOSTS` (comma-separated) | — | Extra host names to accept (see [DNS rebinding](#security--privacy)); `*` disables the check |
 | `--behind-proxy` | `OPEN_TRANSFER_BEHIND_PROXY=1` | off | Trust `X-Forwarded-*` from one reverse proxy |
+| `--https` | `OPEN_TRANSFER_HTTPS=1` | off | Also serve browsers over HTTPS on the next port (self-signed: browsers warn once); links and QR codes use it |
 | `--no-browser` | `OPEN_TRANSFER_NO_BROWSER=1` | off | Don't open a browser on start |
 | `--no-qr` | `OPEN_TRANSFER_NO_QR=1` | off | Don't print the QR code |
 | `-v, --verbose` | — | off | Log every request |

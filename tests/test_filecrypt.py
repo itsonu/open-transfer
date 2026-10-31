@@ -238,3 +238,20 @@ class _Zeros:
         n = self._left if n < 0 else min(n, self._left)
         self._left -= n
         return bytes(n)
+
+
+def test_one_off_keys_agree_and_are_bound_to_both_apps() -> None:
+    private, public = filecrypt.new_kx()
+    salt = bytes(32)
+    base, eph = filecrypt.ephemeral_to(public, salt, "d-a", "d-b")
+    assert filecrypt.ephemeral_from(private, eph, salt, "d-a", "d-b") == base
+    assert filecrypt.ephemeral_from(private, eph, salt, "d-x", "d-b") != base
+    again, eph2 = filecrypt.ephemeral_to(public, salt, "d-a", "d-b")
+    assert eph2 != eph  # a fresh sender key every offer
+    assert again != base
+
+
+def test_a_degenerate_one_off_key_is_refused() -> None:
+    private, _ = filecrypt.new_kx()
+    with pytest.raises(filecrypt.DecryptError):
+        filecrypt.ephemeral_from(private, bytes(32), bytes(32), "d-a", "d-b")  # all-zero point
