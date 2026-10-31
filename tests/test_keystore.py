@@ -50,7 +50,8 @@ def test_sealed_values_open_only_for_what_they_were_sealed_for(tmp_path: Path) -
     vault = Vault(tmp_path, Memory())
     sealed = vault.seal(KEY, "pair|d-aaaaaaaa")
     assert KEY.hex() not in sealed
-    assert vault.open(sealed, "pair|d-aaaaaaaa") == KEY
+    opened = vault.open(sealed, "pair|d-aaaaaaaa")
+    assert opened == KEY
     with pytest.raises(ValueError, match="damaged"):
         vault.open(sealed, "pair|d-bbbbbbbb")  # moved onto another device's entry
     with pytest.raises(ValueError, match="damaged"):
@@ -73,7 +74,8 @@ def test_restart_reuses_the_vault_key(tmp_path: Path) -> None:
     store = Memory()
     sealed = Vault(tmp_path, store).seal(KEY, "session")
     again = Vault(tmp_path, store)
-    assert again.open(sealed, "session") == KEY
+    opened = again.open(sealed, "session")
+    assert opened == KEY
     assert len(store.items) == 1
 
 
@@ -153,9 +155,11 @@ def test_unpairing_removes_the_sealed_key_even_when_locked(tmp_path: Path) -> No
     trust = TrustStore(tmp_path, Vault(tmp_path, store))
     trust.add("d-aaaaaaaa", "Phone", KEY)
     trust.add("d-bbbbbbbb", "PC", b"\x22" * 32)
-    assert trust.remove("d-aaaaaaaa")
+    removed = trust.remove("d-aaaaaaaa")
+    assert removed
     locked = TrustStore(tmp_path, Vault(tmp_path, Memory()))
-    assert locked.remove("d-bbbbbbbb")
+    removed = locked.remove("d-bbbbbbbb")
+    assert removed
     assert json.loads((tmp_path / "trusted.json").read_text()) == {}
 
 
@@ -167,7 +171,8 @@ def test_a_keystore_that_refuses_falls_back_to_a_file_and_says_so(tmp_path: Path
     assert not vault.protected
     sealed = vault.seal(KEY, "session")
     # Next start the keystore still refuses: the file key still opens what it sealed.
-    assert Vault(tmp_path, store).open(sealed, "session") == KEY
+    opened = Vault(tmp_path, store).open(sealed, "session")
+    assert opened == KEY
 
 
 def test_a_keystore_that_cannot_read_back_is_not_trusted(tmp_path: Path) -> None:

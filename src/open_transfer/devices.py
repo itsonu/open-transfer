@@ -23,10 +23,7 @@ import time
 import unicodedata
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
-
-if TYPE_CHECKING:
-    from open_transfer.keystore import Vault
+from typing import Any
 
 log = logging.getLogger("open_transfer")
 
@@ -165,7 +162,8 @@ class TrustedDevice:
 class TrustStore:
     """Devices this one is paired with, and the key each pair shares."""
 
-    def __init__(self, state_dir: Path, vault: Vault | None = None) -> None:
+    def __init__(self, state_dir: Path, vault: Any = None) -> None:
+        """``vault``: a :class:`open_transfer.keystore.Vault` (this folder's, by default)."""
         from open_transfer.keystore import Locked, open_vault
 
         self.vault = vault or open_vault(state_dir)

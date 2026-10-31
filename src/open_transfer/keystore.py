@@ -119,10 +119,10 @@ class WindowsDpapi(FileBackend):
 
 def _dpapi(data: bytes, *, protect: bool) -> bytes:
     import ctypes
-    from ctypes import wintypes
+    import ctypes.wintypes
 
     class Blob(ctypes.Structure):
-        _fields_ = (("cbData", wintypes.DWORD), ("pbData", ctypes.POINTER(ctypes.c_char)))
+        _fields_ = (("cbData", ctypes.wintypes.DWORD), ("pbData", ctypes.POINTER(ctypes.c_char)))
 
     crypt32 = ctypes.windll.crypt32  # type: ignore[attr-defined]
     kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]

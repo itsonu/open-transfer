@@ -217,7 +217,8 @@ def test_visitors_cant_delete_by_default(tmp_path: Path) -> None:
     client = app.test_client()
     (tmp_path / "a.txt").write_bytes(b"abc")
     assert client.get("/api/info").json["permissions"]["delete"] is False
-    assert client.delete("/api/files/a.txt").status_code == 403
+    refused = client.delete("/api/files/a.txt")
+    assert refused.status_code == 403
     assert (tmp_path / "a.txt").exists()
 
 
