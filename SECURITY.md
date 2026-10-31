@@ -19,7 +19,7 @@ In scope: anything that lets someone read, write or delete files they shouldn't,
 Out of scope — by design, and documented in the README:
 
 - Anyone on the network can use an instance started **without** a PIN.
-- Traffic is unencrypted HTTP unless you add an HTTPS reverse proxy.
+- Browser traffic is unencrypted HTTP unless you add an HTTPS reverse proxy. Files between **paired apps** are encrypted end to end; transfers with unpaired or older apps are plain HTTP and labelled so ([docs/encryption.md](docs/encryption.md)).
 - Brute-forcing a 4-digit PIN over a long time (5 attempts/min per address); use a longer alphanumeric PIN for exposed setups.
 
 ## Hardening already in place

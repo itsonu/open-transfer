@@ -133,6 +133,8 @@ These power the device grid. "Owner" means a request from the device itself
 | `POST /api/invites` `{}` → `{token, url, expires_in}` · `GET /api/invites` | owner | Mint a single-use guest link (`/?invite=…`): lets one visitor past the PIN as a trusted guest, then expires (10 min default) |
 | `DELETE /api/send/<job>` · `DELETE /api/send/<job>/targets/<id>` | job creator | Cancel everything / one receiver |
 | `POST /api/send/<job>/retry` `{to?: [ids]}` | job creator | Re-offer the job's files to declined/failed/expired targets → `201 {job}` (receiver is asked again) |
+
+In `/api/state`, `incoming[].encrypted` and `outgoing[].targets[].encrypted` say whether the app-to-app hop is encrypted ([`ot-file/1`](encryption.md)): `true`, `false` (an unpaired or older app: plain HTTP), or `null` when no other app is involved.
 | `POST /api/incoming/<id>/accept` · `/decline` · `DELETE /api/incoming/<id>` | the recipient | Answer or stop an incoming transfer |
 | `GET /api/inbox/files/<name>` · `DELETE …` · `GET /api/inbox/archive` | visitor | Files sent to this browser |
 | `POST /api/pair` `{code, address?}` | owner | Pair with the app showing `code` (the nearby one with Add device open, or at `address`) |

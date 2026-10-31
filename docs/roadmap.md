@@ -87,7 +87,7 @@ The eight product phases asked for on 2026-10-31 map onto what's shipped:
 
 Reliability and security follow-ups from the audit ([audit-2026-10-26.md](audit-2026-10-26.md)):
 
-1. **Encrypt file transfers between paired apps** (the protocol's biggest open limit: plain HTTP on the LAN). Smallest step: seal each piece with the pair key, as clips already are; then TLS with pinned per-device certificates.
+1. ✅ **Encrypt file transfers between paired apps:** done as [`ot-file/1`](encryption.md). Still plain: a browser's own hop to its app, and unpaired or older apps (labelled). Next: pair keys in the OS keystore (Keychain, DPAPI, Android Keystore).
 2. **Checksum the browser → its own app hop** (today only app → app is verified).
 3. **Windows on a Domain network:** make the Allow rule for the current profile (Domain) instead of Private.
 4. **Paired devices pass on each other's new addresses** (today each device must hear the move itself).

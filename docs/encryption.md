@@ -99,6 +99,26 @@ the transfer list and in history.
 | Clipboard sync | Sealed per recipient (`sync/1`) | Unchanged | See [sync.md](sync.md). |
 | Android ↔ desktop, Windows ↔ macOS | — | Same as paired app ↔ app | Every app runs the same Python code (`cryptography` 42+ on Android via Chaquopy). |
 
+## Key lifecycle
+
+| Event | What happens | Tested |
+|---|---|---|
+| Pairing | SRP-6a leaves both apps with the 32-byte pair key ([trust-model](protocol.md#3-pairing)) | `test_mesh` pairing tests |
+| Each transfer | A new 32-byte random salt, so every file key is new. The pair key itself never encrypts anything. | `test_every_transfer_gets_its_own_keys` |
+| Each file | Its own key: index, size, target and both app ids are in the HKDF info | `test_ciphertext_from_another_file_or_transfer_is_refused` |
+| Group send | Each receiver's file key comes from *its* pair key | `test_every_receiver_in_a_group_gets_its_own_key` |
+| Unpair | The key is deleted. Encrypted transfers from that device stop, and new ones can't be keyed. | `test_unpairing_stops_transfers_from_that_device` |
+| Re-pair / reinstall | A new pair key; the `enc` flag starts over and is learned again from the next signed hello | `test_re_pairing_gives_a_new_key_and_transfers_still_work` |
+| History | Records hold names, sizes and states, never keys, so re-pairing never touches them | — |
+
+**At rest.** Pair keys live in `<state>/trusted.json`, written atomically
+with mode 0600. By default `<state>` is `<storage folder>/.open-transfer`,
+which is never served: hidden names are refused (`test_storage`). On
+Windows, mode bits don't apply; the file has the folder's ACL (the user's
+profile). On Android it's in app-private storage. Moving the keys into the
+OS keystore (Keychain, DPAPI, Android Keystore) is a backlog item. Anyone
+who can read your user files can already read the files you received.
+
 ## Failure reasons the user sees
 
 | Cause | Receiver | Sender |
@@ -107,6 +127,35 @@ the transfer list and in history.
 | A downgrade was attempted | — | “Couldn't set up encryption with *X*.” |
 | Unpaired during a transfer | Transfers from that device stop: “No longer paired with *X*.” | Its next piece fails the same way. |
 | Interrupted or app restarted | `.part` files and staged pieces are deleted (staged pieces after their usual expiry) | Retried or resumed as before; every piece is authenticated again. |
+
+## Performance
+
+`python scripts/bench_encryption.py --mb 1024` on an Apple M5 Mac
+(Python 3.14, `cryptography` 50) gave the figures below. Both apps run in
+**one process on 127.0.0.1**, so one CPU does the sender's encryption *and*
+the receiver's decryption, and the network is never the limit. On real
+devices each side does half that work.
+
+| Mode | Streams | Size | Time | Throughput | CPU | Peak memory |
+|---|---|---|---|---|---|---|
+| plain | 1 | 1024 MB | 1.73 s | 591 MB/s | 3.78 s | 74 MB |
+| encrypted | 1 | 1024 MB | 3.14 s | 327 MB/s | 6.31 s | 69 MB |
+| plain | 4 at once | 1024 MB | 3.63 s | 282 MB/s | 10.35 s | 96 MB |
+| encrypted | 4 at once | 1024 MB | 5.3 s | 193 MB/s | 13.88 s | 77 MB |
+
+AES-256-GCM on its own (encrypt and decrypt, one core): about 2 GB/s.
+
+* **Throughput.** Encrypted transfers run at 190–330 MB/s, several times
+  what Wi‑Fi carries (roughly 10–120 MB/s), so on a real network you
+  shouldn't notice a difference.
+* **CPU.** About 1.3–1.7× the plain transfer's, split between the two
+  devices.
+* **Memory.** Flat: the whole process stays near 70 MB for a 1 GB file. A
+  file is never held in memory, only one 64 KiB record per stream, or one
+  2 MiB piece when resuming.
+* **Not measured here.** Android phones (no CI runner has one) and
+  Windows. On ARMv8 phones AES has hardware instructions, but the cost
+  there is unmeasured until a device run.
 
 ## Older versions
 

@@ -97,6 +97,16 @@ POST /api/p2p/v1/offers
 * `to` is the receiving app's own id (its owner) **or one of its visitors**.
 * Names are sanitised by the receiver; sizes are checked against free space
   and `--max-size` up front (`state: "declined"` with a reason if they don't fit).
+* Between **paired** apps the offer also carries
+  `"enc": {"v": 1, "salt": "<64 hex>", "meta": "<sealed names>"?}` and the
+  receiver answers `"enc": 1`: every file then travels encrypted
+  ([`ot-file/1`](encryption.md)). The `PUT` body is the file's AES-256-GCM
+  records (`Content-Length` = size + 16 per 64 KiB record); with
+  `Content-Range` the range stays in plaintext positions and the body is
+  those whole records. `/verify` takes `{"mac": …}` instead of the bare
+  checksum. `meta` (names, types and sender, sealed) is sent once the
+  receiver has said `"enc": 1` in a signed hello; the plain `files` then
+  carry placeholder names.
 
 **States:** `pending` → `accepted` → `receiving` → `done`, or `declined`,
 `expired` (no answer in 120 s), `canceled`, `failed`. Offers to an owner from
@@ -215,12 +225,12 @@ them.
 
 ## Security notes and limits
 
-* **Transport is plain HTTP on the LAN.** Pairing authenticates devices and
-  protects against tampering with *who* is sending. Synced clipboard contents
-  are sealed per recipient (see [sync.md](sync.md)); file contents are not
-  encrypted in transit — anyone who can capture traffic on your Wi-Fi could
-  read them. Use networks you trust, a PIN for the web UI, and paired-only mode
-  on shared networks. TLS with pinned per-device certificates is on the roadmap.
+* **Transport is plain HTTP on the LAN; content between paired apps isn't.**
+  Files between paired apps are encrypted end to end
+  ([encryption.md](encryption.md)), and synced clips are sealed per recipient
+  ([sync.md](sync.md)). Transfers with unpaired or older apps, and a browser's
+  own hop to the app it opened, are plain HTTP and are labelled so. Use a PIN
+  for the web UI and paired-only mode on shared networks.
 * Browser → browser goes direct (WebRTC, see above). Browser → app and
   app → browser-on-another-app still pass through the app the browser opened.
 * Big files are resumable end to end: the browser uploads 2 MiB pieces (3 in
