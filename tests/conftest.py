@@ -24,6 +24,7 @@ def make_app(tmp_path: Path) -> AppFactory:
         # The classic suite tests the shared-folder mode as seen by a visitor;
         # tests/test_mesh*.py cover the owner and nearby devices.
         overrides.setdefault("share_folder", True)
+        overrides.setdefault("allow_delete", True)  # opt-in since 2026-10-31; tested here
         overrides.setdefault("owner_loopback", False)
         overrides.setdefault("discovery", False)
         app = create_app(Config(**overrides))  # type: ignore[arg-type]

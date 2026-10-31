@@ -188,7 +188,7 @@ Any device can send to any other — there's no host or server role. A phone wit
 **Operating it**
 - One-command start on macOS, Linux and Windows; free-port fallback (macOS uses 5000 for AirPlay)
 - Optional **PIN** for browsers joining by link, with brute-force rate limiting
-- Classic **shared-folder** mode (`--share-folder`) with receive-only / read-only / no-delete, undo, search and ZIP download
+- Classic **shared-folder** mode (`--share-folder`) with receive-only / read-only, delete for visitors only if you allow it, undo, search and ZIP download
 - Docker image as an always-on hub, reverse-proxy support, and a documented [HTTP API](docs/api.md) and [device protocol](docs/protocol.md)
 
 ## Screenshots
@@ -224,7 +224,8 @@ Every option works as a command-line flag or an environment variable (flags win)
 | `--max-size` | `OPEN_TRANSFER_MAX_SIZE` | unlimited | Largest single upload, e.g. `500M`, `4G`, `2GiB` |
 | `--receive-only` | `OPEN_TRANSFER_RECEIVE_ONLY=1` | off | Shared-folder mode: visitors can send but not see files |
 | `--read-only` | `OPEN_TRANSFER_READ_ONLY=1` | off | Visitors can't send (shared-folder mode: download only) |
-| `--no-delete` | `OPEN_TRANSFER_NO_DELETE=1` | off | Shared-folder mode: visitors can't delete files |
+| `--allow-delete` | `OPEN_TRANSFER_ALLOW_DELETE=1` | off | Shared-folder mode: visitors can delete files (before 2026-10-31 this was the default) |
+| `--no-delete` | `OPEN_TRANSFER_NO_DELETE=1` | off | Shared-folder mode: visitors can't delete files, even with `--allow-delete` |
 | `--public-url` | `OPEN_TRANSFER_PUBLIC_URL` | auto | Address shown in the QR code (Docker, proxies, DNS names) |
 | `--allow-host NAME` | `OPEN_TRANSFER_ALLOWED_HOSTS` (comma-separated) | — | Extra host names to accept (see [DNS rebinding](#security--privacy)); `*` disables the check |
 | `--behind-proxy` | `OPEN_TRANSFER_BEHIND_PROXY=1` | off | Trust `X-Forwarded-*` from one reverse proxy |

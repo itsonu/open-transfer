@@ -54,8 +54,16 @@ def test_cli_defaults(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     assert config.storage_dir == (tmp_path / "uploads").resolve()
     assert config.pin is None
     assert config.allow_upload
-    assert config.allow_delete
+    assert not config.allow_delete  # visitors can't delete unless you opt in
     assert config.allow_browse
+
+
+def test_visitors_delete_only_when_allowed(monkeypatch: pytest.MonkeyPatch) -> None:
+    assert parse("--allow-delete").allow_delete
+    assert not parse("--allow-delete", "--no-delete").allow_delete  # the stricter one wins
+    assert not parse("--allow-delete", "--read-only").allow_delete
+    monkeypatch.setenv("OPEN_TRANSFER_ALLOW_DELETE", "1")
+    assert parse().allow_delete
 
 
 def test_cli_flags(tmp_path: Path) -> None:
