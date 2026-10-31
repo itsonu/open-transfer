@@ -1,6 +1,6 @@
 # Architecture
 
-Open Transfer is intentionally small: one Python process per device, three runtime dependencies (Flask, cheroot, segno), and a front end with no build step. Every device — desktop app, Android app, CLI, Docker — runs the same code. This document explains how the pieces fit and why; the device-to-device wire format is in [protocol.md](protocol.md).
+Open Transfer is intentionally small: one Python process per device, four runtime dependencies (Flask, cheroot, segno, cryptography), and a front end with no build step. Every device — desktop app, Android app, CLI, Docker — runs the same code. This document explains how the pieces fit and why; the device-to-device wire format is in [protocol.md](protocol.md).
 
 ## Goals that shaped the design
 

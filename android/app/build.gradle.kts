@@ -86,6 +86,7 @@ chaquopy {
             install("flask>=3.0,<4")
             install("cheroot>=10.0")
             install("segno>=1.6")
+            install("cryptography>=42")
         }
     }
     sourceSets {
