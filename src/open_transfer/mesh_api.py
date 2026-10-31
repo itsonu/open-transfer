@@ -28,7 +28,7 @@ from flask import (
 )
 from werkzeug.exceptions import ClientDisconnected
 
-from open_transfer import network
+from open_transfer import filecrypt, network
 from open_transfer.archive import zip_stream
 from open_transfer.clipboard import MAX_IMAGE_BYTES as CLIP_MAX_IMAGE
 from open_transfer.devices import clean_form, clean_name, clean_platform, valid_id
@@ -167,14 +167,24 @@ def register(
         if mesh.pending_from(client()) >= MAX_PENDING_PER_CLIENT:
             raise MeshError(429, "busy", "Too many unanswered transfers. Try again shortly.")
         target = str(data.get("to", ""))
+        files = data.get("files")
+        # ot-file/1 only from the paired app that signed this: an unsigned block means nothing.
+        salt, meta = (
+            mesh.open_offer(sender_id, target, data.get("enc")) if verified else (b"", None)
+        )
+        if meta is not None:  # names and who's sending were sealed
+            origin, files = meta.get("origin"), meta.get("files")
+            if not isinstance(origin, dict):
+                raise MeshError(400, "bad_request", "Missing sender.")
         session = mesh.create_offer(
             origin=_clean_origin(origin, sender),
             target=target,
-            files=data.get("files"),  # type: ignore[arg-type]
+            files=files,  # type: ignore[arg-type]
             paired=verified and origin.get("id") == sender_id,
             source=client(),
             job=str(data.get("job") or ""),
             sender_node=sender_id,
+            enc_salt=salt,
         )
         return jsonify(
             {
@@ -182,6 +192,7 @@ def register(
                 "secret": session.secret,
                 "state": session.state,
                 "reason": session.reason,
+                **({"enc": filecrypt.VERSION} if session.enc_salt else {}),
             }
         ), 201
 
@@ -205,8 +216,6 @@ def register(
                 data = request.get_data(cache=False)
             except (ClientDisconnected, ConnectionError) as exc:
                 raise IncompleteUpload("The transfer was interrupted before it finished.") from exc
-            if len(data) != end - start + 1:
-                raise MeshError(400, "bad_range", "Chunk size doesn’t match Content-Range.")
             try:
                 result = mesh.receive_chunk(
                     session_id,
@@ -215,6 +224,7 @@ def register(
                     data,
                     total,
                     secret=request.headers.get("X-OT-Secret", ""),
+                    length=end - start + 1,
                 )
             except (MeshError, StorageError):
                 _drain_body()
@@ -237,7 +247,8 @@ def register(
 
     @app.post(f"{P2P}/offers/<session_id>/files/<int:index>/verify")
     def p2p_offer_verify(session_id: str, index: int) -> Response:
-        claimed = body_json().get("sha256")
+        body = body_json()
+        claimed = body.get("mac") or body.get("sha256")  # mac: ot-file/1 transfers
         if not isinstance(claimed, str) or len(claimed) != 64:
             raise MeshError(400, "bad_request", "Expected a SHA-256 checksum.")
         return jsonify(

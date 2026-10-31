@@ -155,6 +155,7 @@ class TrustedDevice:
     paired_at: float
     form: str = ""  # remembered so an away device keeps its icon ("" = not known yet)
     platform: str = ""
+    enc: bool = False  # said in a signed hello that it speaks ot-file/1: never send it plain text
 
 
 class TrustStore:
@@ -174,6 +175,7 @@ class TrustStore:
                         float(item.get("paired_at", 0)),
                         clean_form(item["form"]) if item.get("form") else "",
                         clean_platform(item["platform"]) if item.get("platform") else "",
+                        item.get("enc") is True,
                     )
             except (KeyError, TypeError, ValueError):
                 continue
@@ -229,6 +231,13 @@ class TrustStore:
                 device.name, device.form, device.platform = seen
                 self._save()
 
+    def mark_enc(self, device_id: str) -> None:
+        with self._lock:
+            device = self._devices.get(device_id)
+            if device is not None and not device.enc:
+                device.enc = True
+                self._save()
+
     def remove(self, device_id: str) -> bool:
         with self._lock:
             removed = self._devices.pop(device_id, None) is not None
@@ -244,6 +253,7 @@ class TrustStore:
                 "paired_at": d.paired_at,
                 **({"form": d.form} if d.form else {}),
                 **({"platform": d.platform} if d.platform else {}),
+                **({"enc": True} if d.enc else {}),
             }
             for d in self._devices.values()
         }

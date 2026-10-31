@@ -48,7 +48,7 @@ from dataclasses import dataclass, field
 from functools import partial
 from typing import Any
 
-from open_transfer import __version__, network, srp
+from open_transfer import __version__, filecrypt, network, srp
 from open_transfer.chunks import CHUNK_SIZE as RESUMABLE_CHUNK_SIZE
 from open_transfer.chunks import ChunkSessions
 from open_transfer.clipboard import IMAGE_MIME as CLIP_IMAGE_MIME
@@ -233,6 +233,7 @@ class IncomingSession:
     started: float = 0.0  # when the first byte arrived (for the speed in history)
     recorded: bool = False  # written to history
     on_duplicate: str = "rename"  # files already here: "rename" (keep both), "skip" or "replace"
+    enc_salt: bytes = field(default=b"", repr=False)  # ot-file/1: only encrypted bytes accepted
 
     @property
     def total(self) -> int:
@@ -260,6 +261,8 @@ class Delivery:
     direct: bool = False  # the sender's browser is sending straight to the receiver's (WebRTC)
     skip: set[int] = field(default_factory=set)  # files the receiver already has and kept
     verified: set[int] = field(default_factory=set)  # files whose checksum the receiver confirmed
+    enc_salt: bytes = field(default=b"", repr=False)
+    encrypted: bool = False  # the receiving app takes this transfer as ot-file/1
 
     def view_state(self) -> str:
         if self.canceled:
@@ -426,6 +429,7 @@ class Mesh:
             "port": self.port,
             "version": __version__,
             "accepts": "paired" if self.config.paired_only else "everyone",
+            "enc": filecrypt.VERSION,
             **({"pairing": True} if self.pairing_open else {}),
         }
         if include_visitors:
@@ -659,6 +663,8 @@ class Mesh:
             reply["you"] = {"reachable": peer.reachable}  # whether we can reach the caller
         challenge, to = info.get("challenge"), info.get("to")
         trusted = self.trust.get(str(info.get("id"))) if signed else None
+        if trusted and info.get("enc") == filecrypt.VERSION:
+            self.trust.mark_enc(trusted.id)  # from now on, never send it plain text
         # Prove we're here — only for an address that is ours, so someone relaying the
         # challenge to us can't use the answer for theirs.
         if (
@@ -1048,8 +1054,14 @@ class Mesh:
         allowed = self.clipboard.settings()["allowed"]
         if device_id in allowed:
             self.clipboard.set_settings(allowed=[i for i in allowed if i != device_id])
-        if not self.trust.get(device_id):
+        trusted = self.trust.get(device_id)
+        if not trusted:
             return False
+        with self._lock:  # its key is going: stop what it was sending us with it
+            for s in self._incoming.values():
+                if s.sender_node == device_id and s.enc_salt and s.state not in FINAL:
+                    s.state, s.finished = CANCELED, time.monotonic()
+                    s.reason = f"No longer paired with {trusted.name}."
         if self.sync.active():
             self.sync.revoke(device_id)
             return True
@@ -1282,6 +1294,7 @@ class Mesh:
         source: str = "",
         job: str = "",
         sender_node: str = "",
+        enc_salt: bytes = b"",
     ) -> IncomingSession:
         """Someone wants to send ``files`` to ``target`` (our owner or a visitor)."""
         clean = _clean_files(files)
@@ -1306,6 +1319,7 @@ class Mesh:
             source=source,
             job=str(job)[:64],
             sender_node=sender_node,
+            enc_salt=enc_salt,
         )
         store = self.storage if owner_target else self.inbox(target)
         for f in session.files:
@@ -1332,6 +1346,62 @@ class Mesh:
             )
             self._emit("offer", self._incoming_view(session))
         return session
+
+    def open_offer(self, sender_id: str, target: str, enc: Any) -> tuple[bytes, Any]:
+        """A signed offer's ot-file/1 block: its salt, and its sealed names if any."""
+        if not isinstance(enc, dict) or enc.get("v") != filecrypt.VERSION:
+            return b"", None
+        trusted = self.trust.get(sender_id)
+        try:
+            salt = bytes.fromhex(str(enc.get("salt")))
+        except ValueError:
+            salt = b""
+        if trusted is None or len(salt) != 32:
+            raise MeshError(400, "bad_request", "Invalid encryption parameters.")
+        if "meta" not in enc:
+            return salt, None
+        key = filecrypt.meta_key(bytes.fromhex(trusted.key), salt, sender_id, self.id, target)
+        try:
+            meta = filecrypt.open_meta(key, str(enc["meta"]))
+        except filecrypt.DecryptError as exc:
+            raise MeshError(400, "bad_seal", "The offer couldn’t be opened with your key.") from exc
+        if not isinstance(meta, dict):
+            raise MeshError(400, "bad_request", "Invalid encryption parameters.")
+        return salt, meta
+
+    def _cipher(
+        self,
+        peer_id: str,
+        salt: bytes,
+        sender: str,
+        receiver: str,
+        target: str,
+        index: int,
+        size: int,
+    ) -> filecrypt.Cipher:
+        """One file's ot-file/1 cipher, keyed from the pair key we share with ``peer_id``."""
+        trusted = self.trust.get(peer_id)
+        if trusted is None:
+            raise MeshError(403, "not_paired", "No longer paired with that device.")
+        pair_key = bytes.fromhex(trusted.key)
+        return filecrypt.Cipher(
+            filecrypt.file_key(pair_key, salt, sender, receiver, target, index, size), size
+        )
+
+    def _receive_cipher(self, session: IncomingSession, index: int) -> filecrypt.Cipher:
+        sender = session.sender_node
+        size = session.files[index].size
+        return self._cipher(sender, session.enc_salt, sender, self.id, session.target, index, size)
+
+    def _send_cipher(self, delivery: Delivery, index: int, size: int) -> filecrypt.Cipher:
+        peer = delivery.peer
+        assert peer is not None  # noqa: S101 - only remote deliveries are encrypted
+        target = str(delivery.target["id"])
+        return self._cipher(peer.id, delivery.enc_salt, self.id, peer.id, target, index, size)
+
+    def _damaged(self, session: IncomingSession) -> str:
+        name = session.origin.get("name") or "the sender"
+        return f"It arrived damaged or wasn’t from {name} — nothing was kept."
 
     def pending_from(self, source: str) -> int:
         with self._lock:
@@ -1447,8 +1517,10 @@ class Mesh:
                 raise MeshError(409, "duplicate", "This file is already being received.")
             if length is None:
                 raise MeshError(411, "length_required", "Send a Content-Length header.")
-            if length != item.size:
+            sealed = filecrypt.sealed_size(item.size) if session.enc_salt else item.size
+            if length != sealed:
                 raise MeshError(400, "size_mismatch", "The file size doesn’t match the offer.")
+            cipher = self._receive_cipher(session, index) if session.enc_salt else None
             if not skipped:
                 item.state, item.received, item.error = RECEIVING, 0, ""
                 session.state = RECEIVING
@@ -1462,19 +1534,33 @@ class Mesh:
         def count(n: int) -> None:
             item.received += n
 
+        if cipher is not None:  # every 64 KiB record is authenticated before it's written
+            stream = filecrypt.Decrypting(stream, cipher)
         hasher = hashlib.sha256()
         reader = _Watched(_Hashing(stream, hasher), count, lambda: session.state == CANCELED)
         try:
             saved = store.save_stream(
-                item.name, reader, length=length, max_size=self.config.max_upload_size
+                item.name, reader, length=item.size, max_size=self.config.max_upload_size
             )
         except (StorageError, OSError, ValueError) as exc:
+            damaged = isinstance(exc, filecrypt.DecryptError) and not isinstance(
+                exc, filecrypt.Truncated
+            )
             with self._lock:
                 item.state = FAILED
-                item.error = str(exc) if isinstance(exc, StorageError) else "Interrupted"
+                item.error = (
+                    self._damaged(session)
+                    if damaged
+                    else str(exc)
+                    if isinstance(exc, StorageError)
+                    else "Interrupted"
+                )
                 self._maybe_finish(session)
             if session.state == CANCELED:
                 raise MeshError(410, CANCELED, session.reason) from exc
+            if damaged:
+                log.warning("Refused %s: it failed authentication", log_safe(item.name))
+                raise MeshError(400, "bad_seal", item.error) from exc
             if isinstance(exc, StorageError):
                 raise
             raise IncompleteUpload("The transfer was interrupted before it finished.") from exc
@@ -1514,7 +1600,10 @@ class Mesh:
             return {"verified": True, "skipped": True}
         if item.state != DONE or not item.sha256:
             raise MeshError(409, "not_done", "This file hasn’t arrived yet.")
-        if secrets.compare_digest(item.sha256, claimed.lower()):
+        expected = item.sha256
+        if session.enc_salt:  # the sender sends a MAC of its checksum, never the bare hash
+            expected = filecrypt.verify_mac(self._receive_cipher(session, index).key, item.sha256)
+        if secrets.compare_digest(expected, claimed.lower()):
             item.verified = True
             return {"verified": True}
         store = self.storage if session.target == self.id else self.inbox(session.target)
@@ -1637,6 +1726,20 @@ class Mesh:
             "files": job.files,
             "job": job.id,
         }
+        trusted = self.trust.get(peer.id)
+        salt = bytes.fromhex(filecrypt.new_salt()) if trusted else b""
+        if trusted:  # paired: ot-file/1. The offer is signed, so nobody can take this out.
+            enc: dict[str, Any] = {"v": filecrypt.VERSION, "salt": salt.hex()}
+            if trusted.enc:  # it said so in a signed hello: hide names and who's sending too
+                key = filecrypt.meta_key(
+                    bytes.fromhex(trusted.key), salt, self.id, peer.id, target_id
+                )
+                enc["meta"] = filecrypt.seal_meta(key, {"origin": job.origin, "files": job.files})
+                body["origin"] = {"id": job.origin["id"]}
+                body["files"] = [
+                    {"name": f"file-{i + 1}", "size": f["size"]} for i, f in enumerate(job.files)
+                ]
+            body["enc"] = enc
         try:
             status, data = self._http(peer, "POST", f"{P2P}/offers", body=body, timeout=8)
         except OSError:
@@ -1648,9 +1751,17 @@ class Mesh:
             return
         delivery.remote_id = str(data.get("id", ""))
         delivery.remote_secret = str(data.get("secret", ""))
-        if job.canceled or delivery.canceled:
+        if trusted and data.get("enc") == filecrypt.VERSION:
+            delivery.enc_salt, delivery.encrypted = salt, True
+        # It speaks ot-file/1 yet this answer says not: someone in between. Never fall back.
+        downgraded = bool(trusted and trusted.enc and not delivery.encrypted)
+        if downgraded or job.canceled or delivery.canceled:
             # Canceled while the offer was on its way: withdraw it now we know its id.
-            delivery.state = CANCELED
+            if downgraded:
+                delivery.state = FAILED
+                delivery.reason = f"Couldn’t set up encryption with {peer.name}."
+            else:
+                delivery.state = CANCELED
             with contextlib.suppress(OSError):
                 self._http(
                     peer,
@@ -1825,21 +1936,28 @@ class Mesh:
     def _verify_sinks(self, sinks: list[_Sink], index: int, digest: str) -> None:
         for sink in sinks:
             if sink.ok and sink.delivery.session is None:
-                problem = self._verify_remote(sink.delivery, index, digest)
+                problem = self._verify_remote(sink.delivery, index, digest, sink.size)
                 if problem:
                     sink.ok, sink.error = False, problem
 
-    def _verify_remote(self, delivery: Delivery, index: int, digest: str) -> str:
+    def _verify_remote(self, delivery: Delivery, index: int, digest: str, size: int) -> str:
         """Ask the receiving app whether what it wrote has our checksum ("" = fine)."""
         peer = delivery.peer
         if peer is None:
             return ""
+        claim = {"sha256": digest}
+        if delivery.encrypted:  # a bare hash would let a listener test guesses at the file
+            try:
+                cipher = self._send_cipher(delivery, index, size)
+            except MeshError as exc:
+                return str(exc)
+            claim = {"mac": filecrypt.verify_mac(cipher.key, digest)}
         try:
             status, data = self._http(
                 peer,
                 "POST",
                 f"{P2P}/offers/{delivery.remote_id}/files/{index}/verify",
-                body={"sha256": digest},
+                body=claim,
                 headers={"X-OT-Secret": delivery.remote_secret},
                 timeout=STALL_TIMEOUT,
             )
@@ -1850,6 +1968,8 @@ class Mesh:
             return "It arrived damaged — retry to send it again."
         if status == 200:
             delivery.verified.add(index)
+        elif delivery.encrypted:  # every app that encrypts also checks: no answer isn't done
+            return f"{peer.name} couldn’t verify the file."
         return ""  # older apps don't check; that's not a failure
 
     def _upload_result(self, job: Job, index: int, sinks: list[_Sink]) -> dict[str, Any]:
@@ -2080,7 +2200,7 @@ class Mesh:
                     delivery.peer, delivery, path, size, job, index
                 )
                 if ok:
-                    problem = self._verify_remote(delivery, index, digest)
+                    problem = self._verify_remote(delivery, index, digest, size)
                     if problem:
                         ok, error = False, problem
                 push_sink = _Sink(self, job, tid, delivery, index, size)
@@ -2118,6 +2238,10 @@ class Mesh:
         offset = 0
         hasher = hashlib.sha256()
         try:
+            cipher = self._send_cipher(delivery, index, size) if delivery.encrypted else None
+        except MeshError as exc:
+            return False, str(exc), ""
+        try:
             with src.open("rb") as fh:
                 while offset < size:
                     if job.canceled or delivery.canceled or self._stop.is_set():
@@ -2127,6 +2251,8 @@ class Mesh:
                     data = fh.read(end - offset)
                     if not data:
                         return False, "Couldn’t read the staged file.", ""
+                    # Content-Range stays in plaintext positions; pieces are whole records.
+                    body = cipher.encrypt_range(offset, data) if cipher else data
                     for attempt in range(4):
                         conn = http.client.HTTPConnection(
                             peer.host, peer.port, timeout=STALL_TIMEOUT, blocksize=_CHUNK
@@ -2135,10 +2261,10 @@ class Mesh:
                             conn.request(
                                 "PUT",
                                 f"{P2P}/offers/{delivery.remote_id}/files/{index}",
-                                body=data,
+                                body=body,
                                 headers={
                                     "Content-Type": "application/octet-stream",
-                                    "Content-Length": str(len(data)),
+                                    "Content-Length": str(len(body)),
                                     "Content-Range": f"bytes {offset}-{offset + len(data) - 1}/{size}",
                                     "X-OT-Secret": delivery.remote_secret,
                                 },
@@ -2195,8 +2321,12 @@ class Mesh:
         total: int,
         *,
         secret: str,
+        length: int | None = None,
     ) -> dict[str, Any]:
         """Store one chunk of an incoming file (app → app resume).
+
+        ``length`` is the plaintext length ``Content-Range`` gives; with ot-file/1
+        ``data`` is that range's records, each authenticated before it's staged.
 
         Chunks are staged in this device's chunk store; when the last byte
         arrives the file is published exactly like a one-shot upload.
@@ -2221,9 +2351,21 @@ class Mesh:
             if len(data) > MAX_CHUNK_BYTES:
                 raise MeshError(413, "too_large", "Chunk is too big.")
             key = _incoming_chunk_key(session_id, index)
+            cipher = self._receive_cipher(session, index) if session.enc_salt else None
             item.state = RECEIVING
             session.state = RECEIVING
             session.started = session.started or time.monotonic()
+        if cipher is not None:
+            try:
+                data = cipher.decrypt_range(offset, data)
+            except filecrypt.DecryptError as exc:
+                with self._lock:
+                    item.state, item.error = FAILED, self._damaged(session)
+                    self._maybe_finish(session)
+                log.warning("Refused a piece of %s: it failed authentication", log_safe(item.name))
+                raise MeshError(400, "bad_seal", item.error) from exc
+        if length is not None and len(data) != length:
+            raise MeshError(400, "bad_range", "Chunk size doesn’t match Content-Range.")
         store = self.storage if session.target == self.id else self.inbox(session.target)
         if offset < 0 or offset + len(data) > total:
             raise MeshError(400, "bad_range", "Chunk is outside the file.")
@@ -2812,6 +2954,7 @@ class Mesh:
             "id": s.id,
             "from": {k: s.origin.get(k) for k in ("id", "name", "form", "platform", "via_name")},
             "paired": s.paired,
+            "encrypted": None if s.local else bool(s.enc_salt),
             "state": s.state,
             "reason": s.reason,
             "total": s.total,
@@ -2854,6 +2997,7 @@ class Mesh:
                     "reason": d.reason or (d.session.reason if d.session else ""),
                     "sent": min(sent, total),
                     "direct": d.direct,
+                    "encrypted": d.encrypted if d.peer is not None else None,
                     "path": _path(d),
                     "verified": d.session is None and len(d.verified | d.skip) == len(job.files),
                 }
@@ -3139,6 +3283,13 @@ class _Sink:
     def _put_remote(self) -> None:
         peer = self.delivery.peer
         assert peer is not None  # noqa: S101
+        body: Any = self.reader
+        length = self.size
+        if self.delivery.encrypted:  # sealed for this receiver alone, record by record
+            body = filecrypt.Encrypting(
+                self.reader, self.mesh._send_cipher(self.delivery, self.index, self.size)
+            )
+            length = filecrypt.sealed_size(self.size)
         conn = http.client.HTTPConnection(
             peer.host, peer.port, timeout=STALL_TIMEOUT, blocksize=CHUNK
         )
@@ -3146,10 +3297,10 @@ class _Sink:
             conn.request(
                 "PUT",
                 f"{P2P}/offers/{self.delivery.remote_id}/files/{self.index}",
-                body=self.reader,
+                body=body,
                 headers={
                     "Content-Type": "application/octet-stream",
-                    "Content-Length": str(self.size),
+                    "Content-Length": str(length),
                     "X-OT-Secret": self.delivery.remote_secret,
                 },
                 encode_chunked=False,
@@ -3183,7 +3334,7 @@ def _incoming_chunk_key(session_id: str, index: int) -> str:
 
 
 def _describe_error(exc: Exception, delivery: Delivery) -> str:
-    if isinstance(exc, StorageError):
+    if isinstance(exc, (StorageError, MeshError)):
         return str(exc)
     if isinstance(exc, (ConnectionError, TimeoutError, OSError)):
         return f"Lost connection to {delivery.target.get('name', 'the receiver')}."

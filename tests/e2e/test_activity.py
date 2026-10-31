@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pytest
 
+from tests.e2e.test_clipboard import pair_of_apps  # noqa: F401 - fixture
 from tests.e2e.test_devices_ui import tile
 from tests.e2e.test_ui import Server, sync_api
 
@@ -143,4 +144,21 @@ def test_devices_and_transfers_show_their_connection(
     send_file(page, "Bravo", path)
     target = page.locator(".job", has_text="path.txt").locator(".job-target")
     expect(target).to_have_attribute("data-path", "app")
-    expect(target.locator(".job-target-path")).to_have_text("Direct")
+    expect(target.locator(".job-target-path")).to_have_text("Direct · not encrypted")  # unpaired
+
+
+def test_a_send_between_paired_apps_says_it_is_encrypted(
+    pair_of_apps: tuple[Server, Server],  # noqa: F811 - the fixture imported above
+    page,
+    tmp_path: Path,
+) -> None:  # type: ignore[no-untyped-def]
+    alpha, bravo = pair_of_apps
+    page.goto(alpha.url)
+    expect(tile(page, "Bravo")).to_be_visible(timeout=10_000)
+    path = tmp_path / "sealed.txt"
+    path.write_text("between paired apps")
+    send_file(page, "Bravo", path)
+    target = page.locator(".job", has_text="sealed.txt").locator(".job-target")
+    expect(target.locator(".job-target-path")).to_have_text("Direct · encrypted")
+    expect(target).to_have_attribute("data-state", "done", timeout=15_000)
+    assert (bravo.root / "sealed.txt").read_text() == "between paired apps"

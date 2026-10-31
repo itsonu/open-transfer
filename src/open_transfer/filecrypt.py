@@ -30,6 +30,10 @@ class DecryptError(ValueError):
     """Wrong key, or the bytes were changed, reordered, replayed or cut short."""
 
 
+class Truncated(DecryptError):
+    """The stream ended before the last record: interrupted, or cut off on purpose."""
+
+
 class Readable(Protocol):
     def read(self, n: int = -1, /) -> bytes: ...
 
@@ -170,7 +174,7 @@ class Decrypting(_Records):
         want = self.cipher.plain_len(self._index) + TAG
         data = _read_exact(self.source, want)
         if len(data) != want:
-            raise DecryptError("cut short")
+            raise Truncated("cut short")
         return self.cipher.decrypt(self._index, data)
 
 

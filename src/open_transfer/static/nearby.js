@@ -1240,6 +1240,10 @@ const PATH_HINT = {
   local: "To a browser connected to this device",
 };
 
+// ot-file/1 between paired apps (docs/encryption.md). Only said for an app-to-app hop:
+// a browser behind an app also crossed a plain-HTTP hop.
+const sealLabel = (encrypted) => (encrypted === true ? " · encrypted" : encrypted === false ? " · not encrypted" : "");
+
 function pathLabel(path, target) {
   if (path === "via") return `Via ${target.via_name || "its app"}`;
   if (path === "local") return "Via this device";
@@ -1338,7 +1342,7 @@ function renderJobs() {
             { class: "job-target", dataset: { state: t.state, path } },
             h("span", { class: "mini-avatar", "aria-hidden": "true" }, icon(deviceIcon(t))),
             h("span", { class: "job-target-name" }, t.name),
-            h("span", { class: "job-target-path", title: PATH_HINT[path] }, pathLabel(path, original)),
+            h("span", { class: "job-target-path", title: PATH_HINT[path] }, pathLabel(path, original) + (path === "app" ? sealLabel(original.encrypted) : "")),
             h("span", { class: "job-target-state" }, text),
             canRetryTarget &&
               h(
@@ -1504,7 +1508,8 @@ function fillPrompt(s) {
   $("#incoming-title").textContent = `${from.name} wants to send you ${s.files.length === 1 ? "a file" : `${s.files.length} files`}`;
   const host = mesh.data.host;
   const via = from.via_name && from.via_name !== host.name ? ` · via ${from.via_name}` : "";
-  $("#incoming-sub").textContent = `${formatBytes(s.total)}${via}${s.paired ? " · paired" : ""}`;
+  const seal = from.via_name && s.encrypted ? "" : sealLabel(s.encrypted);
+  $("#incoming-sub").textContent = `${formatBytes(s.total)}${via}${s.paired ? " · paired" : ""}${seal}`;
   const shown = s.files.slice(0, 5);
   $("#incoming-files").replaceChildren(
     ...shown.map((f) =>

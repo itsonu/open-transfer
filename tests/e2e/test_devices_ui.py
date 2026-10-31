@@ -291,6 +291,11 @@ def test_browsers_send_to_each_other_directly(
     try:
         if not webrtc:  # the receiver can't do WebRTC: the sender must fall back to the app
             ipad.add_init_script("delete window.RTCPeerConnection;")
+        signals: list[str] = []  # what the apps carry between the two pages
+        phone.on(
+            "request",
+            lambda r: signals.append(r.post_data or "") if r.url.endswith("/api/signal") else None,
+        )
         phone.goto(url)
         ipad.goto(url)
         expect(tile(phone, "iPad")).to_be_visible(timeout=10_000)
@@ -318,6 +323,11 @@ def test_browsers_send_to_each_other_directly(
         assert Path(info.value.path()).read_bytes() == payload
         # Nothing was stored on Alpha's disk either way.
         assert not (alpha.root / "photo.heic").exists()
+        if webrtc:  # the data channel is DTLS (encrypted); the file's name never touches the apps
+            sdp = " ".join(signals)
+            assert "UDP/DTLS/SCTP" in sdp
+            assert "a=fingerprint:sha-256" in sdp
+            assert "photo.heic" not in sdp
         assert phone._errors == []  # type: ignore[attr-defined]
         assert ipad._errors == []  # type: ignore[attr-defined]
     finally:
