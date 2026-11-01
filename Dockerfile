@@ -1,12 +1,12 @@
 # syntax=docker/dockerfile:1
-FROM python:3.14-slim AS build
+FROM python:3.15-slim AS build
 WORKDIR /src
 COPY pyproject.toml README.md LICENSE CHANGELOG.md ./
 COPY src ./src
 RUN pip wheel --no-cache-dir --no-deps --wheel-dir /wheels . \
  && pip wheel --no-cache-dir --wheel-dir /wheels /wheels/*.whl
 
-FROM python:3.14-slim
+FROM python:3.15-slim
 LABEL org.opencontainers.image.title="Open Transfer" \
       org.opencontainers.image.description="AirDrop-style file sharing for every device on your network" \
       org.opencontainers.image.source="https://github.com/itsonu/open-transfer" \
