@@ -245,7 +245,8 @@ def test_a_lost_message_can_be_sent_again(
 def test_an_older_app_still_swaps_messages_labelled_plain(
     make_node: NodeFactory, monkeypatch: pytest.MonkeyPatch, wire: Wire
 ) -> None:
-    a, b = make_node("Alpha"), make_node("Bravo")
+    a = make_node("Alpha", encrypted_only=False)
+    b = make_node("Bravo", encrypted_only=False)  # an older app has no such setting
     real_info = b.mesh.self_info  # from before Phase J: nothing to encrypt to
     monkeypatch.setattr(
         b.mesh, "self_info", lambda **kw: {k: v for k, v in real_info(**kw).items() if k != "kx"}
