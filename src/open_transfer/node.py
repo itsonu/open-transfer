@@ -61,7 +61,11 @@ class Node:
         self._server = server
         self.port = port
         if self.config.https:
-            self._bind_https(port)
+            try:
+                self._bind_https(port)
+            except BaseException:
+                server.stop()  # its worker threads aren't daemons: they'd keep the process alive
+                raise
         return port
 
     def _bind_https(self, port: int) -> None:

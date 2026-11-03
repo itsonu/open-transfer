@@ -14,6 +14,8 @@ import ssl
 import urllib.request
 from pathlib import Path
 
+import pytest
+
 from open_transfer import network
 from open_transfer.config import Config
 from open_transfer.node import Node
@@ -104,3 +106,35 @@ def test_the_certificate_names_this_device(make_node: NodeFactory) -> None:
     assert "127.0.0.1" in ips
     assert set(network.lan_ips()) <= ips
     assert "localhost" in names.get_values_for_type(x509.DNSName)
+
+
+def test_a_long_hostname_still_gets_a_certificate(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from cryptography import x509
+
+    from open_transfer import tls
+
+    monkeypatch.setattr(network, "hostname", lambda: "runner-" + "x" * 70)  # CI Macs have these
+    cert, _ = tls.certificate(tmp_path)
+    name = x509.load_pem_x509_certificate(cert).subject.rfc4514_string()
+    assert len(name) <= len("CN=") + 64
+
+
+def test_a_failed_https_start_leaves_nothing_running(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    import threading
+
+    from open_transfer import tls
+
+    def broken(*_: object) -> None:
+        raise ValueError("no certificate")
+
+    monkeypatch.setattr(tls, "certificate", broken)
+    before = set(threading.enumerate())
+    node = Node(Config(storage_dir=tmp_path / "share", port=0, discovery=False, https=True))
+    with pytest.raises(ValueError, match="no certificate"):
+        node.start()
+    leftover = [t for t in set(threading.enumerate()) - before if not t.daemon and t.is_alive()]
+    assert not leftover  # non-daemon worker threads would keep the process from exiting

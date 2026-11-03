@@ -123,6 +123,7 @@ def smoke_test() -> None:
                             break
                 except OSError:
                     if proc.poll() is not None or time.time() > deadline:
+                        stop_tree(proc)  # or reading its output waits for it forever
                         output = proc.stdout.read().decode(errors="replace") if proc.stdout else ""
                         sys.exit(f"The built app did not start:\n{output}")
                     time.sleep(0.5)

@@ -283,11 +283,14 @@ def test_stripping_the_one_off_key_is_refused(
     assert "encryption" in target(a, job)["reason"]
 
 
-def test_a_one_off_key_for_another_run_is_refused(make_node: NodeFactory) -> None:
+def test_a_one_off_key_for_another_run_is_refused(
+    make_node: NodeFactory, monkeypatch: pytest.MonkeyPatch
+) -> None:
     a, b = make_node("Alpha"), make_node("Bravo")
     connect(a, b)
     alice = owner(a)
     bravo = device_id(alice, "Bravo")
+    monkeypatch.setattr(a.mesh, "_upsert_peer", lambda *_, **__: None)  # no hello fixes it first
     with a.mesh._lock:
         peer = a.mesh._peers[bravo]
     peer.kx = filecrypt.new_kx()[1].hex()  # Bravo restarted: not the key it holds now

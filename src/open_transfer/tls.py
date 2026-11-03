@@ -61,7 +61,7 @@ def certificate(state_dir: Path, vault: Vault | None = None) -> tuple[bytes, byt
 def _new_certificate() -> tuple[bytes, bytes]:
     key = ec.generate_private_key(ec.SECP256R1())
     name = x509.Name(
-        [x509.NameAttribute(NameOID.COMMON_NAME, f"Open Transfer on {network.hostname()}")]
+        [x509.NameAttribute(NameOID.COMMON_NAME, f"Open Transfer on {network.hostname()}"[:64])]
     )
     ips = {"127.0.0.1", "::1", *network.lan_ips()}
     alt: list[x509.GeneralName] = [x509.DNSName("localhost"), x509.DNSName(network.hostname())]
