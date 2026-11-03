@@ -87,6 +87,7 @@ between **paired** apps carry a signature (§4).
 | `GET /offers/<id>/files/<n>/status` + `X-OT-Secret` | Staged bytes/ranges for one incoming file (sender resumes the missing pieces) |
 | `DELETE /offers/<id>` + `X-OT-Secret` | Sender cancels |
 | `POST /pair/begin`, `POST /pair/prove` | Pairing (§3) |
+| `POST /unpaired` (signed) `{id}` | The sender unpaired this device: it forgets the sender too (here only, not its sync network) and the owner's page says “*X* unpaired this device. Pair again…”. An unsigned or forged one is `403`. A signed offer from an app this one no longer trusts gets `403 peer_unpaired` (“Pair again to send to it”), never a plain or unverified fallback |
 | `POST /clip` (signed) | A clipboard item shared by hand (both sides must allow each other) |
 | `POST /sync` (signed) `{env}` | A [`sync/1` envelope](sync.md#protocol-sync1): clip, introduction, revocation or join, sealed for this device |
 | `POST /sync/forward` (signed) `{to, env}` | Pass a sealed clip on to `to` (one hop) when the sender can't reach it |

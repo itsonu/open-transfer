@@ -331,7 +331,7 @@ def test_the_owner_is_told_where_keys_are_and_which_are_locked(make_node, tmp_pa
     a, b = make_node("A"), make_node("B")
     pair(a, b)
     state = owner(a).state()
-    assert state["keys"] == {"store": "file", "protected": False, "locked": []}
+    assert state["keys"] == {"store": "file", "protected": False, "locked": [], "unpaired_by": []}
     trusted = (tmp_path / "A" / ".open-transfer" / "trusted.json").read_text()
     assert b.mesh.trust.get(a.mesh.id).key not in trusted  # type: ignore[union-attr]
     assert b.mesh.trust.get(a.mesh.id).key not in json.dumps(state)  # type: ignore[union-attr]

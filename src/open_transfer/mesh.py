@@ -274,6 +274,7 @@ class Delivery:
     verified: set[int] = field(default_factory=set)  # files whose checksum the receiver confirmed
     enc_salt: bytes = field(default=b"", repr=False)
     enc_base: bytes = field(default=b"", repr=False)  # the session key (dropped when it's over)
+    code: str = ""  # why it failed, for the page to offer a fix ("peer_unpaired": Pair again)
     encrypted: bool = False  # the receiving app takes this transfer as ot-file/2
     enc_auth: bool = False  # …and the handshake was authenticated by the pair key
     signals_out: int = 0
@@ -322,6 +323,7 @@ class Mesh:
             platform=config.device_platform,
         )
         self.trust = TrustStore(state)
+        self._unpaired_by: dict[str, str] = {}  # devices that unpaired us this run (id → name)
         self._settings_path = state / "settings.json"  # what the owner set in the page
         if _read_json(self._settings_path).get("encrypted_only") is True:
             config.encrypted_only = True  # saved off, --encrypted-only still keeps it on
@@ -1118,8 +1120,17 @@ class Mesh:
                     del self._peers[old.id]  # an address added by hand stays listed otherwise
             self._bump()
 
-    def unpair(self, device_id: str) -> bool:
-        """Forget ``device_id``; with sync on, every member of the network forgets it too."""
+    def unpair(self, device_id: str, *, tell: bool = True, network: bool = True) -> bool:
+        """Forget ``device_id``; with sync on, every member of the network forgets it too.
+
+        ``tell``: say so to that device first, in a request signed with the pair key
+        (its last use), so it forgets us too instead of failing on its next send.
+        ``network`` False: forget it here only (it unpaired us; it tells its network)."""
+        with self._lock:
+            peer = self._peers.get(device_id)
+        if tell and peer is not None and peer.online and self.trust.get(device_id):
+            with contextlib.suppress(OSError):
+                self._http(peer, "POST", f"{P2P}/unpaired", body={"id": self.id}, timeout=3)
         allowed = self.clipboard.settings()["allowed"]
         if device_id in allowed:
             self.clipboard.set_settings(allowed=[i for i in allowed if i != device_id])
@@ -1138,10 +1149,20 @@ class Mesh:
                         if d.view_state() not in FINAL:
                             d.canceled, d.reason = True, f"No longer paired with {trusted.name}."
                         d.enc_base = b""
-        if self.sync.active():
+        if network and self.sync.active():
             self.sync.revoke(device_id)
             return True
         return self.trust.remove(device_id)
+
+    def unpaired_by(self, device_id: str) -> None:
+        """``device_id`` (proven by its signature) unpaired us: forget it too, and say so."""
+        trusted = self.trust.get(device_id)
+        if trusted is None:
+            return
+        self.unpair(device_id, tell=False, network=False)
+        with self._lock:
+            self._unpaired_by[device_id] = trusted.name
+        self._bump()
 
     # ---------------------------------------------------------------- sync
 
@@ -1876,6 +1897,8 @@ class Mesh:
         if status != 201:
             delivery.state = DECLINED if status in {403, 507} else FAILED
             delivery.reason = _remote_message(data, f"{peer.name} refused the transfer.")
+            error = data.get("error")
+            delivery.code = str(error.get("code", ""))[:40] if isinstance(error, dict) else ""
             return
         delivery.remote_id = str(data.get("id", ""))
         delivery.remote_secret = str(data.get("secret", ""))
@@ -3229,6 +3252,7 @@ class Mesh:
                     "direct": d.direct,
                     "encrypted": d.encrypted if d.peer is not None else None,
                     "authenticated": d.enc_auth,
+                    **({"code": d.code} if d.code else {}),
                     "path": _path(d),
                     "verified": d.session is None and len(d.verified | d.skip) == len(job.files),
                 }
@@ -3307,6 +3331,9 @@ class Mesh:
                 "store": self.trust.vault.store,
                 "protected": self.trust.vault.protected,  # False: a plain file, say so
                 "locked": self.trust.locked_names(),
+                "unpaired_by": sorted(
+                    n for i, n in self._unpaired_by.items() if self.trust.get(i) is None
+                ),
             }
         elif self.has_inbox(viewer.id):
             store = self.inbox(viewer.id)

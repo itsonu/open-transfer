@@ -53,6 +53,7 @@ PUBLIC_P2P_ENDPOINTS = {
     "p2p_pair_begin",
     "p2p_pair_prove",
     "p2p_signal",
+    "p2p_unpaired",
     # These check the sender's signature themselves (a PIN is for people, not paired apps).
     "p2p_clip",
     "p2p_sync",
@@ -163,6 +164,14 @@ def register(
             raise MeshError(400, "bad_request", "Missing sender.")
         sender_id = str(sender.get("id", ""))
         verified = request.headers.get("X-OT-From") == sender_id and signed_by(sender_id)
+        if request.headers.get("X-OT-Auth") and mesh.trust.get(sender_id) is None:
+            # It still thinks we're paired; we unpaired it (or never were): say so.
+            raise MeshError(
+                403,
+                "peer_unpaired",
+                f"{mesh.identity.name} isn’t paired with this device any more. "
+                "Pair again to send to it.",
+            )
         mesh.handle_hello(sender, client())
         if mesh.pending_from(client()) >= MAX_PENDING_PER_CLIENT:
             raise MeshError(429, "busy", "Too many unanswered transfers. Try again shortly.")
@@ -301,6 +310,14 @@ def register(
     @app.post(f"{P2P}/sync/forward")
     def p2p_sync_forward() -> Response:
         return sync_request("forward")
+
+    @app.post(f"{P2P}/unpaired")
+    def p2p_unpaired() -> Response:
+        sender = request.headers.get("X-OT-From")
+        if not signed_by(sender):  # only that device itself, with the key being dropped
+            raise MeshError(403, "not_signed", "Not signed by that device.")
+        mesh.unpaired_by(str(sender))
+        return jsonify({"ok": True})
 
     @app.post(f"{P2P}/signal")
     def p2p_signal() -> Response:

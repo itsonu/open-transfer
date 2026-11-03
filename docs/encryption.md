@@ -283,7 +283,7 @@ sending through the apps (encrypted between them as usual).
 
 | Key | Rotated | Revoked |
 |---|---|---|
-| Pair key | Only by pairing again (`test_re_pairing_gives_a_new_key_and_transfers_still_work`). Every transfer derives new keys from it with a fresh salt. | **Unpair**: this app deletes the key at once and stops what that device was sending with it (`test_unpairing_stops_transfers_from_that_device`). The other device isn't told unless both are in a sync network (then every member forgets it); its next send is refused as a downgrade, never sent plain, but it says “Couldn't set up encryption”, not “unpaired”. |
+| Pair key | Only by pairing again (`test_pairing_again_works_with_new_keys`). Every transfer makes its own session key from a fresh handshake. | **Unpair**: this app tells the other in a request signed with the pair key (its last use), then deletes the key, cancels what was under way with that device both ways and drops those session keys. The other forgets the pairing and its page says “*X* unpaired this device. Pair again…”. If it was away, its next send is refused with `peer_unpaired` and the toast offers **Pair again**; the old key opens nothing either way. History on both sides is kept. (`tests/test_unpairing.py`) |
 | One-off keys | The receiver's per run, the sender's per offer; never stored. | — |
 | Vault key | `--rotate-keys` (app not running) | Delete the keystore item: pairings lock, and stay listed until paired again |
 | TLS certificate | 30 days before it ends (397 days) | Delete `tls.json`: a new one next start (browsers warn again) |

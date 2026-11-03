@@ -226,7 +226,11 @@ function renderMe() {
   // Only a guess: a device that does reach us proves this PC's firewall lets it in.
   const blocked = network.reachable_by ? [] : network.public || [];
   const locked = mesh.data.keys?.locked || [];
-  if (me.kind === "owner" && locked.length) {
+  const dropped = mesh.data.keys?.unpaired_by || [];
+  if (me.kind === "owner" && dropped.length) {
+    status.textContent = `${dropped.join(", ")} unpaired this device. Pair again to send to ${dropped.length > 1 ? "them" : "it"}.`;
+    status.dataset.tone = "warn";
+  } else if (me.kind === "owner" && locked.length) {
     // Their keys are kept, sealed, until the system keystore gives the vault key back.
     status.textContent = `Couldn’t unlock the pairing with ${locked.join(", ")} (the system keychain didn’t give its key back). Pair again to send to ${locked.length > 1 ? "them" : "it"}.`;
     status.dataset.tone = "warn";
@@ -963,7 +967,16 @@ function finishJob(job, outcome) {
     notify(failed.length ? `Couldn’t send to ${who}` : `${who} declined`, { body: (failed[0] || declined[0]).reason || "", tag: `job-${job.id}` });
   }
   if (outcome === "nobody") {
-    if (declined.length === targets.length && targets.length) {
+    const unpaired = targets.find((t) => t.code === "peer_unpaired");
+    if (unpaired) {
+      // It unpaired this device: the fix is pairing again, so offer it.
+      toast(unpaired.reason || `${unpaired.name} isn’t paired with this device any more`, {
+        tone: "error",
+        icon: "alert",
+        action: { label: "Pair again", run: () => openAddDevice({ tab: "enter" }) },
+        duration: 8000,
+      });
+    } else if (declined.length === targets.length && targets.length) {
       toast(targets.length === 1 ? `${targets[0].name} declined — you can ask again` : "Everyone declined — you can ask again", {
         tone: "error",
         icon: "x",

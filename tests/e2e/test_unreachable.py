@@ -181,6 +181,22 @@ def test_a_pairing_whose_key_cant_be_unlocked_is_named(page, devices: list[Serve
     expect(status).to_have_attribute("data-tone", "warn")
 
 
+def test_a_device_that_unpaired_this_one_is_named(page, devices: list[Server]) -> None:  # type: ignore[no-untyped-def]
+    """J6: the other device unpaired this one and said so; the page says what to do."""
+
+    def patch(route) -> None:  # type: ignore[no-untyped-def]
+        response = route.fetch()
+        data = response.json()
+        data["keys"] = {"store": "file", "protected": False, "locked": [], "unpaired_by": ["Pixel"]}
+        route.fulfill(response=response, body=json.dumps(data))
+
+    page.route("**/api/state*", patch)
+    page.goto(devices[0].url)
+    status = page.locator("#me-status")
+    expect(status).to_contain_text("Pixel unpaired this device", timeout=10_000)
+    expect(status).to_contain_text("Pair again")
+
+
 def test_with_https_the_share_sheet_shows_the_certificate(page, devices: list[Server]) -> None:  # type: ignore[no-untyped-def]
     """--https: browsers warn once; the owner can compare the fingerprint."""
     print_ = "AB:CD:EF:01:23:45:67:89:AB:CD:EF:01:23:45:67:89:AB:CD:EF:01:23:45:67:89:AB:CD:EF:01:23:45:67:89"
