@@ -434,21 +434,25 @@ measured 55–59 ms in every mode, plain included: that's the benchmark's own
   2 MiB piece when resuming.
 
 **Every OS in CI** (`bench_encryption.py --mb 256` on GitHub's runners, run
-41614032411 on `4c9a80a`: shared, slower CPUs than the M5; same one-process setup):
+41665075497 on `8c4c39a`, `ot-file/2`: shared, slower CPUs than the M5; same
+one-process setup; “paired” is the authenticated handshake):
 
-| Runner | AES-GCM alone | Plain, 1 stream | One-off key, 1 stream | Paired, 1 stream | Paired, 4 at once | Peak memory | 1 KiB latency (plain / paired) |
-|---|---|---|---|---|---|---|---|
-| Linux x64 | 462 MB/s | 314 MB/s | 171 MB/s | 172 MB/s | 105 MB/s | 56–77 MB | 4.2 / 4.6 ms |
-| Windows x64 | 371 MB/s | 258 MB/s | 195 MB/s | 187 MB/s | 164 MB/s | 57–74 MB | 27 / 12 ms |
-| macOS arm64 | 1912 MB/s | 595 MB/s | 290 MB/s | 269 MB/s | 253 MB/s | 58–74 MB | 4.9 / 7.4 ms |
+| Runner | AES-GCM alone | Handshake | Plain, 1 stream | Unpaired, 1 | Paired, 1 | Paired, 4 at once | Peak memory | 1 KiB latency (plain / paired) |
+|---|---|---|---|---|---|---|---|---|
+| Linux x64 | 462 MB/s | 0.34 ms | 362 MB/s | 177 MB/s | 168 MB/s | 105 MB/s | 56–77 MB | 4.7 / 4.5 ms |
+| Windows x64 | 489 MB/s | 0.37 ms | 143 MB/s | 122 MB/s | 114 MB/s | 89 MB/s | 59–68 MB | 21 / 60 ms |
+| macOS x64 (Intel) | 321 MB/s | 1.12 ms | 196 MB/s | 94 MB/s | 83 MB/s | 67 MB/s | 47–74 MB | 9 / 11 ms |
+| macOS arm64 | — | — | — | — | — | — | — | the CI job was cancelled before it got a runner; see the M5 figures above (0.25 ms handshake, 252 MB/s paired at 1 GB) |
 
-Shared runners vary from run to run (Windows paired, 4 at once, was 105 MB/s
-in run 41222156917); read these as “several times Wi‑Fi”, not as exact figures.
+Shared runners vary from run to run (Windows paired, 4 at once, measured
+164 MB/s in run 41614032411 with `ot-file/1` keys); read these as “several
+times Wi‑Fi”, not as exact figures. Windows' 1 KiB latencies swing the most.
 
 **Android emulator** (the CI smoke test, phone → runner over the emulator's
-network, 32 MB): 3.8 MB/s plain, 3.2 MB/s encrypted. The emulator's
-networking is the limit there, not the cipher; it shows the encrypted path
-works on Android and costs little, not what a phone does.
+network, 32 MB, run 41665075497): 3.7 MB/s unpaired (one-off key), 3.3 MB/s
+paired, both with the per-transfer handshake. The emulator's networking is the
+limit there, not the cipher; it shows the encrypted path works on Android and
+costs little, not what a phone does.
 
 * **Not measured:** a real Android phone, and Windows on real hardware.
   On ARMv8 phones AES has hardware instructions, but their cost stays
