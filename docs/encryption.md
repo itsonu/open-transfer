@@ -401,26 +401,33 @@ names of locked pairings.
 ## Performance
 
 `python scripts/bench_encryption.py --mb 1024` on an Apple M5 Mac
-(Python 3.14, `cryptography` 50) gave the figures below. Both apps run in
-**one process on 127.0.0.1**, so one CPU does the sender's encryption *and*
-the receiver's decryption, and the network is never the limit. On real
-devices each side does half that work.
+(Python 3.14, `cryptography` 50, `ot-file/2` at `c0246c0`) gave the figures
+below. Both apps run in **one process on 127.0.0.1**, so one CPU does the
+sender's encryption *and* the receiver's decryption, and the network is never
+the limit. On real devices each side does half that work. “plain” stands for
+an older app, “one-off” for an unpaired one, “paired” for a paired one.
 
-| Mode | Streams | Size | Time | Throughput | CPU | Peak memory |
-|---|---|---|---|---|---|---|
-| plain | 1 | 1024 MB | 1.73 s | 591 MB/s | 3.78 s | 74 MB |
-| encrypted | 1 | 1024 MB | 3.14 s | 327 MB/s | 6.31 s | 69 MB |
-| plain | 4 at once | 1024 MB | 3.63 s | 282 MB/s | 10.35 s | 96 MB |
-| encrypted | 4 at once | 1024 MB | 5.3 s | 193 MB/s | 13.88 s | 77 MB |
+| Mode | Streams | Size | Time | Throughput | CPU | Peak memory | 1 KiB latency |
+|---|---|---|---|---|---|---|---|
+| plain | 1 | 1024 MB | 2.74 s | 374 MB/s | 5.07 s | 82 MB | 3.1 ms |
+| one-off | 1 | 1024 MB | 4.8 s | 213 MB/s | 8.49 s | 74 MB | 3.2 ms |
+| paired | 1 | 1024 MB | 4.07 s | 252 MB/s | 8.01 s | 76 MB | 3.3 ms |
+| plain | 4 at once | 1024 MB | 4.43 s | 231 MB/s | 12.76 s | 102 MB | 3.1 ms |
+| one-off | 4 at once | 1024 MB | 6.54 s | 157 MB/s | 16.77 s | 81 MB | 3.0 ms |
+| paired | 4 at once | 1024 MB | 6.41 s | 160 MB/s | 16.79 s | 81 MB | 4.1 ms |
 
-AES-256-GCM on its own (encrypt and decrypt, one core): about 2 GB/s.
+AES-256-GCM on its own (encrypt and decrypt, one core): 1597 MB/s.
+**The handshake** (three X25519 operations a side, HKDF, HMAC, both ends in
+one process) takes **0.25 ms** per transfer. From sending to “accepted”
+measured 55–59 ms in every mode, plain included: that's the benchmark's own
+50 ms polling, so the handshake doesn't show end to end.
 
-* **Throughput.** Encrypted transfers run at 190–330 MB/s, several times
+* **Throughput.** Encrypted transfers run at 150–250 MB/s here, several times
   what Wi‑Fi carries (roughly 10–120 MB/s), so on a real network you
   shouldn't notice a difference.
 * **CPU.** About 1.3–1.7× the plain transfer's, split between the two
   devices.
-* **Memory.** Flat: the whole process stays near 70 MB for a 1 GB file. A
+* **Memory.** Flat: the whole process stays near 75–80 MB for a 1 GB file. A
   file is never held in memory, only one 64 KiB record per stream, or one
   2 MiB piece when resuming.
 

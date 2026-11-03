@@ -152,6 +152,12 @@ jobs:
           else
             tar -czf "${{ matrix.cli }}.tar.gz" open-transfer && rm open-transfer
           fi
+      # The Tests matrix has no Intel Mac: measure ot-file/2 on this one too.
+      - name: Encryption benchmark (Intel Mac)
+        if: matrix.name == 'macos-x64'
+        run: |
+          python -m pip install -e .
+          python scripts/bench_encryption.py --mb 256
       # The desktop app's window is WebView2. Windows 11 ships it; make sure the
       # Server image has it too, so the smoke test can check the real window.
       - name: Install the WebView2 runtime

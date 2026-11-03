@@ -20,7 +20,7 @@ connections to the phone, so the test goes phone → runner:
    again: the file must arrive encrypted (ot-file/1, docs/encryption.md);
 8. the phone keeps its pairing keys in the Android Keystore (docs/encryption.md);
 9. restart the app: the pairing survives (its key unwraps), a send is still encrypted;
-10. time a plain and an encrypted 32 MB send (emulator numbers, not a phone's).
+10. time an unpaired (one-off key) and a paired 32 MB send (emulator numbers, not a phone's).
 
 Standard library only (plus the ``open_transfer`` package itself).
 """
@@ -294,8 +294,8 @@ def main() -> int:
 
             mb = BENCH / 1e6
             print("10. Emulator throughput, phone -> runner, 32 MB:")
-            print(f"   plain     {mb / plain_s:6.1f} MB/s ({plain_s:.2f} s)")
-            print(f"   encrypted {mb / sealed_s:6.1f} MB/s ({sealed_s:.2f} s)")
+            print(f"   unpaired  {mb / plain_s:6.1f} MB/s ({plain_s:.2f} s)  one-off key")
+            print(f"   paired    {mb / sealed_s:6.1f} MB/s ({sealed_s:.2f} s)")
             return 0
         except (SmokeError, OSError, KeyError, TypeError) as exc:
             print(f"\nSMOKE TEST FAILED: {exc!r}", file=sys.stderr)
