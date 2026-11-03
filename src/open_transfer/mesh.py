@@ -393,7 +393,7 @@ class Mesh:
                 self._describe, self._on_packet, port=self.config.discovery_port
             )
             self.discovery.start()
-        self._thread = threading.Thread(target=self._housekeeping, name="ot-mesh", daemon=True)
+        self._thread = threading.Thread(target=self._run_housekeeping, name="ot-mesh", daemon=True)
         self._thread.start()
 
     def stop(self) -> None:
@@ -2921,6 +2921,13 @@ class Mesh:
                 ", ".join(found),
             )
         self._bump()
+
+    def _run_housekeeping(self) -> None:
+        try:
+            self._housekeeping()
+        except RuntimeError:  # a round that raced stop() hit the shut-down executor
+            if not self._stop.is_set():
+                raise
 
     def _housekeeping(self) -> None:
         last_hello = 0.0

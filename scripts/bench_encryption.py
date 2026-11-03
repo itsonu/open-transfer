@@ -96,7 +96,7 @@ def one(mode: str, mb: int, streams: int) -> dict[str, Any]:
     from open_transfer.config import Config
     from open_transfer.node import Node
 
-    with tempfile.TemporaryDirectory() as tmp:
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:  # Windows: files in use
         nodes = []
         for name in ("Alpha", "Bravo"):
             node = Node(

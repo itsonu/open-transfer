@@ -939,3 +939,18 @@ def test_only_the_two_ends_can_exchange_connection_messages(make_node: NodeFacto
     )
     assert forged[0] == 404
     assert _signals(tablet) == []
+
+
+def test_housekeeping_that_races_a_stop_ends_quietly(make_node: NodeFactory) -> None:
+    # Windows CI: the round after stop() hit the shut-down executor and crashed the thread.
+    node = make_node("Alpha")
+    mesh = node.mesh
+
+    def late_round() -> None:
+        raise RuntimeError("cannot schedule new futures after shutdown")
+
+    mesh._housekeeping = late_round  # type: ignore[method-assign]
+    with pytest.raises(RuntimeError):
+        mesh._run_housekeeping()  # not stopping: a real error, still raised
+    mesh._stop.set()
+    mesh._run_housekeeping()
