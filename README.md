@@ -253,7 +253,7 @@ Open Transfer is designed for **trusted local networks** (home, office, a hotspo
 
 **What you should know**
 - Anyone on the same network can see your device's **name** and offer you files (you decide). Use `--paired-only` on shared or public Wi‑Fi, and `--pin` to keep strangers' browsers out.
-- **Files between paired apps are encrypted end to end** (AES-256-GCM with a key per file, from the pair's key) and checked before they're kept. Between unpaired apps they're encrypted with a one-off key (**encrypted, not verified**). An older app gets plain HTTP, labelled **not encrypted** (or refused, with **Encrypted transfers only**). A browser without the app talks to its app over plain HTTP unless you start with `--https`. Details and the full coverage table: [docs/encryption.md](docs/encryption.md#coverage).
+- **Files between paired apps are encrypted end to end** (a fresh X25519 handshake per transfer, so a key stolen later doesn't open old transfers; AES-256-GCM with a key per file) and checked before they're kept. Each transfer says how it was protected. Between unpaired apps they're encrypted with a one-off key (**encrypted, not verified**). An older app gets plain HTTP, labelled **not encrypted** (or refused, with **Encrypted transfers only**). A browser without the app talks to its app over plain HTTP unless you start with `--https`. Details and the full coverage table: [docs/encryption.md](docs/encryption.md#coverage).
 - In `--share-folder` mode without a PIN, anyone who opens the link can see and download the folder's files (and delete them, with `--allow-delete`).
 - It is not meant to be exposed directly to the internet.
 

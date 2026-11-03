@@ -1,11 +1,13 @@
 # File transfer encryption (`ot-file/2`)
 
-Files sent between two **paired** apps are encrypted end to end: only the
-receiving app can read them, and any change, reordering, replay or
-truncation is detected before a file is kept. Between **unpaired** apps the
-same encryption runs on a one-off key, which stops a listener but not
-someone who can pose as the other app. A browser's own hop to its app is
-encrypted only with `--https`. This page covers the threat model, the
+Files sent between two **paired** apps are encrypted end to end with forward
+secrecy: only the receiving app can read them, any change, reordering, replay
+or truncation is detected before a file is kept, and a pair key stolen later
+doesn't open a recorded transfer. Between **unpaired** apps the same
+handshake runs without the pair key, which stops a listener but not someone
+who can pose as the other app. A browser's own hop to its app is encrypted
+only with `--https`. **Not every path is end-to-end encrypted**; see
+[Coverage](#coverage). This page covers the threat model, the
 design, every path a file can take, and what is still in plain text.
 
 ## Threat model
@@ -517,16 +519,40 @@ build was run against this one.
 ## Coverage
 
 What each path gets, and only what's tested. “Real device” means checked on
-physical hardware; none of these have been yet (device-testing.md).
+physical hardware; **none of these have been yet** (device-testing.md). FS =
+forward secrecy (a later stolen pair key doesn't open a recorded transfer).
 
-| Transfer path | Encryption | Authentication | Integrity | Evidence |
-|---|---|---|---|---|
-| Paired app ↔ app | AES-256-GCM (`ot-file/2`); names and sender sealed | Yes: the pair key (SRP); offers signed | Yes: GCM per record, MAC'd checksum, sizes in the key | `test_encrypted_transfers.py`; CI on Linux, Windows, macOS, Android emulator. Real device: no |
-| Unpaired app ↔ app | AES-256-GCM, one-off X25519 key | **No** (“not verified”): whoever answers the offer | Yes, against anyone without that key | `test_encrypted_transfers.py` (unpaired tests). Real device: no |
-| WebRTC, app ↔ app hop | SDP not encrypted (not secret); data is DTLS | Paired: pair key. Unpaired: one-off key (not verified). Older app: session secret only | Yes for encrypted transfers: MAC, counter, state | `test_signaling.py`. Real browsers on two apps: no |
-| Browser ↔ browser | DTLS (the browser's own) | Only as far as each browser's hop to its app: none on plain HTTP, the certificate with `--https`; loopback for an app's own window | DTLS; SDP as above | `test_mesh.py` signal tests (no real WebRTC in CI). Real device: no |
-| Browser ↔ app | None by default; TLS 1.2+ with `--https` | `--https`: a self-signed certificate the person compares by fingerprint. Otherwise none (a PIN keeps strangers out, it doesn't protect the hop) | TLS with `--https`; none otherwise | `test_https.py`, `e2e/test_https_ui.py` (Chromium over TLS). Real device: no |
-| Older app versions | None, labelled; refused with “Encrypted transfers only” | Paired: signed requests. Unpaired: none | None beyond TCP | Simulated (above) |
-| Android Share ingestion | Not on a network: `content://` streams copied inside the app, then as the path it's sent on | — (an Android intent from the person's own phone) | In-process copy, then as the path it's sent on | Emulator smoke test in CI. Real device: no |
-| Group transfers | Per receiver, as its path; each receiver its own keys | Per receiver | Per receiver; a WebRTC answer can't be moved to another receiver | `test_every_receiver_in_a_group_gets_its_own_key`, `test_unpaired_group_send_*`, `test_an_answer_moved_*` |
-| Hotspot transfers | As the path used: a hotspot is a LAN | As the path used | As the path used | `test_hotspot.py` (simulated addresses). Real device: no |
+| Transfer path | Encryption | Authentication | Integrity | FS | Label | Evidence |
+|---|---|---|---|---|---|---|
+| Paired app ↔ app | AES-256-GCM (`ot-file/2`) under a per-transfer session key; names and sender sealed | Yes: offer signed with the pair key, answer confirmed with it | GCM per record, MAC'd checksum, sizes in the key, transcript-bound handshake | Contents: yes. Names: once the receiver restarts | encrypted | `test_encrypted_transfers.py`, `test_handshake.py`, `test_forward_secrecy.py`; CI on Linux, Windows, macOS, Android emulator |
+| Unpaired app ↔ app | The same, PSK zero | **No**: whoever answers for the advertised key | Against anyone without the session key | As paired | encrypted, not verified | same, unpaired cases |
+| WebRTC, app ↔ app hop | SDP not encrypted (not secret) | Paired: per-direction keys from the session (pair key). Unpaired: not verified. Older app: session secret only | Encrypted transfers: MAC, counter, state check | — | — | `test_signaling.py` |
+| Browser ↔ browser | DTLS (the browsers') | As far as each signalling hop: TLS with `--https`, loopback for an app's window, none on plain HTTP | DTLS | DTLS's own (ephemeral ECDHE) | encrypted in transit, or encrypted, not verified | `test_security_labels.py`; `test_mesh.py` signal tests (no real WebRTC in CI) |
+| Browser ↔ app | None by default; TLS 1.2+ with `--https` (then the plain port refuses browsers) | `--https`: a self-signed certificate the person accepts (fingerprint on the owner's sheet). Otherwise none: a PIN keeps strangers out, it doesn't protect the hop | TLS, or none | TLS's own (ECDHE) | encrypted in transit, or not encrypted | `test_https.py`, `test_security_labels.py`, `e2e/test_https_ui.py` (Chromium over TLS) |
+| Browser → app → app | TLS or plain to its app, then `ot-file/2` | Browser hop as above; app hop as paired/unpaired | Per hop | App hop only | the weakest hop | `test_security_labels.py` |
+| Older app versions | None | Paired: signed requests. Unpaired: none | TCP only | No | not encrypted; refused with “Encrypted transfers only” (on for new installs) | simulated: `test_encrypted_only.py`, `test_encrypted_transfers.py` |
+| Android Share ingestion | Not on a network (`content://` copied in the app), then as the path it's sent on | An Android intent from the phone's owner | In-process copy, then as sent | As sent | as sent | emulator smoke test in CI |
+| Group transfers | Per receiver: own offer, ephemeral keys, salt, session | Per receiver | Per receiver; one receiver's answer can't stand for another's | Per receiver | per receiver | `test_each_receiver_in_a_group_has_its_own_session`, `test_an_answer_moved_*` |
+| Hotspot transfers | As the path used: a hotspot is a LAN | As the path used | As the path used | As used | as used | `test_hotspot.py` (simulated addresses) |
+| iPhone Shortcuts (clipboard) | None: plain HTTP to its hub | A per-device token | None beyond TCP | No | — | [sync.md](sync.md); Shortcuts can't trust a self-signed certificate |
+
+**Is Open Transfer end-to-end encrypted?** Between two of its apps, yes:
+encrypted end to end with forward secrecy, and authenticated when they're
+paired. **Not every path**: a browser's hop is plain HTTP unless `--https`,
+and even then the app in between reads what a browser sends; an older app
+gets plain HTTP unless refused; iPhone Shortcuts use plain HTTP with a token.
+So the product as a whole is **not** fully end-to-end encrypted, and its pages
+say which kind each transfer had.
+
+### What's left
+
+| Area | State |
+|---|---|
+| **Remaining plaintext** | A browser's hop without `--https`; older apps (off for new installs); iPhone Shortcuts clipboard; discovery announcements and hellos (names, ids, the per-run key); offer sizes and counts. |
+| **Unauthenticated metadata** | Everything from an unpaired app (who it says it is, its announcements); a peer's report of its browsers' hops (`secure`) and of its visitors; between paired apps the hellos are signed, multicast announcements aren't. |
+| **Key storage** | The vault key is in the OS keystore except Docker / Linux without a keyring (a private file, said so). Session keys live only in memory and are dropped, not wiped: Python can't overwrite memory. An ad-hoc signed Mac build asks once per update for its Keychain item. |
+| **Forward secrecy** | File contents and WebRTC messages: per transfer, both sides. File names and sender: per run of the receiving app (sealed before the receiver's fresh key exists). Not against someone reading a running app's memory. |
+| **Legacy risks** | An existing installation keeps “Encrypted transfers only” off until its owner turns it on; earlier builds of this branch (`ot-file/1`) can't receive from this one (refused, not plain). |
+| **Browser limits** | Self-signed certificate: one warning per device, trust is the person's choice; no HSTS; the app sees what a browser sends; a browser's direct transfer is only as verified as its signalling hops. |
+| **Group isolation** | Every recipient has its own handshake and keys; tested on the wire (one recipient's session doesn't open another's copy). |
+| **Outside review** | None. The handshake is a composition of standard parts in the shape of TLS 1.3's PSK + ECDHE schedule, not a formally verified protocol. |
