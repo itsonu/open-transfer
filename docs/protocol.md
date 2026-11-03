@@ -128,7 +128,10 @@ POST /api/p2p/v1/offers
 **States:** `pending` → `accepted` → `receiving` → `done`, or `declined`,
 `expired` (no answer in 120 s), `canceled`, `failed`. Offers to an owner from
 a paired app (and with `--auto-accept`) start as `accepted`. With
-`--paired-only`, offers from unpaired apps are refused (`403`).
+`--paired-only`, offers from unpaired apps are refused (`403`). With
+“Encrypted transfers only” (`--encrypted-only` or the owner's switch), an
+offer without a usable `enc` block is refused (`403 encrypted_only`, with
+what to do), and the sender doesn't offer to an app it can't encrypt to.
 
 The sender polls `GET /offers/<id>` until it leaves `pending`, then uploads
 each file with `PUT`. The receiver streams it to a `.part` file and publishes
@@ -152,14 +155,23 @@ messages:
 
 ```
 sender page → its app        POST /api/signal {job, target, kind: "offer", sdp}
-  its app → receiver's app   POST /api/p2p/v1/signal {dir: "to_receiver", session, secret, …}
+  its app → receiver's app   POST /api/p2p/v1/signal {dir: "to_receiver", session, secret, kind, sdp, n, mac}
 receiver page ← its app      GET  /api/signals            (announced by "signals": n in /api/state)
 receiver page → its app      POST /api/signal {session, kind: "answer", sdp}
-  … → sender's app           POST /api/p2p/v1/signal {dir: "to_sender", job, target, secret, …}
+  … → sender's app           POST /api/p2p/v1/signal {dir: "to_sender", job, target, secret, kind, sdp, n, mac}
 ```
 
-* Messages are only accepted for a transfer the receiver **already accepted**,
-  and only from its two ends: app-to-app messages carry the offer's secret.
+* Messages are only accepted for a transfer that is **accepted and still
+  running** on both apps (`409` otherwise), and only from its two ends:
+  app-to-app messages carry the offer's secret.
+* For an **encrypted** transfer (paired, or unpaired with a one-off key) each
+  app-to-app message also carries a counter `n` (1, 2, … per direction) and
+  `mac` = HMAC-SHA256 under `HKDF(transfer key, salt, "open-transfer-signal/1|sender|receiver|target")`
+  of the JSON array `[dir, receiver's session id, sender's job id, target, kind, sdp, n]`.
+  A missing or wrong MAC, or an `n` not above the last one taken, is `403`:
+  the SDP (DTLS fingerprint, ICE candidates) can't be changed, moved to another
+  transfer or receiver, or replayed ([encryption.md](encryption.md#direct-transfers-webrtc)).
+  A plain transfer (an older app) has no MAC, as before.
 * No STUN/TURN servers: on a LAN the devices reach each other directly
   (browsers' mDNS `.local` candidates included).
 * The data channel carries `{"t":"file", i, name, size, mime}`, raw 64 KiB

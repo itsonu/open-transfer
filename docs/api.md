@@ -161,6 +161,7 @@ For the device's owner, `/api/state` also has `keys` (`{"store", "protected", "l
 | `GET /api/sync/client/latest` + `Authorization: Bearer <token>` | an iPhone/iPad | `{text, from, message}`: the newest clip from any of your devices, until it expires (`text` is empty when there's nothing new) |
 | `GET /api/app` | owner | `{desktop: false}`, or in the desktop app `{desktop, background, can_start_at_login, start_at_login}` |
 | `PUT /api/app` `{start_at_login}` | owner | Start the background copy at login (desktop app) |
+| `PUT /api/settings` `{encrypted_only}` | owner | “Encrypted transfers only”: refuse app-to-app transfers that can't be encrypted. Saved in `<state>/settings.json`; `--encrypted-only` turns it on regardless. → `{settings}` (also in `/api/state` as `settings.encrypted_only`) |
 | `POST /api/app/quit` | owner | Quit the background copy (sharing and sync stop) |
 
 Sending from a script, end to end:

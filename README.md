@@ -215,6 +215,7 @@ Every option works as a command-line flag or an environment variable (flags win)
 | `--peer HOST:PORT` | `OPEN_TRANSFER_PEERS` (comma-separated) | — | Connect to an app directly (networks that block discovery) |
 | `--no-discovery` | `OPEN_TRANSFER_NO_DISCOVERY=1` | off | Don't announce this device or look for others |
 | `--paired-only` | `OPEN_TRANSFER_PAIRED_ONLY=1` | off | Only accept files from paired devices |
+| `--encrypted-only` | `OPEN_TRANSFER_ENCRYPTED_ONLY=1` | off | Refuse transfers to and from apps that can't encrypt (older versions); also a switch under Add device |
 | `--auto-accept` | `OPEN_TRANSFER_AUTO_ACCEPT=1` | off | Accept incoming files without asking (servers) |
 | `--share-folder` | `OPEN_TRANSFER_SHARE_FOLDER=1` | off | Classic mode: anyone who opens the link can browse the folder |
 | — | `OPEN_TRANSFER_DISCOVERY_PORT` | `47823` | UDP port for discovery |
@@ -229,7 +230,7 @@ Every option works as a command-line flag or an environment variable (flags win)
 | `--public-url` | `OPEN_TRANSFER_PUBLIC_URL` | auto | Address shown in the QR code (Docker, proxies, DNS names) |
 | `--allow-host NAME` | `OPEN_TRANSFER_ALLOWED_HOSTS` (comma-separated) | — | Extra host names to accept (see [DNS rebinding](#security--privacy)); `*` disables the check |
 | `--behind-proxy` | `OPEN_TRANSFER_BEHIND_PROXY=1` | off | Trust `X-Forwarded-*` from one reverse proxy |
-| `--https` | `OPEN_TRANSFER_HTTPS=1` | off | Also serve browsers over HTTPS on the next port (self-signed: browsers warn once); links and QR codes use it |
+| `--https` | `OPEN_TRANSFER_HTTPS=1` | off | Also serve browsers over HTTPS on the next port (self-signed: browsers warn once); links and QR codes use it, and a browser opening an old `http://` link is sent there |
 | `--no-browser` | `OPEN_TRANSFER_NO_BROWSER=1` | off | Don't open a browser on start |
 | `--no-qr` | `OPEN_TRANSFER_NO_QR=1` | off | Don't print the QR code |
 | `-v, --verbose` | — | off | Log every request |
@@ -252,7 +253,7 @@ Open Transfer is designed for **trusted local networks** (home, office, a hotspo
 
 **What you should know**
 - Anyone on the same network can see your device's **name** and offer you files (you decide). Use `--paired-only` on shared or public Wi‑Fi, and `--pin` to keep strangers' browsers out.
-- **Files between paired apps are encrypted end to end** (AES-256-GCM with a key per file, from the pair's key) and checked before they're kept. Transfers involving an unpaired app, an older app or a browser without the app still travel as plain HTTP on your LAN, and are labelled **not encrypted**. Details and what remains plain: [docs/encryption.md](docs/encryption.md).
+- **Files between paired apps are encrypted end to end** (AES-256-GCM with a key per file, from the pair's key) and checked before they're kept. Between unpaired apps they're encrypted with a one-off key (**encrypted, not verified**). An older app gets plain HTTP, labelled **not encrypted** (or refused, with **Encrypted transfers only**). A browser without the app talks to its app over plain HTTP unless you start with `--https`. Details and the full coverage table: [docs/encryption.md](docs/encryption.md#coverage).
 - In `--share-folder` mode without a PIN, anyone who opens the link can see and download the folder's files (and delete them, with `--allow-delete`).
 - It is not meant to be exposed directly to the internet.
 

@@ -100,7 +100,7 @@ the transfer list and in history.
 | **App → visitor browser** (download, or pushed to a visitor) | Plain HTTP | Same as above | Same hop, same answer. |
 | Android share sheet → the app | In-process | In-process | `content://` streams are copied inside the app (no network). |
 | Over a phone's hotspot | — | Same as the path used | A hotspot is just another LAN: nothing changes per path. |
-| Browser ↔ browser (WebRTC data channel) | DTLS | DTLS (unchanged) | Browsers always encrypt data channels. The file name and type travel inside DTLS. The connection messages (SDP) cross the visitor's plain-HTTP hop, so an active attacker there could swap the DTLS fingerprints and sit in the middle. A passive listener can't read anything. |
+| Browser ↔ browser (WebRTC data channel) | DTLS | DTLS; **its SDP is MAC'd between apps** | Browsers always encrypt data channels; the file name and type travel inside DTLS. Between two apps the connection messages carry a MAC under the transfer's key ([Direct transfers](#direct-transfers-webrtc)). Each browser's own hop to its app is plain HTTP unless `--https`, so an active attacker *there* could still swap the DTLS fingerprints. |
 | Clipboard sync | Sealed per recipient (`sync/1`) | Unchanged | See [sync.md](sync.md). |
 | Android ↔ desktop, Windows ↔ macOS | — | Same as paired app ↔ app | Every app runs the same Python code (`cryptography` 42+ on Android via Chaquopy). |
 
@@ -132,11 +132,106 @@ talking to each other on the plain port, encrypted with `ot-file/1`.
   a link". Without it, a browser's hop is plain HTTP and its page says so
   (“· not encrypted”). On the device's own window (127.0.0.1) it's never on
   the network.
-* **WebRTC** (browser ↔ browser) is always DTLS. Its connection messages
-  (SDP, with the DTLS fingerprints) go over each browser's hop to its app:
-  with `--https` that hop is protected. Two browsers on *different* apps also
-  pass them over the apps' own link, which carries them as plain HTTP, so an
-  active attacker there could still swap the fingerprints. Not closed.
+* **Old links.** With `--https`, a browser that opens a page on the plain
+  port (an old `http://` link, a typed address) is redirected to the TLS
+  port. The device's own window (127.0.0.1) and the apps' `/api/p2p` calls
+  stay on the plain port. An active attacker can still strip that redirect
+  for a browser that has never been to the `https://` address (no HSTS: a
+  browser ignores it on a certificate it had to be told to accept).
+* **WebRTC** (browser ↔ browser): see [Direct transfers](#direct-transfers-webrtc).
+
+### What a browser's plain-HTTP hop shows
+
+Without `--https`, everything between a visitor's browser and its app is
+readable and changeable by someone on the same network, which means, in full:
+
+* **The page itself** (HTML and JavaScript). An active attacker can serve a
+  different page, which then does whatever it likes in that browser. No
+  in-page check can fix this: the check would come over the same hop.
+* **File contents, names, types and sizes** of everything the browser sends or
+  receives through its app (relay), and its inbox listing.
+* **Who's who:** the browser's chosen name and icon, the device list it sees,
+  its visitor cookie (enough to act as that browser on that app until it
+  leaves), and the PIN if it types one.
+* **Transfer ids and secrets** the page uses, and **WebRTC connection
+  messages**: the SDP (DTLS fingerprint, ICE candidates, i.e. local
+  addresses). With these an active attacker can sit in the middle of a direct
+  transfer. A passive one learns addresses only: the data channel is DTLS.
+
+With `--https` all of this is inside TLS, once the person accepted the
+certificate. Comparing its fingerprint with the one on the owner's Add device
+sheet is what makes that acceptance an authentication rather than a guess.
+
+### Options evaluated for the browser's hop
+
+| Option | Verdict |
+|---|---|
+| TLS (`--https`) | **Done, opt-in.** The only thing a browser trusts that isn't sent over the hop it protects. Self-signed: one warning per device, then kept 397 days. |
+| Certificate fingerprint check | **Manual**: the owner's sheet shows the SHA-256. A page can't check its own certificate (it would run on the connection it's checking), and a QR code carrying the fingerprint is only useful to a scanner app that pins it, which browsers' cameras don't. |
+| Authenticating the browser's signaling | **Not possible over plain HTTP.** Any key the page used would be delivered by the same hop. Over TLS it's already authenticated as far as the certificate is. |
+| Ephemeral session credentials | **Already there**: a visitor's cookie is random per browser, and a QR invite works for 10 minutes. They stop other browsers, not someone reading the hop. |
+| Browser compatibility | TLS 1.2+, P-256: every browser that runs the page. WebRTC data channels are DTLS in every browser; the page falls back to the app if `RTCPeerConnection` is missing. |
+
+So a **browser transfer is not end-to-end encrypted by Open Transfer.** Its
+data channel is DTLS, but the DTLS keys are authenticated only as well as the
+SDP that carried their fingerprints, which crossed each browser's hop to its
+app: plain HTTP by default, TLS with `--https`.
+
+## Direct transfers (WebRTC)
+
+A page sending to a **browser** opens a WebRTC data channel to it. The file
+then goes browser to browser, inside DTLS. Each browser checks the other's
+DTLS certificate against the `a=fingerprint` in the SDP it was handed, so
+**whoever can change an SDP on its way can sit in the middle** and read the
+file. The SDP crosses up to three hops:
+
+```
+sender page ──(1)── its app ──(2)── receiver's app ──(3)── receiver page
+```
+
+| Hop | Protection |
+|---|---|
+| (1), (3): a page to its own app | The app's own window: loopback, never on the network. A visitor's browser: plain HTTP, or TLS with `--https` (above). |
+| (2): app to app (only when the two browsers are on different apps) | **For an encrypted transfer, a MAC under that transfer's key.** A plain one (an older app): the session secret only, as before. |
+
+On hop (2) each message carries a counter `n` and
+`mac = HMAC-SHA256(K, JSON[dir, receiver's session id, sender's job id, target, kind, sdp, n])`,
+where `K = HKDF(transfer key, salt, "open-transfer-signal/1|sender|receiver|target")`:
+
+* the **transfer key** is the pair key (paired: only those two devices have
+  it, so the SDP and its DTLS fingerprint are bound to the paired device's
+  identity) or the transfer's one-off X25519 key (unpaired: bound to whoever
+  answered the offer, “not verified” as for its files);
+* the **salt** is that transfer's own, so a message can't be moved to another
+  transfer, and the **target** is in the key and the MAC, so one receiver in a
+  group can't answer for another;
+* **`n`** must be above the last one taken for that transfer and direction, so
+  a message can't be replayed (a replayed offer would restart the receiving
+  browser's connection). A message lost on the way just makes the page try
+  again with the next `n`;
+* messages are refused unless the transfer is accepted and still running
+  on that app.
+
+The SDP isn't encrypted on hop (2): what it holds (a certificate fingerprint,
+local addresses) isn't secret, and DTLS already encrypts the data. Only
+changing it matters, and the MAC stops that. (Between paired apps the request
+also carries an `X-OT-Auth` signature, like every request to a paired app; the
+MAC is what's checked, since it also binds the transfer and the counter.)
+
+| Attack on hop (2) | Result | Test (`tests/test_signaling.py`) |
+|---|---|---|
+| Changed DTLS fingerprint, ICE candidate, whole SDP, kind or counter | `403`, the page gets nothing; the real message still works after | `test_a_changed_message_is_refused` |
+| MAC removed (a downgrade) or made with another key (another device) | `403` | same |
+| Replayed message | `403` | `test_a_replayed_message_is_refused` |
+| Message moved to another transfer, with that transfer's (sniffed) secret | `403` | `test_a_message_moved_to_another_transfer_is_refused` |
+| Answer moved to another receiver in a group | `403` | `test_an_answer_moved_to_another_receiver_in_a_group_is_refused` |
+| Message for a transfer the receiver canceled | `409` | `test_messages_for_a_finished_transfer_are_refused` |
+| Message lost, sent again | Delivered once, with the next `n` | `test_a_lost_message_can_be_sent_again` |
+| Older app (plain transfer) | Works without a MAC, labelled “not encrypted” | `test_an_older_app_still_swaps_messages_labelled_plain` |
+
+Each runs for a paired and an unpaired (one-off key) transfer. If no
+connection opens in ~12 s, or it breaks, the sender's page falls back to
+sending through the apps (encrypted between them as usual).
 
 ## Key lifecycle
 
@@ -149,6 +244,41 @@ talking to each other on the plain port, encrypted with `ot-file/1`.
 | Unpair | The key is deleted. Encrypted transfers from that device stop, and new ones can't be keyed. | `test_unpairing_stops_transfers_from_that_device` |
 | Re-pair / reinstall | A new pair key; the `enc` flag starts over and is learned again from the next signed hello | `test_re_pairing_gives_a_new_key_and_transfers_still_work` |
 | History | Records hold names, sizes and states, never keys, so re-pairing never touches them | — |
+
+### Rotation and revocation
+
+| Key | Rotated | Revoked |
+|---|---|---|
+| Pair key | Only by pairing again (`test_re_pairing_gives_a_new_key_and_transfers_still_work`). Every transfer derives new keys from it with a fresh salt. | **Unpair**: this app deletes the key at once and stops what that device was sending with it (`test_unpairing_stops_transfers_from_that_device`). The other device isn't told unless both are in a sync network (then every member forgets it); its next send is refused as a downgrade, never sent plain, but it says “Couldn't set up encryption”, not “unpaired”. |
+| One-off keys | The receiver's per run, the sender's per offer; never stored. | — |
+| Vault key | `--rotate-keys` (app not running) | Delete the keystore item: pairings lock, and stay listed until paired again |
+| TLS certificate | 30 days before it ends (397 days) | Delete `tls.json`: a new one next start (browsers warn again) |
+
+**No forward secrecy between paired apps.** A transfer's keys come from the
+pair key and a salt that crosses the network, so someone who recorded a paired
+transfer and later steals that pair key (from an unlocked device) can decrypt
+it. Unpaired transfers do have it (the receiver's X25519 key is never stored).
+The fix is to mix a one-off X25519 exchange into paired transfers too (both
+apps already have per-run keys); it changes the wire format, so it's left for
+its own reviewed change.
+
+### Metadata a listener still sees
+
+Between two apps, for an encrypted transfer, someone on the network still sees:
+
+* **That two devices talk, when, and how much**: addresses, ports, timing,
+  each file's size (in the offer and `Content-Length`/`Content-Range`) and how
+  many files.
+* **Each app's announcement** (multicast hellos and `/info`): its id, name,
+  icon, platform, version, whether it takes files only from paired devices,
+  its per-run key, and the names of browsers connected to it.
+* **The sending app's announcement** inside each offer (`from`), and the
+  target's id. File names, types and the person sending are sealed.
+* **Transfer ids and secrets**, and WebRTC SDP (local addresses).
+
+Hiding names in announcements would hide the device from people choosing whom
+to send to, which is the point of them; sizes and timing are out of scope (see
+the threat model).
 
 ## Keys at rest
 
@@ -204,8 +334,9 @@ names of locked pairings.
 | File nonces | Unique: every file has its own key (HKDF over the pair or one-off key, a random 32-byte salt per offer, both app ids, target, index, size), and the nonce is the record counter (11 bytes, 2⁸⁸ records) plus the last-flag. A piece sent again after an error is the *same* encrypted body (`_push_chunked` keeps it), never new bytes under an old nonce. **Retry** makes a new offer, so a new salt and new keys. |
 | Metadata nonces | One seal per meta key (the key is new with every offer), random 96-bit nonce. |
 | Vault nonces | Random 96-bit nonces under one vault key; every save reseals every key, but that's thousands of seals, far below the 2³² bound for random nonces. `--rotate-keys` starts a new key. |
-| Key derivation | HKDF-SHA256 with a distinct label per use (`open-transfer-file/1`, `-meta/1`, `-verify/1`, `-eph/1`, `pair-key/2`). The pair key never encrypts anything itself. |
+| Key derivation | HKDF-SHA256 with a distinct label per use (`open-transfer-file/1`, `-meta/1`, `-verify/1`, `-eph/1`, `-signal/1`, `pair-key/2`). The pair key never encrypts anything itself. |
 | One-off keys | X25519 from `cryptography`, which refuses a point that yields an all-zero secret (a 400, tested). The receiver's key lasts one run and is never stored; the sender's is new per offer. |
+| Signaling | WebRTC messages between apps: HMAC-SHA256 under a per-transfer key, with a per-direction counter; see [Direct transfers](#direct-transfers-webrtc). |
 | Replay | Signed requests carry a timestamp (±120 s) and are accepted once. A replayed record or piece fails: each transfer and file has its own key. Uploads need the session secret; between unpaired apps a listener can see that secret, but can't make records that decrypt. |
 | Metadata integrity | Sizes are in the file key, so a changed size fails decryption. Names, types and sender are sealed (AES-GCM). The plain `from` of an unpaired offer is not authenticated, like everything about an unpaired app. |
 | Partial files | A file is written to `.part` and kept only after its last record and the MAC check pass; on any failure the `.part` is deleted (`test_a_tampered_*`, `test_unpaired_tampering_leaves_nothing`, `test_a_canceled_encrypted_transfer_leaves_nothing`). |
@@ -216,6 +347,8 @@ names of locked pairings.
 |---|---|---|
 | Wrong key, tampered or injected record, records out of order, file cut short | File removed: “It arrived damaged or wasn't from *X* — nothing was kept.” | “*X* couldn't verify the file.” |
 | A downgrade was attempted | — | “Couldn't set up encryption with *X*.” |
+| “Encrypted transfers only”, the other app can't encrypt | The offer is refused: “*Y* takes only encrypted transfers. Update Open Transfer on this device to send to it.” | “Not sent: *X* can't encrypt (an older version?) and this device sends only encrypted transfers. Update Open Transfer on *X*, or turn off “Encrypted transfers only”.” |
+| A WebRTC message was changed, moved or replayed | Refused (`403`); nothing reaches the page | The page's direct attempt times out and the file goes through the apps |
 | Unpaired during a transfer | Transfers from that device stop: “No longer paired with *X*.” | Its next piece fails the same way. |
 | Interrupted or app restarted | `.part` files and staged pieces are deleted (staged pieces after their usual expiry) | Retried or resumed as before; every piece is authenticated again. |
 
@@ -274,3 +407,43 @@ works on Android and costs little, not what a phone does.
 | New | New, unpaired | Encrypted with a one-off key, labelled “not verified” |
 | New | Old, unpaired (no `kx`) | Plain, labelled |
 | Old | New, unpaired | Plain, labelled |
+| Any | New, with “Encrypted transfers only” | Encrypted, or refused with what to do |
+| New, with “Encrypted transfers only” | Any | Encrypted, or not sent, with what to do |
+
+The policy:
+
+* **Encrypted whenever both apps can.** Paired: always. Unpaired: with a
+  one-off key whenever the receiver advertises one.
+* **Never a silent downgrade.** Once a paired app has said (in a signed
+  hello) that it speaks `ot-file/1`, a plain answer from it is refused, not
+  sent plain. A stripped one-off key is refused too. WebRTC messages for an
+  encrypted transfer without a MAC are refused.
+* **A plain transfer is always labelled**: “Not encrypted” in the transfer
+  list, the incoming sheet and history, on both sides.
+* **“Encrypted transfers only”** (Add device sheet, `--encrypted-only` or
+  `OPEN_TRANSFER_ENCRYPTED_ONLY=1`; off by default so older versions keep
+  working) refuses every app-to-app transfer that can't be encrypted, both
+  ways, with the reasons above. A browser's own hop is governed by `--https`,
+  not by this switch.
+
+Older versions are **simulated** in the tests (an app with `enc`, `kx` or the
+offer's `enc` block removed: `tests/test_encrypted_transfers.py`,
+`tests/test_encrypted_only.py`, `tests/test_signaling.py`); no released older
+build was run against this one.
+
+## Coverage
+
+What each path gets, and only what's tested. “Real device” means checked on
+physical hardware; none of these have been yet (device-testing.md).
+
+| Transfer path | Encryption | Authentication | Integrity | Evidence |
+|---|---|---|---|---|
+| Paired app ↔ app | AES-256-GCM (`ot-file/1`); names and sender sealed | Yes: the pair key (SRP); offers signed | Yes: GCM per record, MAC'd checksum, sizes in the key | `test_encrypted_transfers.py`; CI on Linux, Windows, macOS, Android emulator. Real device: no |
+| Unpaired app ↔ app | AES-256-GCM, one-off X25519 key | **No** (“not verified”): whoever answers the offer | Yes, against anyone without that key | `test_encrypted_transfers.py` (unpaired tests). Real device: no |
+| WebRTC, app ↔ app hop | SDP not encrypted (not secret); data is DTLS | Paired: pair key. Unpaired: one-off key (not verified). Older app: session secret only | Yes for encrypted transfers: MAC, counter, state | `test_signaling.py`. Real browsers on two apps: no |
+| Browser ↔ browser | DTLS (the browser's own) | Only as far as each browser's hop to its app: none on plain HTTP, the certificate with `--https`; loopback for an app's own window | DTLS; SDP as above | `test_mesh.py` signal tests (no real WebRTC in CI). Real device: no |
+| Browser ↔ app | None by default; TLS 1.2+ with `--https` | `--https`: a self-signed certificate the person compares by fingerprint. Otherwise none (a PIN keeps strangers out, it doesn't protect the hop) | TLS with `--https`; none otherwise | `test_https.py`, `e2e/test_https_ui.py` (Chromium over TLS). Real device: no |
+| Older app versions | None, labelled; refused with “Encrypted transfers only” | Paired: signed requests. Unpaired: none | None beyond TCP | Simulated (above) |
+| Android Share ingestion | Not on a network: `content://` streams copied inside the app, then as the path it's sent on | — (an Android intent from the person's own phone) | In-process copy, then as the path it's sent on | Emulator smoke test in CI. Real device: no |
+| Group transfers | Per receiver, as its path; each receiver its own keys | Per receiver | Per receiver; a WebRTC answer can't be moved to another receiver | `test_every_receiver_in_a_group_gets_its_own_key`, `test_unpaired_group_send_*`, `test_an_answer_moved_*` |
+| Hotspot transfers | As the path used: a hotspot is a LAN | As the path used | As the path used | `test_hotspot.py` (simulated addresses). Real device: no |
