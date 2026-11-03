@@ -9,6 +9,7 @@ import importlib.util
 import sys
 from pathlib import Path
 from types import ModuleType
+from typing import Any
 
 import pytest
 
@@ -181,6 +182,15 @@ def three_devices(make_node: NodeFactory):  # type: ignore[no-untyped-def]
         owner(a)("POST", "/api/pair", {"code": code, "address": f"127.0.0.1:{b.port}"})
     for a, b in ((mac, pc), (mac, phone), (pc, phone), (phone, pc)):
         wait_for(lambda a=a, b=b: b.mesh.id in a.mesh._online_ids())
+
+    def same_key(a: Any, b: Any) -> bool:
+        # The network introduces PC and phone while they also pair by code: until both
+        # sides hold the same key, a clip between them is refused (CI py3.10, once).
+        ka, kb = a.mesh.trust.get(b.mesh.id), b.mesh.trust.get(a.mesh.id)
+        return bool(ka and kb and ka.key == kb.key)
+
+    for a, b in ((mac, pc), (mac, phone), (pc, phone)):
+        wait_for(lambda a=a, b=b: same_key(a, b))
     return mac, pc, phone, clips
 
 
