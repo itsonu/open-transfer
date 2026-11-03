@@ -87,7 +87,7 @@ The eight product phases asked for on 2026-10-31 map onto what's shipped:
 
 Reliability and security follow-ups from the audit ([audit-2026-10-26.md](audit-2026-10-26.md)):
 
-1. ✅ **Encrypt file transfers:** paired apps as [`ot-file/1`](encryption.md); unpaired apps with a one-off key (“encrypted, not verified”); a browser's hop with `--https` (opt-in). Pair keys are sealed with a vault key in the OS keystore (Keychain, DPAPI, Android Keystore, Secret Service) — [keys at rest](encryption.md#keys-at-rest). WebRTC messages between two apps carry a MAC under the transfer's key ([direct transfers](encryption.md#direct-transfers-webrtc)), and “Encrypted transfers only” refuses older apps. Still plain: a browser's hop without `--https`, and older apps (labelled).
+1. ✅ **Encrypt file transfers:** paired apps as [`ot-file/2`](encryption.md) with a handshake per transfer (forward secrecy); unpaired apps the same, not verified; a browser's hop with `--https` (opt-in). Pair keys are sealed with a vault key in the OS keystore (Keychain, DPAPI, Android Keystore, Secret Service) — [keys at rest](encryption.md#keys-at-rest). WebRTC messages between two apps carry a MAC under the transfer's key ([direct transfers](encryption.md#direct-transfers-webrtc)), and “Encrypted transfers only” refuses older apps. Still plain: a browser's hop without `--https`, and older apps (labelled).
    Next: a Developer ID build so macOS stops asking for the Keychain after updates.
 2. **Checksum the browser → its own app hop** (today only app → app is verified).
 3. **Windows on a Domain network:** make the Allow rule for the current profile (Domain) instead of Private.

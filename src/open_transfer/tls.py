@@ -1,6 +1,6 @@
 """``--https``: a self-signed certificate so browsers reach the app over TLS.
 
-A browser's own hop to its app can't use ot-file/1: a page on
+A browser's own hop to its app can't use ot-file/2: a page on
 ``http://<LAN address>`` isn't a secure context (no WebCrypto) and the
 browser shares no key with the app. TLS gives that hop ephemeral (ECDHE)
 session keys. There is no CA for a LAN address, so browsers warn once; the

@@ -156,7 +156,7 @@ class TrustedDevice:
     paired_at: float
     form: str = ""  # remembered so an away device keeps its icon ("" = not known yet)
     platform: str = ""
-    enc: bool = False  # said in a signed hello that it speaks ot-file/1: never send it plain text
+    enc: bool = False  # said in a signed hello that it speaks ot-file/2: never send it plain text
 
 
 class TrustStore:

@@ -263,11 +263,13 @@ def test_an_older_app_still_swaps_messages_labelled_plain(
 def test_the_mac_covers_what_the_docs_say() -> None:
     from open_transfer import filecrypt
 
-    key = filecrypt.signal_key(b"k" * 32, b"s" * 32, "A", "B", "T")
+    key = filecrypt.signal_key(b"k" * 32, b"s" * 32, "A", "B", "T", "to_receiver")
     fields = ["to_receiver", "S", "J", "T", "offer", SDP, 1]
     mac = filecrypt.signal_mac(key, fields)
     assert mac == filecrypt.signal_mac(key, list(fields))
     assert mac != filecrypt.signal_mac(key, [*fields[:-1], 2])
-    other = filecrypt.signal_key(b"k" * 32, b"t" * 32, "A", "B", "T")  # another transfer
-    assert mac != filecrypt.signal_mac(other, fields)
-    assert key != b"k" * 32  # derived, never the pair key itself
+    other = filecrypt.signal_key(b"k" * 32, b"t" * 32, "A", "B", "T", "to_receiver")
+    assert mac != filecrypt.signal_mac(other, fields)  # another transfer
+    back = filecrypt.signal_key(b"k" * 32, b"s" * 32, "A", "B", "T", "to_sender")
+    assert back != key  # each direction its own key
+    assert key != b"k" * 32  # derived, never the session key itself

@@ -215,6 +215,7 @@ class IncomingFile:
     duplicate: bool = False  # a file with this name and size is already here
     skipped: bool = False  # …and the receiver chose to keep theirs
     sha256: str = ""  # of what was written (checked against the sender's)
+    mac: str = ""  # encrypted: the MAC of that checksum the sender must match (keys go after)
     verified: bool = False
     hasher: Any = field(default=None, repr=False)  # chunked: hash of the bytes so far, in order
     hashed: int = 0
@@ -239,12 +240,11 @@ class IncomingSession:
     started: float = 0.0  # when the first byte arrived (for the speed in history)
     recorded: bool = False  # written to history
     on_duplicate: str = "rename"  # files already here: "rename" (keep both), "skip" or "replace"
-    enc_salt: bytes = field(default=b"", repr=False)  # ot-file/1: only encrypted bytes accepted
-    enc_base: bytes = field(
-        default=b"", repr=False
-    )  # unpaired sender: the one-off key, not a pair key
+    enc_salt: bytes = field(default=b"", repr=False)  # ot-file/2: only encrypted bytes accepted
+    enc_base: bytes = field(default=b"", repr=False)  # the session key (dropped when it's over)
     signals_out: int = 0  # WebRTC messages sent and the last one taken (counts against replays)
     signals_in: int = 0
+    enc_auth: bool = False  # the session key is authenticated by the pair key
 
     @property
     def total(self) -> int:
@@ -273,8 +273,9 @@ class Delivery:
     skip: set[int] = field(default_factory=set)  # files the receiver already has and kept
     verified: set[int] = field(default_factory=set)  # files whose checksum the receiver confirmed
     enc_salt: bytes = field(default=b"", repr=False)
-    enc_base: bytes = field(default=b"", repr=False)  # unpaired: one-off key (not verified)
-    encrypted: bool = False  # the receiving app takes this transfer as ot-file/1
+    enc_base: bytes = field(default=b"", repr=False)  # the session key (dropped when it's over)
+    encrypted: bool = False  # the receiving app takes this transfer as ot-file/2
+    enc_auth: bool = False  # …and the handshake was authenticated by the pair key
     signals_out: int = 0
     signals_in: int = 0
 
@@ -1127,14 +1128,16 @@ class Mesh:
             return False
         with self._lock:  # its key is going: stop what it was sending us with it
             for s in self._incoming.values():
-                if (
-                    s.sender_node == device_id
-                    and s.enc_salt
-                    and not s.enc_base
-                    and s.state not in FINAL
-                ):
+                if s.sender_node == device_id and s.enc_auth and s.state not in FINAL:
                     s.state, s.finished = CANCELED, time.monotonic()
                     s.reason = f"No longer paired with {trusted.name}."
+                    s.enc_base = b""
+            for job in self._jobs.values():  # and what we were sending it
+                for d in job.deliveries.values():
+                    if d.peer is not None and d.peer.id == device_id and d.enc_auth:
+                        if d.view_state() not in FINAL:
+                            d.canceled, d.reason = True, f"No longer paired with {trusted.name}."
+                        d.enc_base = b""
         if self.sync.active():
             self.sync.revoke(device_id)
             return True
@@ -1377,6 +1380,7 @@ class Mesh:
         sender_node: str = "",
         enc_salt: bytes = b"",
         enc_base: bytes = b"",
+        enc_auth: bool = False,
     ) -> IncomingSession:
         """Someone wants to send ``files`` to ``target`` (our owner or a visitor)."""
         clean = _clean_files(files)
@@ -1410,6 +1414,7 @@ class Mesh:
             sender_node=sender_node,
             enc_salt=enc_salt,
             enc_base=enc_base,
+            enc_auth=enc_auth,
         )
         store = self.storage if owner_target else self.inbox(target)
         for f in session.files:
@@ -1438,81 +1443,71 @@ class Mesh:
         return session
 
     def open_offer(
-        self, sender_id: str, target: str, enc: Any, *, signed: bool = True
-    ) -> tuple[bytes, Any, bytes]:
-        """An offer's ot-file/1 block: its salt, its sealed names if any, and (from an
-        unpaired app, ``signed`` False) the one-off key it made to our per-run key."""
+        self, sender_id: str, target: str, job: str, enc: Any, *, signed: bool = True
+    ) -> tuple[bytes, Any, bytes, dict[str, str]]:
+        """An offer's ot-file/2 block: its salt, its sealed names if any, the session key
+        and our half of the handshake for the answer. Signed by a paired app, the pair
+        key authenticates it; otherwise it's a one-off (not verified)."""
         if not isinstance(enc, dict) or enc.get("v") != filecrypt.VERSION:
-            return b"", None, b""
-        if not signed and "eph" not in enc:
-            return b"", None, b""  # a pair's block without its signature means nothing
+            return b"", None, b"", {}
         trusted = self.trust.get(sender_id) if signed else None
         try:
-            salt = bytes.fromhex(str(enc.get("salt")))
+            salt, eph = bytes.fromhex(str(enc.get("salt"))), bytes.fromhex(str(enc.get("eph")))
         except ValueError:
-            salt = b""
+            salt = eph = b""
         if (signed and trusted is None) or len(salt) != 32:
             raise MeshError(400, "bad_request", "Invalid encryption parameters.")
-        base = b""
-        if not signed:
-            if enc.get("kx") != self.kx_public.hex():  # made for an earlier run of this app
-                raise MeshError(400, "bad_request", "Encryption key out of date. Try again.")
-            try:
-                eph = bytes.fromhex(str(enc.get("eph")))
-                base = filecrypt.ephemeral_from(self._kx, eph, salt, sender_id, self.id)
-            except ValueError as exc:
-                raise MeshError(400, "bad_request", "Invalid encryption parameters.") from exc
-        if "meta" not in enc:
-            return salt, None, base
-        pair_key = base or bytes.fromhex(trusted.key)  # type: ignore[union-attr]
-        key = filecrypt.meta_key(pair_key, salt, sender_id, self.id, target)
+        if enc.get("kx") != self.kx_public.hex():  # made for an earlier run of this app
+            raise MeshError(400, "bad_request", "Encryption key out of date. Try again.")
+        pair_key = bytes.fromhex(trusted.key) if trusted else None
+        handshake = filecrypt.Handshake(
+            pair_key, salt, sender=sender_id, receiver=self.id, job=job, target=target
+        )
         try:
-            meta = filecrypt.open_meta(key, str(enc["meta"]))
+            eph_r, confirm = handshake.answer(self._kx, eph)
+        except filecrypt.DecryptError as exc:
+            raise MeshError(400, "bad_request", "Invalid encryption parameters.") from exc
+        answer = {"eph": eph_r.hex(), "confirm": confirm.hex()}
+        if "meta" not in enc:
+            return salt, None, handshake.session, answer
+        try:
+            meta = filecrypt.open_meta(handshake.meta_key, str(enc["meta"]))
         except filecrypt.DecryptError as exc:
             raise MeshError(400, "bad_seal", "The offer couldn’t be opened with your key.") from exc
         if not isinstance(meta, dict):
             raise MeshError(400, "bad_request", "Invalid encryption parameters.")
-        return salt, meta, base
+        return salt, meta, handshake.session, answer
 
     def _cipher(
         self,
-        peer_id: str,
+        base: bytes,
         salt: bytes,
         sender: str,
         receiver: str,
         target: str,
         index: int,
         size: int,
-        base: bytes = b"",
     ) -> filecrypt.Cipher:
-        """One file's ot-file/1 cipher, keyed from the pair key we share with ``peer_id``
-        (or, unpaired, from that transfer's one-off ``base`` key)."""
-        pair_key = self._transfer_key(peer_id, base)
+        """One file's ot-file/2 cipher, keyed from the transfer's session key."""
+        if not base:  # dropped: the transfer is over, or that device was unpaired
+            raise MeshError(409, "keys_gone", "This transfer is over. Send it again.")
         return filecrypt.Cipher(
-            filecrypt.file_key(pair_key, salt, sender, receiver, target, index, size), size
+            filecrypt.file_key(base, salt, sender, receiver, target, index, size), size
         )
-
-    def _transfer_key(self, peer_id: str, base: bytes = b"") -> bytes:
-        if base:
-            return base
-        trusted = self.trust.get(peer_id)
-        if trusted is None:
-            raise MeshError(403, "not_paired", "No longer paired with that device.")
-        return bytes.fromhex(trusted.key)
 
     def _receive_cipher(self, session: IncomingSession, index: int) -> filecrypt.Cipher:
-        sender = session.sender_node
         size = session.files[index].size
         return self._cipher(
-            sender, session.enc_salt, sender, self.id, session.target, index, size, session.enc_base
-        )
+            session.enc_base, session.enc_salt, session.sender_node, self.id, session.target,
+            index, size,
+        )  # fmt: skip
 
     def _send_cipher(self, delivery: Delivery, index: int, size: int) -> filecrypt.Cipher:
         peer = delivery.peer
         assert peer is not None  # noqa: S101 - only remote deliveries are encrypted
         target = str(delivery.target["id"])
         return self._cipher(
-            peer.id, delivery.enc_salt, self.id, peer.id, target, index, size, delivery.enc_base
+            delivery.enc_base, delivery.enc_salt, self.id, peer.id, target, index, size
         )
 
     def _damaged(self, session: IncomingSession) -> str:
@@ -1684,6 +1679,7 @@ class Mesh:
         with self._lock:
             item.state, item.saved_name, item.received = DONE, saved.name, item.size
             item.sha256 = hasher.hexdigest()
+            item.mac = filecrypt.verify_mac(cipher.key, item.sha256) if cipher else ""
             self._maybe_finish(session)
         log.info(
             "Received %s (%s bytes) from %s", log_safe(saved.name), saved.size,
@@ -1716,9 +1712,8 @@ class Mesh:
             return {"verified": True, "skipped": True}
         if item.state != DONE or not item.sha256:
             raise MeshError(409, "not_done", "This file hasn’t arrived yet.")
-        expected = item.sha256
-        if session.enc_salt:  # the sender sends a MAC of its checksum, never the bare hash
-            expected = filecrypt.verify_mac(self._receive_cipher(session, index).key, item.sha256)
+        # Encrypted, the sender sends a MAC of its checksum, never the bare hash.
+        expected = item.mac if session.enc_salt else item.sha256
         if secrets.compare_digest(expected, claimed.lower()):
             item.verified = True
             return {"verified": True}
@@ -1843,37 +1838,36 @@ class Mesh:
             "job": job.id,
         }
         trusted = self.trust.get(peer.id)
-        # Unpaired, but it has a per-run key: encrypt to that (one-off, not verified).
-        one_off = not trusted and bool(peer.kx)
-        salt = bytes.fromhex(filecrypt.new_salt()) if trusted or one_off else b""
+        # Every app that encrypts advertises its per-run key: a handshake to it, keyed by
+        # the pair key too when paired (authenticated), or a one-off (not verified).
+        salt = bytes.fromhex(filecrypt.new_salt()) if peer.kx else b""
         if self.config.encrypted_only and not salt:
             delivery.state, delivery.reason = FAILED, _cant_encrypt(peer.name)
             return
-        base = b""
-        if one_off:
+        handshake = None
+        if salt:
+            handshake = filecrypt.Handshake(
+                bytes.fromhex(trusted.key) if trusted else None,
+                salt, sender=self.id, receiver=peer.id, job=job.id, target=target_id,
+            )  # fmt: skip
             try:
-                base, eph = filecrypt.ephemeral_to(bytes.fromhex(peer.kx), salt, self.id, peer.id)
-            except ValueError:
+                eph = handshake.offer(bytes.fromhex(peer.kx))
+            except (ValueError, filecrypt.DecryptError):
                 delivery.state = FAILED
                 delivery.reason = f"Couldn’t set up encryption with {peer.name}."
                 return
+            meta = {"origin": job.origin, "files": job.files}  # hide names and who's sending
             body["enc"] = {
                 "v": filecrypt.VERSION,
                 "salt": salt.hex(),
                 "eph": eph.hex(),
                 "kx": peer.kx,
+                "meta": filecrypt.seal_meta(handshake.meta_key, meta),
             }
-        if trusted or one_off:  # ot-file/1. Paired, the offer is signed: nobody can take this out.
-            enc: dict[str, Any] = body.get("enc") or {"v": filecrypt.VERSION, "salt": salt.hex()}
-            if one_off or trusted.enc:  # type: ignore[union-attr]  # hide names and who's sending
-                pair_key = base or bytes.fromhex(trusted.key)  # type: ignore[union-attr]
-                key = filecrypt.meta_key(pair_key, salt, self.id, peer.id, target_id)
-                enc["meta"] = filecrypt.seal_meta(key, {"origin": job.origin, "files": job.files})
-                body["origin"] = {"id": job.origin["id"]}
-                body["files"] = [
-                    {"name": f"file-{i + 1}", "size": f["size"]} for i, f in enumerate(job.files)
-                ]
-            body["enc"] = enc
+            body["origin"] = {"id": job.origin["id"]}
+            body["files"] = [
+                {"name": f"file-{i + 1}", "size": f["size"]} for i, f in enumerate(job.files)
+            ]
         try:
             status, data = self._http(peer, "POST", f"{P2P}/offers", body=body, timeout=8)
         except OSError:
@@ -1885,10 +1879,19 @@ class Mesh:
             return
         delivery.remote_id = str(data.get("id", ""))
         delivery.remote_secret = str(data.get("secret", ""))
-        if salt and data.get("enc") == filecrypt.VERSION:
-            delivery.enc_salt, delivery.enc_base, delivery.encrypted = salt, base, True
-        # It speaks ot-file/1 yet this answer says not: someone in between. Never fall back.
-        downgraded = bool(((trusted and trusted.enc) or one_off) and not delivery.encrypted)
+        if handshake and data.get("enc") == filecrypt.VERSION:
+            try:
+                session = handshake.finish(
+                    bytes.fromhex(str(data.get("eph"))), bytes.fromhex(str(data.get("confirm")))
+                )
+            except (ValueError, filecrypt.DecryptError):
+                session = b""  # not the receiver this offer was for: refused below
+            if session:
+                delivery.enc_salt, delivery.enc_base = salt, session
+                delivery.encrypted, delivery.enc_auth = True, trusted is not None
+        del handshake  # our ephemeral key goes with it
+        # It speaks ot-file/2 yet this answer says not: someone in between. Never fall back.
+        downgraded = bool(((trusted and trusted.enc) or salt) and not delivery.encrypted)
         refused = self.config.encrypted_only and not delivery.encrypted  # an older paired app
         if downgraded or refused or job.canceled or delivery.canceled:
             # Canceled while the offer was on its way: withdraw it now we know its id.
@@ -2553,6 +2556,7 @@ class Mesh:
         with self._lock:
             item.state, item.saved_name, item.received = DONE, saved.name, item.size
             item.sha256, item.hasher = digest, None
+            item.mac = filecrypt.verify_mac(cipher.key, digest) if cipher else ""
             self._maybe_finish(session)
         if session.target == self.id:
             self._emit("received", {"path": str(store.root / saved.name), "name": saved.name})
@@ -2743,7 +2747,7 @@ class Mesh:
                 out = {**message, "dir": "to_receiver", "session": delivery.remote_id,
                        "secret": delivery.remote_secret}  # fmt: skip
                 if delivery.encrypted:
-                    key = self._delivery_signal_key(delivery, to, target)
+                    key = self._delivery_signal_key(delivery, to, target, "to_receiver")
                     self._seal_signal(delivery, key, out, delivery.remote_id, job.id, target)
                 self._send_signal(to, out)
             return
@@ -2761,7 +2765,7 @@ class Mesh:
             raise MeshError(404, "unreachable", "The sending device isn’t nearby anymore.")
         out = {**reply, "dir": "to_sender", "secret": session.secret}
         if session.enc_salt:
-            key = self._signal_key(session)
+            key = self._signal_key(session, "to_sender")
             self._seal_signal(session, key, out, session.id, session.job, session.target)
         self._send_signal(peer, out)
 
@@ -2789,7 +2793,7 @@ class Mesh:
                 raise MeshError(409, "not_accepted", "This transfer isn’t active.")
             if session.enc_salt:
                 fields = ["to_receiver", session.id, session.job, session.target]
-                self._open_signal(session, self._signal_key(session), body, fields)
+                self._open_signal(session, self._signal_key(session, "to_receiver"), body, fields)
             self._post_mail(session.target, {**message, "session": session.id})
         elif body.get("dir") == "to_sender":
             with self._lock:
@@ -2807,7 +2811,7 @@ class Mesh:
             if delivery.view_state() not in {ACCEPTED, "sending"}:
                 raise MeshError(409, "not_accepted", "This transfer isn’t active.")
             if delivery.encrypted:
-                key = self._delivery_signal_key(delivery, delivery.peer, target)
+                key = self._delivery_signal_key(delivery, delivery.peer, target, "to_sender")
                 fields = ["to_sender", delivery.remote_id, job.id, target]
                 self._open_signal(delivery, key, body, fields)
             self._post_mail(job.owner, {**message, "job": job.id, "target": target})
@@ -2819,14 +2823,22 @@ class Mesh:
     # fingerprint or ICE candidates, move a message to another transfer or
     # receiver, or replay one. A plain (older app's) transfer has only its secret.
 
-    def _signal_key(self, session: IncomingSession) -> bytes:
-        sender = session.sender_node
-        base = self._transfer_key(sender, session.enc_base)
-        return filecrypt.signal_key(base, session.enc_salt, sender, self.id, session.target)
+    def _signal_key(self, session: IncomingSession, direction: str) -> bytes:
+        if not session.enc_base:
+            raise MeshError(409, "not_accepted", "This transfer isn’t active.")
+        return filecrypt.signal_key(
+            session.enc_base, session.enc_salt, session.sender_node, self.id, session.target,
+            direction,
+        )  # fmt: skip
 
-    def _delivery_signal_key(self, delivery: Delivery, peer: Peer, target: str) -> bytes:
-        base = self._transfer_key(peer.id, delivery.enc_base)
-        return filecrypt.signal_key(base, delivery.enc_salt, self.id, peer.id, target)
+    def _delivery_signal_key(
+        self, delivery: Delivery, peer: Peer, target: str, direction: str
+    ) -> bytes:
+        if not delivery.enc_base:
+            raise MeshError(409, "not_accepted", "This transfer isn’t active.")
+        return filecrypt.signal_key(
+            delivery.enc_base, delivery.enc_salt, self.id, peer.id, target, direction
+        )
 
     def _seal_signal(
         self,
@@ -2986,6 +2998,13 @@ class Mesh:
                     d.view_state() in FINAL for d in job.deliveries.values()
                 ):
                     job.finished = now
+                for d in job.deliveries.values():  # over: its session key goes
+                    if d.enc_base and d.view_state() in FINAL:
+                        d.enc_base = b""
+            with self._lock:
+                for session in self._incoming.values():
+                    if session.enc_base and session.state in FINAL:
+                        session.enc_base = b""
             self._record_finished()
             if now - last_network >= NETWORK_CHECK_EVERY:
                 last_network = now
@@ -3165,7 +3184,7 @@ class Mesh:
             "encrypted": None if s.local else bool(s.enc_salt),
             # Keyed by pairing (False: a one-off key, so a listener can't read it, but the
             # sender wasn't verified).
-            "authenticated": bool(s.enc_salt) and not s.enc_base,
+            "authenticated": s.enc_auth,
             "state": s.state,
             "reason": s.reason,
             "total": s.total,
@@ -3209,7 +3228,7 @@ class Mesh:
                     "sent": min(sent, total),
                     "direct": d.direct,
                     "encrypted": d.encrypted if d.peer is not None else None,
-                    "authenticated": d.encrypted and not d.enc_base,
+                    "authenticated": d.enc_auth,
                     "path": _path(d),
                     "verified": d.session is None and len(d.verified | d.skip) == len(job.files),
                 }

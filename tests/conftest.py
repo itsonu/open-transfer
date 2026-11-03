@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import http.client
 import os
 import random
+from collections import defaultdict
 from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any
@@ -99,3 +101,31 @@ def make_node(tmp_path: Path) -> Iterator[NodeFactory]:
     yield factory
     for node in nodes:
         node.stop()
+
+
+# A wiretap on ``http.client``: every byte an app sends to another app's port,
+# what anyone on the Wi-Fi would see.
+class Tap:
+    def __init__(self) -> None:
+        self.sent: dict[int, bytearray] = defaultdict(bytearray)
+        self.flip_at: dict[int, int] = {}  # port → byte offset (in big bodies) to corrupt
+
+    def to(self, node: Node) -> bytes:
+        return bytes(self.sent[node.port])
+
+
+@pytest.fixture
+def tap(monkeypatch: pytest.MonkeyPatch) -> Tap:
+    tap = Tap()
+    real = http.client.HTTPConnection.send
+
+    def send(conn: http.client.HTTPConnection, data: Any) -> None:
+        if isinstance(data, (bytes, bytearray)):
+            if conn.port in tap.flip_at and len(data) > 60_000:  # a body block, not headers
+                at = min(tap.flip_at.pop(conn.port), len(data) - 1)
+                data = bytes(data[:at]) + bytes([data[at] ^ 1]) + bytes(data[at + 1 :])
+            tap.sent[conn.port] += data
+        real(conn, data)
+
+    monkeypatch.setattr(http.client.HTTPConnection, "send", send)
+    return tap

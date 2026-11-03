@@ -134,7 +134,7 @@ These power the device grid. "Owner" means a request from the device itself
 | `DELETE /api/send/<job>` · `DELETE /api/send/<job>/targets/<id>` | job creator | Cancel everything / one receiver |
 | `POST /api/send/<job>/retry` `{to?: [ids]}` | job creator | Re-offer the job's files to declined/failed/expired targets → `201 {job}` (receiver is asked again) |
 
-In `/api/state`, `incoming[].encrypted` and `outgoing[].targets[].encrypted` say whether the app-to-app hop is encrypted ([`ot-file/1`](encryption.md)): `true`, `false` (an older app: plain HTTP), or `null` when no other app is involved. `authenticated` says whether that encryption is keyed by pairing (`true`) or by a one-off key with an unpaired app (`false`: unreadable to a listener, but the other app wasn't verified).
+In `/api/state`, `incoming[].encrypted` and `outgoing[].targets[].encrypted` say whether the app-to-app hop is encrypted ([`ot-file/2`](encryption.md)): `true`, `false` (an older app: plain HTTP), or `null` when no other app is involved. `authenticated` says whether that encryption is keyed by pairing (`true`) or by a one-off key with an unpaired app (`false`: unreadable to a listener, but the other app wasn't verified).
 
 For the device's owner, `/api/state` also has `keys` (`{"store", "protected", "locked": [names]}`: where pairing keys are kept, whether that's OS-protected, and pairings whose key couldn't be unlocked) and, with `--https`, `https` (`{"port", "fingerprint"}`: the TLS port and the certificate's SHA-256).
 | `POST /api/incoming/<id>/accept` · `/decline` · `DELETE /api/incoming/<id>` | the recipient | Answer or stop an incoming transfer |

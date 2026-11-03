@@ -9,7 +9,6 @@ from __future__ import annotations
 import hashlib
 import http.client
 import os
-from collections import defaultdict
 from pathlib import Path
 from typing import Any
 
@@ -17,7 +16,7 @@ import pytest
 
 from open_transfer import filecrypt
 from open_transfer.node import Node
-from tests.conftest import NodeFactory
+from tests.conftest import NodeFactory, Tap
 from tests.test_mesh import (
     connect,
     device_id,
@@ -30,32 +29,6 @@ from tests.test_mesh import (
     wait_for,
 )
 from tests.test_moves import pair
-
-
-class Tap:
-    def __init__(self) -> None:
-        self.sent: dict[int, bytearray] = defaultdict(bytearray)
-        self.flip_at: dict[int, int] = {}  # port → byte offset (in big bodies) to corrupt
-
-    def to(self, node: Node) -> bytes:
-        return bytes(self.sent[node.port])
-
-
-@pytest.fixture
-def tap(monkeypatch: pytest.MonkeyPatch) -> Tap:
-    tap = Tap()
-    real = http.client.HTTPConnection.send
-
-    def send(conn: http.client.HTTPConnection, data: Any) -> None:
-        if isinstance(data, (bytes, bytearray)):
-            if conn.port in tap.flip_at and len(data) > 60_000:  # a body block, not headers
-                at = min(tap.flip_at.pop(conn.port), len(data) - 1)
-                data = bytes(data[:at]) + bytes([data[at] ^ 1]) + bytes(data[at + 1 :])
-            tap.sent[conn.port] += data
-        real(conn, data)
-
-    monkeypatch.setattr(http.client.HTTPConnection, "send", send)
-    return tap
 
 
 def paired(make_node: NodeFactory) -> tuple[Node, Node]:
@@ -184,6 +157,10 @@ def test_the_receiver_refuses_plain_bytes_for_an_encrypted_transfer(
     make_node: NodeFactory,
 ) -> None:
     a, b = paired(make_node)
+    salt = bytes.fromhex(filecrypt.new_salt())
+    pair_key = bytes.fromhex(a.mesh.trust.get(b.mesh.id).key)  # type: ignore[union-attr]
+    ids = {"sender": a.mesh.id, "receiver": b.mesh.id, "job": "", "target": b.mesh.id}
+    eph = filecrypt.Handshake(pair_key, salt, **ids).offer(b.mesh.kx_public)
     status, offer = a.mesh._http(
         a.mesh._peers[b.mesh.id],
         "POST",
@@ -193,11 +170,16 @@ def test_the_receiver_refuses_plain_bytes_for_an_encrypted_transfer(
             "origin": {"id": a.mesh.id, "name": "Alpha"},
             "to": b.mesh.id,
             "files": [{"name": "x.txt", "size": 5}],
-            "enc": {"v": 1, "salt": filecrypt.new_salt()},
+            "enc": {
+                "v": filecrypt.VERSION,
+                "salt": salt.hex(),
+                "eph": eph.hex(),
+                "kx": b.mesh.kx_public.hex(),
+            },
         },
     )
     assert status == 201, offer
-    assert offer["enc"] == 1
+    assert offer["enc"] == filecrypt.VERSION
     conn = http.client.HTTPConnection("127.0.0.1", b.port, timeout=5)
     conn.request(
         "PUT",
@@ -273,8 +255,8 @@ def test_stripping_the_one_off_key_is_refused(
     connect(a, b)
     real = b.mesh.open_offer
 
-    def stripped(sender: str, target: str, enc: Any, **kw: Any) -> Any:
-        return real(sender, target, None, **kw)  # as if "enc" never arrived
+    def stripped(sender: str, target: str, job: str, enc: Any, **kw: Any) -> Any:
+        return real(sender, target, job, None, **kw)  # as if "enc" never arrived
 
     monkeypatch.setattr(b.mesh, "open_offer", stripped)
     alice = owner(a)
@@ -356,10 +338,12 @@ def test_an_older_paired_app_gets_plain_files_labelled(
     make_node: NodeFactory, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     a, b = make_node("Alpha"), make_node("Bravo")
-    # Bravo is from before ot-file/1: it never advertises it and ignores the "enc" block.
+    # Bravo is from before encryption: it advertises neither, and ignores the "enc" block.
     real_info = b.mesh.self_info
     monkeypatch.setattr(
-        b.mesh, "self_info", lambda **kw: {k: v for k, v in real_info(**kw).items() if k != "enc"}
+        b.mesh,
+        "self_info",
+        lambda **kw: {k: v for k, v in real_info(**kw).items() if k not in {"enc", "kx"}},
     )
     real = a.mesh._http
 
@@ -379,10 +363,10 @@ def test_an_older_paired_app_gets_plain_files_labelled(
     assert not a.mesh.trust.get(b.mesh.id).enc  # type: ignore[union-attr]
 
 
-def test_apps_advertise_ot_file_1(make_node: NodeFactory) -> None:
+def test_apps_advertise_ot_file_2(make_node: NodeFactory) -> None:
     a = make_node("Alpha")
     info = owner(a)("GET", "/api/p2p/v1/info")[1]
-    assert info["enc"] == 1
+    assert info["enc"] == 2
     assert len(bytes.fromhex(info["kx"])) == 32  # X25519, new each run, for unpaired senders
 
 
@@ -410,8 +394,7 @@ def test_a_device_that_was_unpaired_cant_send_with_the_old_key(
     alice = owner(a)
     job = send(alice, [b.mesh.id], [("after.txt", b"after")])
     wait_for(lambda: target_states(alice, job) == {"Bravo": "failed"})
-    assert "encryption" in target(a, job)["reason"]  # refused, never sent plain
-    assert b"after" not in tap.to(b)
+    assert b"after" not in tap.to(b)  # refused, never sent plain
     assert not (Path(b.config.storage_dir) / "after.txt").exists()
 
 

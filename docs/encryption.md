@@ -1,4 +1,4 @@
-# File transfer encryption (`ot-file/1`)
+# File transfer encryption (`ot-file/2`)
 
 Files sent between two **paired** apps are encrypted end to end: only the
 receiving app can read them, and any change, reordering, replay or
@@ -27,16 +27,51 @@ compromised OS on either end.
 Built only from vetted parts in [`cryptography`](https://cryptography.io)
 (pyca, OpenSSL underneath). No primitive is implemented here.
 
-```
-pair key K  (32 bytes, from SRP pairing; see trust-model.md)
-salt        32 random bytes the sender picks per offer (the transfer id, in crypto terms)
+**`ot-file/2`: a handshake per transfer, then the same records as before.**
 
-file key    = HKDF-SHA256(ikm=K, salt=salt,
-                info="open-transfer-file/1|<sender app>|<receiver app>|<target>|<file index>|<size>")
-meta key    = HKDF-SHA256(ikm=K, salt=salt,
-                info="open-transfer-meta/1|<sender app>|<receiver app>|<target>")
-verify key  = HKDF-SHA256(ikm=file key, salt="", info="open-transfer-verify/1")
 ```
+pair key K   32 bytes from SRP pairing (paired apps only; see trust-model.md)
+kx_r         the receiver's per-run X25519 key (in its hellos; never stored)
+salt         32 random bytes the sender picks per offer
+T1           JSON["open-transfer/2", sender app, receiver app, job id, target, salt, eph_s, kx_r]
+T2           T1 plus eph_r
+
+offer   (sender → receiver; signed with X-OT-Auth when paired)
+  eph_s   a fresh X25519 key, for this offer only
+  PSK     = HKDF(K, salt, "open-transfer-psk/2")       paired; 32 zero bytes unpaired
+  k1      = HKDF(X25519(eph_s, kx_r) ‖ PSK, salt, "open-transfer-offer/2" ‖ T1)
+  meta    sealed with HKDF(k1, salt, "open-transfer-meta/2|…")   names, types, who's sending
+
+answer  (receiver → sender, in the 201)
+  eph_r   a fresh X25519 key, for this answer only
+  confirm = HMAC-SHA256(HKDF(k1, "", "open-transfer-confirm/2"), T2)
+
+session = HKDF(X25519(eph_s, eph_r) ‖ k1, salt, "open-transfer-session/2" ‖ T2)
+file key    = HKDF(session, salt, "open-transfer-file/2|<sender>|<receiver>|<target>|<index>|<size>")
+signal key  = HKDF(session, salt, "open-transfer-signal/2|<direction>|<sender>|<receiver>|<target>")
+verify key  = HKDF(file key, "", "open-transfer-verify/2")
+```
+
+This is the shape of TLS 1.3's PSK + (EC)DHE key schedule, with a Finished-style
+confirmation; every primitive is `cryptography`'s (X25519, HKDF-SHA256,
+HMAC-SHA256, AES-256-GCM), checked against RFC 7748, RFC 5869, RFC 4231 and
+the GCM paper's test vectors (`tests/test_handshake.py`). The composition
+hasn't had an outside review or a formal proof.
+
+* **Authentication.** Paired: the offer is signed with the pair key, and only
+  the holder of the pair key *and* of `kx_r` can make `confirm`. Unpaired: PSK
+  is zero, so it proves only that the answer came from whoever holds `kx_r`
+  (“encrypted, not verified”).
+* **Binding.** The version, both apps, the job, the recipient, the salt and
+  every public key are in the transcript: a changed, replayed or moved answer
+  fails `confirm`, and the sender refuses the transfer (never sends it plain).
+* **Each recipient** of a group send gets its own offer, ephemeral key, salt and
+  session; no key is shared between recipients.
+* **Keys end with the transfer.** Each side drops its ephemeral private key as
+  soon as the session key exists. Both drop the session key when the transfer
+  is over (done, failed, canceled, expired) or the device is unpaired; a resume
+  after that is refused and the next try is a new handshake. Python can't
+  overwrite memory, so “drop” means no reference is left, not a wiped page.
 
 **File contents: AES-256-GCM in STREAM records** (the online-AE construction
 of Hoang, Reyhanitabar, Rogaway and Vizár, as used by `age` and Tink):
@@ -53,9 +88,8 @@ of Hoang, Reyhanitabar, Rogaway and Vizár, as used by `age` and Tink):
   the size is part of the key.
 * Ciphertext size = `size + 16 × max(1, ⌈size / 65536⌉)`.
 
-**Metadata.** Once the receiver has shown in a signed hello that it supports
-`ot-file/1`, file names, types and who is sending are sealed with the meta key
-(AES-256-GCM, random 96-bit nonce). The plain offer then carries only
+**Metadata.** File names, types and who is sending are sealed with the meta
+key (AES-256-GCM, random 96-bit nonce). The plain offer carries only
 placeholders and sizes, which the receiver needs for its space check.
 
 **Integrity confirmation.** After the last record, the sender confirms the
@@ -68,15 +102,15 @@ responses; `/api/state` only says `"encrypted": true|false`.
 
 ### Negotiation and downgrade
 
-1. Every app advertises `"enc": 1` in `/info` and in hellos.
-2. When an app gets a **signed** hello carrying `enc: 1`, it records that in
+1. Every app advertises `"enc": 2` and its per-run key `"kx"` in `/info` and in hellos.
+2. When an app gets a **signed** hello carrying `enc: 2`, it records that in
    `trusted.json` (the `enc` flag). The flag is sticky until you unpair.
-3. An offer to a paired app always carries `"enc": {"v": 1, "salt": …}`. The
+3. An offer to an app that advertised `kx` carries
+   `"enc": {"v": 2, "salt", "eph", "kx", "meta"}`. Between paired apps the
    offer is signed, so nobody can remove that block in transit.
-4. A receiver that supports `ot-file/1` and verified the signature answers
-   `201 {…, "enc": 1}` and then accepts **only** encrypted bytes for that
-   transfer.
-5. If the answer lacks `enc: 1`:
+4. A receiver that supports `ot-file/2` answers `201 {…, "enc": 2, "eph", "confirm"}`
+   and then accepts **only** encrypted bytes for that transfer.
+5. If the answer lacks `enc: 2`, or its `confirm` doesn't check out:
    * and the receiver is flagged as supporting it, the sender **refuses**
      (“Couldn't set up encryption with *X*”). Something stripped the
      signature or the answer.
@@ -106,7 +140,7 @@ the transfer list and in history.
 
 ## Browsers
 
-A browser's own hop to its app can't use `ot-file/1`:
+A browser's own hop to its app can't use `ot-file/2`:
 
 * a page on `http://<LAN address>` isn't a *secure context*, so it has no
   WebCrypto; JavaScript crypto from a library would be served over the same
@@ -118,7 +152,7 @@ The one sound answer is TLS, which gives the hop ephemeral ECDHE session keys
 from the browser's own vetted stack. **`--https`** (`OPEN_TRANSFER_HTTPS=1`)
 serves browsers on the next port over TLS 1.2+ with a self-signed P-256
 certificate (`tls.py`); links and QR codes then use `https://`. Apps keep
-talking to each other on the plain port, encrypted with `ot-file/1`.
+talking to each other on the plain port, encrypted with `ot-file/2`.
 
 * **Authentication.** There's no CA for a LAN address, so a browser warns
   once per device; the owner's Add device sheet shows the certificate's
@@ -254,13 +288,16 @@ sending through the apps (encrypted between them as usual).
 | Vault key | `--rotate-keys` (app not running) | Delete the keystore item: pairings lock, and stay listed until paired again |
 | TLS certificate | 30 days before it ends (397 days) | Delete `tls.json`: a new one next start (browsers warn again) |
 
-**No forward secrecy between paired apps.** A transfer's keys come from the
-pair key and a salt that crosses the network, so someone who recorded a paired
-transfer and later steals that pair key (from an unlocked device) can decrypt
-it. Unpaired transfers do have it (the receiver's X25519 key is never stored).
-The fix is to mix a one-off X25519 exchange into paired transfers too (both
-apps already have per-run keys); it changes the wire format, so it's left for
-its own reviewed change.
+### Forward secrecy
+
+| What was recorded | Later stolen | Can it be read? |
+|---|---|---|
+| A finished transfer's file contents and WebRTC messages | The pair key | **No**: the session key also needs `X25519(eph_s, eph_r)`, and both ephemeral keys were dropped during the handshake (`test_a_stolen_pair_key_cant_decrypt_a_recorded_transfer`) |
+| Its file names and sender | The pair key, while the receiver is still running the same session of the app | Yes: names are sealed under `k1`, which uses the receiver's per-run key (it can't use `eph_r`, which doesn't exist until the answer). Once that app restarts, no. |
+| Anything | Memory of a running app mid-transfer | Yes: out of scope (malware running as you) |
+
+Unpaired transfers get the same per-transfer forward secrecy, without the
+authentication.
 
 ### Metadata a listener still sees
 
@@ -418,7 +455,7 @@ The policy:
 * **Encrypted whenever both apps can.** Paired: always. Unpaired: with a
   one-off key whenever the receiver advertises one.
 * **Never a silent downgrade.** Once a paired app has said (in a signed
-  hello) that it speaks `ot-file/1`, a plain answer from it is refused, not
+  hello) that it speaks `ot-file/2`, a plain answer from it is refused, not
   sent plain. A stripped one-off key is refused too. WebRTC messages for an
   encrypted transfer without a MAC are refused.
 * **A plain transfer is always labelled**: “Not encrypted” in the transfer
@@ -441,7 +478,7 @@ physical hardware; none of these have been yet (device-testing.md).
 
 | Transfer path | Encryption | Authentication | Integrity | Evidence |
 |---|---|---|---|---|
-| Paired app ↔ app | AES-256-GCM (`ot-file/1`); names and sender sealed | Yes: the pair key (SRP); offers signed | Yes: GCM per record, MAC'd checksum, sizes in the key | `test_encrypted_transfers.py`; CI on Linux, Windows, macOS, Android emulator. Real device: no |
+| Paired app ↔ app | AES-256-GCM (`ot-file/2`); names and sender sealed | Yes: the pair key (SRP); offers signed | Yes: GCM per record, MAC'd checksum, sizes in the key | `test_encrypted_transfers.py`; CI on Linux, Windows, macOS, Android emulator. Real device: no |
 | Unpaired app ↔ app | AES-256-GCM, one-off X25519 key | **No** (“not verified”): whoever answers the offer | Yes, against anyone without that key | `test_encrypted_transfers.py` (unpaired tests). Real device: no |
 | WebRTC, app ↔ app hop | SDP not encrypted (not secret); data is DTLS | Paired: pair key. Unpaired: one-off key (not verified). Older app: session secret only | Yes for encrypted transfers: MAC, counter, state | `test_signaling.py`. Real browsers on two apps: no |
 | Browser ↔ browser | DTLS (the browser's own) | Only as far as each browser's hop to its app: none on plain HTTP, the certificate with `--https`; loopback for an app's own window | DTLS; SDP as above | `test_mesh.py` signal tests (no real WebRTC in CI). Real device: no |

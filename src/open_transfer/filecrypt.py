@@ -1,7 +1,9 @@
-"""Encrypt files between paired apps: ``ot-file/1`` (docs/encryption.md).
+"""Encrypt files between apps: ``ot-file/2`` (docs/encryption.md).
 
-Vetted parts only, from ``cryptography``: HKDF-SHA256 derives a key per file
-from the pair key, and AES-256-GCM seals the file in 64 KiB records (the
+Vetted parts only, from ``cryptography``: a per-transfer X25519 handshake
+(:class:`Handshake`, authenticated by the pair key between paired apps) gives a
+session key, HKDF-SHA256 derives a key per file from it, and AES-256-GCM seals
+the file in 64 KiB records (the
 STREAM construction: nonce = record number ‖ last-record flag). Records can't
 be changed, moved, replayed elsewhere or cut off without failing to decrypt.
 """
@@ -22,7 +24,7 @@ from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey, X
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 
-VERSION = 1
+VERSION = 2  # ot-file/2: the ot-file/1 records, keyed by a per-transfer handshake
 RECORD = 64 * 1024
 TAG = 16
 
@@ -60,46 +62,110 @@ def meta_key(pair_key: bytes, salt: bytes, sender: str, receiver: str, target: s
 
 
 def new_kx() -> tuple[X25519PrivateKey, bytes]:
-    """An app's per-run X25519 key, which unpaired apps encrypt to (never stored)."""
+    """A fresh X25519 key pair: an app's per-run key, or a handshake's ephemeral one."""
     key = X25519PrivateKey.generate()
     return key, key.public_key().public_bytes_raw()
 
 
-def ephemeral_to(kx: bytes, salt: bytes, sender: str, receiver: str) -> tuple[bytes, bytes]:
-    """Unpaired sender: a one-off base key to the receiver's ``kx``, and our half to send.
+class Handshake:
+    """One transfer's key agreement: forward secrecy (docs/encryption.md, "Forward secrecy").
 
-    Stands in for the pair key in :func:`file_key` / :func:`meta_key`. Unauthenticated:
-    it stops a listener, not someone who can answer in the receiver's place.
+    The shape of TLS 1.3's PSK + ECDHE key schedule, with established parts only
+    (X25519, HKDF-SHA256, HMAC-SHA256):
+
+    * offer: the sender's fresh X25519 key ``eph`` to the receiver's per-run key
+      ``kx``. ``k1 = HKDF(DH(eph, kx) ‖ PSK)`` seals the names; between paired
+      apps PSK comes from the pair key (and the offer is signed), unpaired it's zero.
+    * answer: the receiver's fresh key ``eph_r`` and ``confirm = HMAC(k1, transcript)``,
+      which only the holder of ``kx`` (and the pair key) can make.
+    * session = ``HKDF(DH(eph, eph_r) ‖ k1)``: file, verify and signal keys derive from it.
+
+    The transcript binds the version, both apps, the transfer, the recipient, the salt
+    and every public key. Both ephemeral private keys are dropped as soon as the session
+    key exists; Python can't wipe memory, so "dropped" is as far as erasure goes.
     """
-    mine = X25519PrivateKey.generate()
-    eph = mine.public_key().public_bytes_raw()
-    shared = mine.exchange(X25519PublicKey.from_public_bytes(kx))
-    return _one_off(shared, salt, eph, kx, sender, receiver), eph
+
+    def __init__(
+        self,
+        pair_key: bytes | None,
+        salt: bytes,
+        *,
+        sender: str,
+        receiver: str,
+        job: str,
+        target: str,
+    ) -> None:
+        self._psk = (
+            hkdf(pair_key, salt=salt, info=b"open-transfer-psk/2") if pair_key else bytes(32)
+        )
+        self._salt = salt
+        self._ids = [sender, receiver, job, target]
+        self._mine: X25519PrivateKey | None = None
+        self.eph = b""
+        self.meta_key = b""
+        self.session = b""
+        self._k1 = b""
+        self._kx = b""
+
+    def _transcript(self, eph: bytes, kx: bytes, eph_r: bytes = b"") -> bytes:
+        parts = [f"open-transfer/{VERSION}", *self._ids, self._salt.hex(), eph.hex(), kx.hex(), eph_r.hex()]  # fmt: skip
+        return json.dumps(parts, separators=(",", ":")).encode()
+
+    def _keys(self, dh: bytes, eph: bytes, kx: bytes) -> None:
+        t1 = self._transcript(eph, kx)
+        self._k1 = hkdf(dh + self._psk, salt=self._salt, info=b"open-transfer-offer/2" + t1)
+        sender, receiver, _, target = self._ids
+        self.meta_key = meta_key(self._k1, self._salt, sender, receiver, target)
+
+    def _confirm(self, t2: bytes) -> bytes:
+        key = hkdf(self._k1, salt=b"", info=b"open-transfer-confirm/2")
+        return hmac.new(key, t2, hashlib.sha256).digest()
+
+    def _session(self, dh: bytes, t2: bytes) -> bytes:
+        return hkdf(dh + self._k1, salt=self._salt, info=b"open-transfer-session/2" + t2)
+
+    def offer(self, kx: bytes) -> bytes:
+        """Sender: our ephemeral public key for the offer (``meta_key`` is then set)."""
+        self._mine, self.eph = new_kx()
+        self._kx = kx
+        self._keys(_dh(self._mine, kx), self.eph, kx)
+        return self.eph
+
+    def answer(self, run_key: X25519PrivateKey, eph: bytes) -> tuple[bytes, bytes]:
+        """Receiver: (our ephemeral public key, confirmation) for the answer; sets ``session``."""
+        kx = run_key.public_key().public_bytes_raw()
+        self._keys(_dh(run_key, eph), eph, kx)
+        mine, eph_r = new_kx()
+        t2 = self._transcript(eph, kx, eph_r)
+        self.session = self._session(_dh(mine, eph), t2)
+        del mine  # the only reference: gone with this frame
+        return eph_r, self._confirm(t2)
+
+    def finish(self, eph_r: bytes, confirm: bytes) -> bytes:
+        """Sender: check the answer and return the session key."""
+        mine, self._mine = self._mine, None
+        if mine is None:
+            raise DecryptError("no offer")
+        t2 = self._transcript(self.eph, self._kx, eph_r)
+        if not hmac.compare_digest(self._confirm(t2), confirm):
+            raise DecryptError("the answer isn't from the receiver this offer was for")
+        self.session = self._session(_dh(mine, eph_r), t2)
+        return self.session
 
 
-def ephemeral_from(
-    kx: X25519PrivateKey, eph: bytes, salt: bytes, sender: str, receiver: str
-) -> bytes:
-    """Unpaired receiver: the base key :func:`ephemeral_to` made."""
+def _dh(mine: X25519PrivateKey, theirs: bytes) -> bytes:
     try:
-        shared = kx.exchange(X25519PublicKey.from_public_bytes(eph))
+        return mine.exchange(X25519PublicKey.from_public_bytes(theirs))
     except ValueError as exc:  # wrong length, or a point that gives an all-zero secret
-        raise DecryptError("bad one-off key") from exc
-    mine = kx.public_key().public_bytes_raw()
-    return _one_off(shared, salt, eph, mine, sender, receiver)
+        raise DecryptError("bad key") from exc
 
 
-def _one_off(
-    shared: bytes, salt: bytes, eph: bytes, kx: bytes, sender: str, receiver: str
+def signal_key(
+    base: bytes, salt: bytes, sender: str, receiver: str, target: str, direction: str
 ) -> bytes:
-    info = f"open-transfer-eph/{VERSION}|{eph.hex()}|{kx.hex()}|{sender}|{receiver}"
-    return hkdf(shared, salt=salt, info=info.encode())
-
-
-def signal_key(base: bytes, salt: bytes, sender: str, receiver: str, target: str) -> bytes:
-    """MAC key for a transfer's WebRTC connection messages: whoever can change an SDP
-    (its DTLS fingerprint, its ICE candidates) between the apps could sit in the middle."""
-    info = f"open-transfer-signal/{VERSION}|{sender}|{receiver}|{target}"
+    """MAC key for one direction of a transfer's WebRTC connection messages: whoever can
+    change an SDP (its DTLS fingerprint, ICE candidates) between the apps could sit in the middle."""
+    info = f"open-transfer-signal/{VERSION}|{direction}|{sender}|{receiver}|{target}"
     return hkdf(base, salt=salt, info=info.encode())
 
 

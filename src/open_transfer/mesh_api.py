@@ -168,8 +168,11 @@ def register(
             raise MeshError(429, "busy", "Too many unanswered transfers. Try again shortly.")
         target = str(data.get("to", ""))
         files = data.get("files")
-        # ot-file/1: keyed by pairing if the paired app signed this, else a one-off key.
-        salt, meta, base = mesh.open_offer(sender_id, target, data.get("enc"), signed=verified)
+        # ot-file/2: a handshake, authenticated by the pairing if the paired app signed this.
+        job = str(data.get("job") or "")
+        salt, meta, base, answer = mesh.open_offer(
+            sender_id, target, job, data.get("enc"), signed=verified
+        )
         if meta is not None:  # names and who's sending were sealed
             origin, files = meta.get("origin"), meta.get("files")
             if not isinstance(origin, dict):
@@ -180,10 +183,11 @@ def register(
             files=files,  # type: ignore[arg-type]
             paired=verified and origin.get("id") == sender_id,
             source=client(),
-            job=str(data.get("job") or ""),
+            job=job,
             sender_node=sender_id,
             enc_salt=salt,
             enc_base=base,
+            enc_auth=bool(salt) and verified,
         )
         return jsonify(
             {
@@ -191,7 +195,7 @@ def register(
                 "secret": session.secret,
                 "state": session.state,
                 "reason": session.reason,
-                **({"enc": filecrypt.VERSION} if session.enc_salt else {}),
+                **({"enc": filecrypt.VERSION, **answer} if session.enc_salt else {}),
             }
         ), 201
 
@@ -247,7 +251,7 @@ def register(
     @app.post(f"{P2P}/offers/<session_id>/files/<int:index>/verify")
     def p2p_offer_verify(session_id: str, index: int) -> Response:
         body = body_json()
-        claimed = body.get("mac") or body.get("sha256")  # mac: ot-file/1 transfers
+        claimed = body.get("mac") or body.get("sha256")  # mac: ot-file/2 transfers
         if not isinstance(claimed, str) or len(claimed) != 64:
             raise MeshError(400, "bad_request", "Expected a SHA-256 checksum.")
         return jsonify(

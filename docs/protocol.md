@@ -106,24 +106,21 @@ POST /api/p2p/v1/offers
 * `to` is the receiving app's own id (its owner) **or one of its visitors**.
 * Names are sanitised by the receiver; sizes are checked against free space
   and `--max-size` up front (`state: "declined"` with a reason if they don't fit).
-* Between **paired** apps the offer also carries
-  `"enc": {"v": 1, "salt": "<64 hex>", "meta": "<sealed names>"?}` and the
-  receiver answers `"enc": 1`: every file then travels encrypted
-  ([`ot-file/1`](encryption.md)). The `PUT` body is the file's AES-256-GCM
+* To an app that advertises `kx` (its per-run X25519 key, in `/info` and
+  hellos) the offer carries
+  `"enc": {"v": 2, "salt": "<64 hex>", "eph": "<a fresh X25519 key>", "kx": "<the receiver's key it used>", "meta": "<sealed names>"}`
+  and the receiver answers `"enc": 2, "eph": "<its fresh X25519 key>", "confirm": "<HMAC>"`:
+  a handshake per transfer, whose session key encrypts every file
+  ([`ot-file/2`](encryption.md#design)). Between **paired** apps the offer is
+  signed and the handshake is keyed by the pair key too (authenticated);
+  between **unpaired** apps it isn't (“encrypted, not verified”). The plain
+  `files` carry placeholder names. The `PUT` body is the file's AES-256-GCM
   records (`Content-Length` = size + 16 per 64 KiB record); with
   `Content-Range` the range stays in plaintext positions and the body is
   those whole records. `/verify` takes `{"mac": …}` instead of the bare
-  checksum. `meta` (names, types and sender, sealed) is sent once the
-  receiver has said `"enc": 1` in a signed hello; the plain `files` then
-  carry placeholder names.
-* Between **unpaired** apps the offer carries
-  `"enc": {"v": 1, "salt", "eph": "<sender's one-off X25519 key>", "kx": "<the receiver's key it used>", "meta"}`,
-  where `kx` is the per-run X25519 key the receiver advertises in `/info` and
-  hellos. Both sides derive a one-off base key (X25519 + HKDF) that stands in
-  for the pair key; everything else is the same `ot-file/1`. It isn't
-  authenticated: it stops a listener, not an active attacker. A `kx` from an
-  earlier run is refused (`400`). If the receiver advertised `kx` and the
-  answer lacks `"enc": 1`, the sender refuses.
+  checksum. A `kx` from an earlier run is refused (`400`). If the receiver
+  advertised `kx` and the answer lacks `"enc": 2` or a valid `confirm`, the
+  sender refuses and withdraws the offer.
 
 **States:** `pending` → `accepted` → `receiving` → `done`, or `declined`,
 `expired` (no answer in 120 s), `canceled`, `failed`. Offers to an owner from
