@@ -3128,7 +3128,8 @@ body.has-send-bar .toasts {
   font-size: 13px;
 }
 
-.clip-auto {
+.clip-auto,
+.enc-only {
   display: inline-flex;
   align-items: center;
   gap: 8px;
@@ -3176,7 +3177,8 @@ body.has-send-bar .toasts {
 }
 
 .clip-device input,
-.clip-auto input {
+.clip-auto input,
+.enc-only input {
   width: 18px;
   height: 18px;
   accent-color: var(--accent);
