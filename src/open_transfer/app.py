@@ -151,7 +151,13 @@ def create_app(config: Config | None = None) -> Flask:
             session["wid"] = vid
         trusted = session.get("wtrust") == mesh.id
         mesh.touch_visitor(
-            vid, name=name, form=form, platform=plat, address=client_id(), trusted=trusted
+            vid,
+            name=name,
+            form=form,
+            platform=plat,
+            address=client_id(),
+            trusted=trusted,
+            secure=request.scheme == "https",
         )
         return Viewer("visitor", vid, name, form, plat, trusted)
 
@@ -300,6 +306,18 @@ def create_app(config: Config | None = None) -> Flask:
             host = request_host_port()[0]
             host = f"[{host}]" if ":" in host else host
             return redirect(f"https://{host}:{https_port}{request.full_path.rstrip('?')}")
+        if (
+            https_port
+            and request.scheme == "http"
+            and request.path.startswith("/api/")
+            and not request.path.startswith(("/api/p2p/", "/api/sync/client/", "/api/health"))
+            and not is_owner()
+        ):  # --https: no browser data over plain HTTP, not even from a page already open
+            host = request_host_port()[0]
+            host = f"[{host}]" if ":" in host else host
+            return error(
+                403, "https_required", f"Open https://{host}:{https_port} to use this device."
+            )
         if request.method not in SAFE_METHODS and not same_origin(request):
             return error(403, "cross_origin", "Cross-site requests are not allowed.")
         if request.endpoint not in PUBLIC_ENDPOINTS and not is_authenticated():

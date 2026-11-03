@@ -984,4 +984,5 @@ def _clean_origin(origin: dict[str, Any], sender: dict[str, Any]) -> dict[str, A
     }
     if clean["id"] != sender.get("id"):
         clean["via_name"] = clean_name(sender.get("name"))
+        clean["secure"] = origin.get("secure") is True  # that browser's own hop, as its app says
     return clean

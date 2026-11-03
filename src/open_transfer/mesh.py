@@ -168,7 +168,7 @@ class Peer:
     left_at: float = 0.0  # when it last said goodbye
     pairing: bool = False  # it said its Add device screen is open
     manual: bool = False
-    visitors: list[dict[str, str]] = field(default_factory=list)
+    visitors: list[dict[str, Any]] = field(default_factory=list)
     accepts: str = "everyone"
     kx: str = ""  # its per-run X25519 key (hex): unpaired transfers to it are encrypted to it
     rtt: float = -1.0  # round trip of the last hellos, in ms (smoothed); -1 = unknown
@@ -196,6 +196,7 @@ class Visitor:
     address: str
     last_seen: float
     trusted: bool = False
+    secure: bool = False  # its page reaches us over HTTPS (--https), not plain HTTP
 
     @property
     def online(self) -> bool:
@@ -315,6 +316,7 @@ class Mesh:
         self.config = config
         self.storage = storage
         state = config.state_path
+        new_install = not (state / "device.json").exists()
         state.mkdir(parents=True, exist_ok=True)
         self.identity_store = IdentityStore(
             state,
@@ -325,8 +327,13 @@ class Mesh:
         self.trust = TrustStore(state)
         self._unpaired_by: dict[str, str] = {}  # devices that unpaired us this run (id → name)
         self._settings_path = state / "settings.json"  # what the owner set in the page
-        if _read_json(self._settings_path).get("encrypted_only") is True:
-            config.encrypted_only = True  # saved off, --encrypted-only still keeps it on
+        if config.encrypted_only is None:  # not forced by --encrypted-only (or a test)
+            saved = _read_json(self._settings_path).get("encrypted_only")
+            if not isinstance(saved, bool):  # first run of this version: record the choice
+                saved = new_install  # secure by default; an existing install keeps working
+                with contextlib.suppress(OSError):
+                    write_private(self._settings_path, {"encrypted_only": saved})
+            config.encrypted_only = saved
         # Unpaired apps encrypt to this; a new one each run, never stored (forward secrecy).
         self._kx, self.kx_public = filecrypt.new_kx()
         self.https: dict[str, Any] = {}  # --https: {"port", "fingerprint"} (set by Node)
@@ -460,7 +467,13 @@ class Mesh:
         if include_visitors:
             with self._lock:
                 info["visitors"] = [
-                    {"id": v.id, "name": v.name, "form": v.form, "platform": v.platform}
+                    {
+                        "id": v.id,
+                        "name": v.name,
+                        "form": v.form,
+                        "platform": v.platform,
+                        "secure": v.secure,
+                    }
                     for v in self._visitors.values()
                     if v.online
                 ]
@@ -557,8 +570,9 @@ class Mesh:
             peer.port = port
             peer.version = str(info.get("version") or info.get("ver") or "")[:20]
             peer.accepts = "paired" if info.get("accepts") == "paired" else "everyone"
-            kx = str(info.get("kx") or "")
-            peer.kx = kx if re.fullmatch(r"[0-9a-f]{64}", kx) else ""
+            if "kx" in info:  # a short multicast announcement doesn't carry it: no news
+                kx = str(info.get("kx") or "")
+                peer.kx = kx if re.fullmatch(r"[0-9a-f]{64}", kx) else ""
             peer.manual = peer.manual or manual
             peer.pairing = info.get("pairing") is True
             peer.last_seen = time.monotonic()
@@ -766,7 +780,15 @@ class Mesh:
     # ------------------------------------------------------------ visitors
 
     def touch_visitor(
-        self, visitor_id: str, *, name: str, form: str, platform: str, address: str, trusted: bool
+        self,
+        visitor_id: str,
+        *,
+        name: str,
+        form: str,
+        platform: str,
+        address: str,
+        trusted: bool,
+        secure: bool = False,
     ) -> Visitor:
         with self._lock:
             visitor = self._visitors.get(visitor_id)
@@ -780,8 +802,9 @@ class Mesh:
                 visitor = Visitor(visitor_id, name, form, platform, address, 0.0)
                 self._visitors[visitor_id] = visitor
             visitor.name, visitor.form, visitor.platform = name, form, platform
+            changed = changed or visitor.secure != secure
             visitor.address = address
-            visitor.trusted = trusted
+            visitor.trusted, visitor.secure = trusted, secure
             visitor.last_seen = time.monotonic()
         if changed:
             self._bump()
@@ -1791,7 +1814,7 @@ class Mesh:
         return job
 
     def _origin(self, viewer: Viewer) -> dict[str, Any]:
-        origin = {
+        origin: dict[str, Any] = {
             "id": viewer.id,
             "name": viewer.name,
             "form": viewer.form,
@@ -1800,6 +1823,8 @@ class Mesh:
         if not viewer.is_owner:
             origin["via"] = self.id
             origin["via_name"] = self.identity.name
+            visitor = self._visitors.get(viewer.id)
+            origin["secure"] = bool(visitor and visitor.secure)
         return origin
 
     def _resolve_target(self, target_id: str, viewer: Viewer) -> Delivery:
@@ -1828,6 +1853,7 @@ class Mesh:
                     if v["id"] == target_id and host.online:
                         target = _target(v["id"], v["name"], v["form"], v["platform"], "browser")
                         target["via_name"] = host.name
+                        target["secure"] = v.get("secure") is True
                         return Delivery(target=target, peer=host)
         raise MeshError(404, "unknown_device", "That device isn’t nearby anymore.")
 
@@ -2846,6 +2872,34 @@ class Mesh:
     # fingerprint or ICE candidates, move a message to another transfer or
     # receiver, or replay one. A plain (older app's) transfer has only its secret.
 
+    def _hop(self, page: str) -> str:
+        """A page's own hop to this app: this device's window, or a browser's HTTP(S)."""
+        if page == self.id:
+            return "local"
+        visitor = self._visitors.get(page)
+        return "transport" if visitor is not None and visitor.secure else "plain"
+
+    def _delivery_security(self, job: Job, d: Delivery) -> str:
+        hops = [self._hop(job.owner)]
+        if d.peer is not None:
+            hops.append(_app_hop(d.encrypted, d.enc_auth))
+            if d.target.get("kind") == "browser":  # behind that app, as it says
+                hops.append("transport" if d.target.get("secure") else "plain")
+        else:
+            hops.append(self._hop(str(d.target.get("id"))))
+        return _over_dtls(_weakest(*hops)) if d.direct else _weakest(*hops)
+
+    def _session_security(self, s: IncomingSession) -> str:
+        origin = str(s.origin.get("id", ""))
+        if s.local:
+            hops = [self._hop(origin), self._hop(s.target)]
+        else:
+            hops = [_app_hop(bool(s.enc_salt), s.enc_auth), self._hop(s.target)]
+            if origin != s.sender_node:  # a browser behind that app, as it says
+                hops.append("transport" if s.origin.get("secure") else "plain")
+        level = _weakest(*hops)
+        return _over_dtls(level) if any(f.direct for f in s.files) else level
+
     def _signal_key(self, session: IncomingSession, direction: str) -> bytes:
         if not session.enc_base:
             raise MeshError(409, "not_accepted", "This transfer isn’t active.")
@@ -3208,6 +3262,7 @@ class Mesh:
             # Keyed by pairing (False: a one-off key, so a listener can't read it, but the
             # sender wasn't verified).
             "authenticated": s.enc_auth,
+            "security": self._session_security(s),
             "state": s.state,
             "reason": s.reason,
             "total": s.total,
@@ -3252,6 +3307,7 @@ class Mesh:
                     "direct": d.direct,
                     "encrypted": d.encrypted if d.peer is not None else None,
                     "authenticated": d.enc_auth,
+                    "security": self._delivery_security(job, d),
                     **({"code": d.code} if d.code else {}),
                     "path": _path(d),
                     "verified": d.session is None and len(d.verified | d.skip) == len(job.files),
@@ -3323,7 +3379,7 @@ class Mesh:
             state["settings"] = {
                 "auto_accept": self.config.auto_accept,
                 "paired_only": self.config.paired_only,
-                "encrypted_only": self.config.encrypted_only,
+                "encrypted_only": bool(self.config.encrypted_only),
             }
             if self.https:
                 state["https"] = dict(self.https)
@@ -3379,6 +3435,24 @@ def _all_skipped(data: dict[str, Any]) -> bool:
 
 def _title(files: list[dict[str, Any]]) -> str:
     return str(files[0].get("name", "file")) if len(files) == 1 else f"{len(files)} files"
+
+
+# How well a transfer is protected: the weakest hop it crossed (docs/encryption.md, "Coverage").
+SECURITY = ("plain", "unverified", "transport", "verified", "local")  # weakest first
+
+
+def _weakest(*levels: str) -> str:
+    return min(levels, key=SECURITY.index)
+
+
+def _app_hop(encrypted: bool, authenticated: bool) -> str:
+    return "verified" if authenticated else "unverified" if encrypted else "plain"
+
+
+def _over_dtls(signalled: str) -> str:
+    """A WebRTC transfer is always DTLS; how well its fingerprints were carried decides
+    whether that's verified as far as the hops go, or only encrypted."""
+    return "transport" if SECURITY.index(signalled) >= SECURITY.index("transport") else "unverified"
 
 
 def _path(delivery: Delivery) -> str:
@@ -3639,7 +3713,7 @@ def _device(
     }
 
 
-def _clean_visitors(items: list[Any]) -> list[dict[str, str]]:
+def _clean_visitors(items: list[Any]) -> list[dict[str, Any]]:
     out = []
     for item in items[:64]:
         if (
@@ -3654,6 +3728,7 @@ def _clean_visitors(items: list[Any]) -> list[dict[str, str]]:
                     "name": clean_name(item.get("name"), "Browser"),
                     "form": clean_form(item.get("form")),
                     "platform": clean_platform(item.get("platform")),
+                    "secure": item.get("secure") is True,  # its own hop, as its app says
                 }
             )
     return out

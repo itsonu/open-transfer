@@ -172,6 +172,12 @@ talking to each other on the plain port, encrypted with `ot-file/2`.
   stay on the plain port. An active attacker can still strip that redirect
   for a browser that has never been to the `https://` address (no HSTS: a
   browser ignores it on a certificate it had to be told to accept).
+* **No plain fallback.** With `--https`, a browser's API calls on the plain
+  port are refused (`403 https_required`, with the HTTPS address), so a page
+  left open from an old link can't keep sending over plain HTTP. Exempt: the
+  device's own window (loopback), the apps' `/api/p2p` calls, `/api/health`,
+  and iPhone Shortcuts (`/api/sync/client/*`), which can't trust a self-signed
+  certificate and use a per-device token on plain HTTP ([sync.md](sync.md)).
 * **WebRTC** (browser ↔ browser): see [Direct transfers](#direct-transfers-webrtc).
 
 ### What a browser's plain-HTTP hop shows
@@ -205,6 +211,9 @@ sheet is what makes that acceptance an authentication rather than a guess.
 | Authenticating the browser's signaling | **Not possible over plain HTTP.** Any key the page used would be delivered by the same hop. Over TLS it's already authenticated as far as the certificate is. |
 | Ephemeral session credentials | **Already there**: a visitor's cookie is random per browser, and a QR invite works for 10 minutes. They stop other browsers, not someone reading the hop. |
 | Browser compatibility | TLS 1.2+, P-256: every browser that runs the page. WebRTC data channels are DTLS in every browser; the page falls back to the app if `RTCPeerConnection` is missing. |
+| A publicly trusted certificate (a real domain per device, like Plex's `*.plex.direct`) | **Not adopted.** Needs a domain, a CA account and internet to issue and renew, and puts each device's key in a public CA's logs; it breaks offline and hotspot use, the reason Open Transfer exists. |
+| A local CA installed on each phone | **Not adopted.** Installing and trusting a profile (iOS Settings → General → VPN & Device Management, then Certificate Trust Settings) is harder and riskier than one warning, and a leaked CA key would let its holder impersonate any site to that phone. |
+| Onboarding without TLS knowledge | **Install the app and pair.** Between apps everything is end-to-end encrypted and authenticated, with no certificates to judge: the safe path the page and README point to. For a browser that must stay a browser: `--https`, accept once, and (if it matters) compare the fingerprint on the owner's Add device sheet. With `--https` the plain port refuses browsers, so the warning can't be avoided by an `http://` link. |
 
 So a **browser transfer is not end-to-end encrypted by Open Transfer.** Its
 data channel is DTLS, but the DTLS keys are authenticated only as well as the
@@ -439,32 +448,59 @@ works on Android and costs little, not what a phone does.
 
 ## Older versions
 
+“Old” below means a released version before this one (no encryption at all,
+3.3.0 and earlier), or an earlier build of this branch (`ot-file/1`).
+
 | Sender | Receiver | Result |
 |---|---|---|
-| New | New, paired | Encrypted (required) |
-| New | Old, paired | Plain, labelled; refused once the receiver has advertised `enc` |
-| Old | New, paired | Plain, labelled on the receiver |
-| New | New, unpaired | Encrypted with a one-off key, labelled “not verified” |
-| New | Old, unpaired (no `kx`) | Plain, labelled |
-| Old | New, unpaired | Plain, labelled |
-| Any | New, with “Encrypted transfers only” | Encrypted, or refused with what to do |
-| New, with “Encrypted transfers only” | Any | Encrypted, or not sent, with what to do |
+| New | New, paired | Encrypted and authenticated, with forward secrecy (required) |
+| New | New, unpaired | Encrypted with forward secrecy, labelled “not verified” |
+| New | Old, paired, never said it encrypts | Plain, labelled; refused with “Encrypted transfers only” |
+| New | Old, paired, said it encrypts (`ot-file/1` build) | Refused: “Couldn't set up encryption” (never plain). Update it. |
+| New | Old, unpaired | Plain, labelled; refused with “Encrypted transfers only” |
+| Old | New | Plain, labelled; refused when the receiver has “Encrypted transfers only” (`403 encrypted_only`, “Update Open Transfer on this device to send to it”) |
+| Browser | New app | Plain HTTP, or TLS with `--https`; labelled by the browser's hop. With `--https` a browser can't use the plain port at all (`403 https_required`, the page redirects) |
+| New app | Browser | The same, for the browser's hop; through another app, as that app reports its browser's hop |
+
+**Defaults and migration.**
+
+* **A new installation** starts with **“Encrypted transfers only” on**: it
+  refuses plain transfers to and from older apps, saying what to do.
+* **An existing installation** (one that already has `device.json`) keeps
+  working as before with older apps: the first start of this version records
+  `"encrypted_only": false` in `settings.json`, once. The owner turns it on
+  with the switch under Add device; `--encrypted-only` /
+  `OPEN_TRANSFER_ENCRYPTED_ONLY=1` turns it on whatever was saved.
+* `--https` stays **off by default**: browsers warn once on a self-signed
+  certificate, and Open Transfer is meant to be “open a link”. See
+  [Browsers](#browsers).
 
 The policy:
 
-* **Encrypted whenever both apps can.** Paired: always. Unpaired: with a
-  one-off key whenever the receiver advertises one.
+* **Encrypted whenever both apps can**, with a handshake per transfer.
 * **Never a silent downgrade.** Once a paired app has said (in a signed
-  hello) that it speaks `ot-file/2`, a plain answer from it is refused, not
-  sent plain. A stripped one-off key is refused too. WebRTC messages for an
-  encrypted transfer without a MAC are refused.
-* **A plain transfer is always labelled**: “Not encrypted” in the transfer
-  list, the incoming sheet and history, on both sides.
-* **“Encrypted transfers only”** (Add device sheet, `--encrypted-only` or
-  `OPEN_TRANSFER_ENCRYPTED_ONLY=1`; off by default so older versions keep
-  working) refuses every app-to-app transfer that can't be encrypted, both
-  ways, with the reasons above. A browser's own hop is governed by `--https`,
-  not by this switch.
+  hello) that it encrypts, a plain or unconfirmed answer from it is refused.
+  A stripped handshake from an app that advertised `kx` is refused too.
+  WebRTC messages for an encrypted transfer without a MAC are refused.
+* **Every transfer is labelled** by its weakest hop (below), in the transfer
+  list and the incoming sheet.
+* **A browser's own hop** is governed by `--https`, not by “Encrypted
+  transfers only”.
+
+### What the page says
+
+The app works out one level for each transfer, from every hop it crossed
+(`mesh._delivery_security`, `_session_security`):
+
+| Label | Level | Means |
+|---|---|---|
+| “· encrypted” | `verified` | Encrypted end to end between two apps that are paired: authenticated |
+| “· encrypted, not verified” | `unverified` | Encrypted, but nobody vouched for the other end: an unpaired app, or a WebRTC transfer whose connection messages crossed a plain hop |
+| “· encrypted in transit” | `transport` | Encrypted on each hop (HTTPS to a browser, DTLS between browsers): the app in between can read it, and the browser trusts its app only as far as the certificate it accepted |
+| “· not encrypted” | `plain` | Some hop was plain HTTP: a browser without `--https`, or an older app |
+| (nothing) | `local` | Never left this device |
+
+Tested in `tests/test_security_labels.py` (9 cases, all failed first).
 
 Older versions are **simulated** in the tests (an app with `enc`, `kx` or the
 offer's `enc` block removed: `tests/test_encrypted_transfers.py`,

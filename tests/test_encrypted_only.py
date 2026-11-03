@@ -53,7 +53,7 @@ def plain_sender(node: Node, monkeypatch: pytest.MonkeyPatch) -> None:
 def test_sending_to_an_older_app_is_refused_with_a_reason(
     make_node: NodeFactory, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    a, b = make_node("Alpha", encrypted_only=True), make_node("Bravo")
+    a, b = make_node("Alpha", encrypted_only=True), make_node("Bravo", encrypted_only=False)
     older(b, monkeypatch, "kx")
     connect(a, b)
     alice = owner(a)
@@ -68,7 +68,7 @@ def test_sending_to_an_older_app_is_refused_with_a_reason(
 def test_an_older_paired_app_that_ignores_encryption_gets_nothing(
     make_node: NodeFactory, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    a, b = make_node("Alpha", encrypted_only=True), make_node("Bravo")
+    a, b = make_node("Alpha", encrypted_only=True), make_node("Bravo", encrypted_only=False)
     older(b, monkeypatch, "enc")
     plain_sender(a, monkeypatch)  # what an older Bravo answers looks the same: no "enc"
     pair(a, b)
@@ -131,9 +131,11 @@ def test_the_owner_turns_it_on_and_it_stays_on(tmp_path: Path) -> None:
 
     node = start()
     try:
-        assert owner(node).state()["settings"]["encrypted_only"] is False
-        status, data = owner(node)("PUT", "/api/settings", {"encrypted_only": True})
+        assert owner(node).state()["settings"]["encrypted_only"] is True  # a new install
+        status, data = owner(node)("PUT", "/api/settings", {"encrypted_only": False})
         assert status == 200, data
+        assert data["settings"]["encrypted_only"] is False
+        status, data = owner(node)("PUT", "/api/settings", {"encrypted_only": True})
         assert data["settings"]["encrypted_only"] is True
         assert visitor(node, "Phone")("PUT", "/api/settings", {"encrypted_only": False})[0] == 403
         assert owner(node)("PUT", "/api/settings", {"encrypted_only": "yes"})[0] == 400
@@ -142,5 +144,37 @@ def test_the_owner_turns_it_on_and_it_stays_on(tmp_path: Path) -> None:
     again = start()
     try:
         assert owner(again).state()["settings"]["encrypted_only"] is True
+    finally:
+        again.stop()
+
+
+def test_a_new_installation_starts_encrypted_only(tmp_path: Path) -> None:
+    node = Node(Config(storage_dir=tmp_path / "share", port=0, discovery=False))
+    node.start()
+    try:
+        assert owner(node).state()["settings"]["encrypted_only"] is True
+    finally:
+        node.stop()
+
+
+def test_an_existing_installation_keeps_working_with_older_apps(tmp_path: Path) -> None:
+    from open_transfer.devices import IdentityStore
+
+    state = tmp_path / "share" / ".open-transfer"
+    state.mkdir(parents=True)
+    IdentityStore(state, name="Old", form="computer", platform="macos")  # from before this version
+    node = Node(Config(storage_dir=tmp_path / "share", port=0, discovery=False))
+    node.start()
+    try:
+        assert owner(node).state()["settings"]["encrypted_only"] is False
+    finally:
+        node.stop()
+    # Recorded once: the owner's choice from now on, and the switch turns it on.
+    assert (state / "settings.json").exists()
+    again = Node(Config(storage_dir=tmp_path / "share", port=0, discovery=False))
+    again.start()
+    try:
+        assert owner(again).state()["settings"]["encrypted_only"] is False
+        owner(again)("PUT", "/api/settings", {"encrypted_only": True})
     finally:
         again.stop()

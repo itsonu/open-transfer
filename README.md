@@ -215,7 +215,7 @@ Every option works as a command-line flag or an environment variable (flags win)
 | `--peer HOST:PORT` | `OPEN_TRANSFER_PEERS` (comma-separated) | — | Connect to an app directly (networks that block discovery) |
 | `--no-discovery` | `OPEN_TRANSFER_NO_DISCOVERY=1` | off | Don't announce this device or look for others |
 | `--paired-only` | `OPEN_TRANSFER_PAIRED_ONLY=1` | off | Only accept files from paired devices |
-| `--encrypted-only` | `OPEN_TRANSFER_ENCRYPTED_ONLY=1` | off | Refuse transfers to and from apps that can't encrypt (older versions); also a switch under Add device |
+| `--encrypted-only` | `OPEN_TRANSFER_ENCRYPTED_ONLY=1` | on for new installs | Refuse transfers to and from apps that can't encrypt (older versions); also a switch under Add device. Installs from before this version keep it off until you turn it on |
 | `--auto-accept` | `OPEN_TRANSFER_AUTO_ACCEPT=1` | off | Accept incoming files without asking (servers) |
 | `--share-folder` | `OPEN_TRANSFER_SHARE_FOLDER=1` | off | Classic mode: anyone who opens the link can browse the folder |
 | — | `OPEN_TRANSFER_DISCOVERY_PORT` | `47823` | UDP port for discovery |

@@ -545,7 +545,7 @@ def test_unpair_removes_trust(make_node: NodeFactory) -> None:
 
 
 def test_forged_signature_is_not_trusted(make_node: NodeFactory) -> None:
-    a, b = make_node("Alpha"), make_node("Bravo")
+    a, b = make_node("Alpha"), make_node("Bravo", encrypted_only=False)  # a plain offer reaches it
     alice = owner(a)
     code = show_code(b)
     alice("POST", "/api/pair", {"code": code, "address": f"127.0.0.1:{b.port}"})

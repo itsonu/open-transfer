@@ -1261,12 +1261,20 @@ const PATH_HINT = {
   local: "To a browser connected to this device",
 };
 
-// ot-file/1 between paired apps (docs/encryption.md). Only said for an app-to-app hop:
-// a browser behind an app also crossed a plain-HTTP hop.
-// Unpaired apps get a one-off key: a listener can't read it, but nobody vouched for the other app.
-const sealLabel = (encrypted, authenticated = true) =>
-  encrypted === true ? (authenticated === false ? " · encrypted, not verified" : " · encrypted") : encrypted === false ? " · not encrypted" : "";
-const UNVERIFIED_HINT = "Encrypted with a one-off key, so others on the network can’t read it. Pair the devices to be sure it’s really them.";
+// The weakest hop a transfer crossed, as the app worked it out (mesh.SECURITY;
+// docs/encryption.md, "Coverage"). "local" never left this device: nothing to say.
+const SECURITY_LABEL = {
+  verified: " · encrypted",
+  unverified: " · encrypted, not verified",
+  transport: " · encrypted in transit",
+  plain: " · not encrypted",
+};
+const SECURITY_HINT = {
+  verified: "Encrypted and authenticated: only that device can read it.",
+  unverified: "Encrypted, so others on the network can’t read it, but nobody vouched for the other end. Pair the devices to be sure it’s really them.",
+  transport: "Encrypted on each hop (HTTPS, or WebRTC between browsers). The app in between can read it, and a browser trusts its app only as far as the certificate it accepted.",
+  plain: "Not encrypted: someone on the same network could read it. Pair the apps, update older ones, or start the app with --https for browsers.",
+};
 
 function pathLabel(path, target) {
   if (path === "via") return `Via ${target.via_name || "its app"}`;
@@ -1368,8 +1376,8 @@ function renderJobs() {
             h("span", { class: "job-target-name" }, t.name),
             h(
               "span",
-              { class: "job-target-path", title: path === "app" && original.authenticated === false ? UNVERIFIED_HINT : PATH_HINT[path] },
-              pathLabel(path, original) + (path === "app" ? sealLabel(original.encrypted, original.authenticated) : ""),
+              { class: "job-target-path", title: [PATH_HINT[path], SECURITY_HINT[original.security]].filter(Boolean).join(". ") },
+              pathLabel(path, original) + (SECURITY_LABEL[original.security] || ""),
             ),
             h("span", { class: "job-target-state" }, text),
             canRetryTarget &&
@@ -1536,7 +1544,7 @@ function fillPrompt(s) {
   $("#incoming-title").textContent = `${from.name} wants to send you ${s.files.length === 1 ? "a file" : `${s.files.length} files`}`;
   const host = mesh.data.host;
   const via = from.via_name && from.via_name !== host.name ? ` · via ${from.via_name}` : "";
-  const seal = from.via_name && s.encrypted ? "" : sealLabel(s.encrypted, s.authenticated);
+  const seal = SECURITY_LABEL[s.security] || "";
   $("#incoming-sub").textContent = `${formatBytes(s.total)}${via}${s.paired ? " · paired" : ""}${seal}`;
   const shown = s.files.slice(0, 5);
   $("#incoming-files").replaceChildren(

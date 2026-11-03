@@ -229,7 +229,7 @@ def test_paired_transfers_are_authenticated(make_node: NodeFactory) -> None:
 def test_an_older_unpaired_app_gets_plain_files_labelled(
     make_node: NodeFactory, monkeypatch: pytest.MonkeyPatch, tap: Tap
 ) -> None:
-    a, b = make_node("Alpha"), make_node("Bravo")
+    a, b = make_node("Alpha", encrypted_only=False), make_node("Bravo", encrypted_only=False)
     real_info = b.mesh.self_info  # from before Phase J: no per-run key to encrypt to
     monkeypatch.setattr(
         b.mesh, "self_info", lambda **kw: {k: v for k, v in real_info(**kw).items() if k != "kx"}
@@ -251,7 +251,7 @@ def test_stripping_the_one_off_key_is_refused(
     make_node: NodeFactory, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Bravo advertised a key; an offer answered without encryption means someone in between."""
-    a, b = make_node("Alpha"), make_node("Bravo")
+    a, b = make_node("Alpha", encrypted_only=False), make_node("Bravo", encrypted_only=False)
     connect(a, b)
     real = b.mesh.open_offer
 
@@ -337,7 +337,7 @@ def test_unpaired_tampering_leaves_nothing(make_node: NodeFactory, tap: Tap) -> 
 def test_an_older_paired_app_gets_plain_files_labelled(
     make_node: NodeFactory, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    a, b = make_node("Alpha"), make_node("Bravo")
+    a, b = make_node("Alpha", encrypted_only=False), make_node("Bravo", encrypted_only=False)
     # Bravo is from before encryption: it advertises neither, and ignores the "enc" block.
     real_info = b.mesh.self_info
     monkeypatch.setattr(
@@ -361,6 +361,17 @@ def test_an_older_paired_app_gets_plain_files_labelled(
     assert (Path(b.config.storage_dir) / "old.txt").read_bytes() == b"hello"
     assert target(a, job)["encrypted"] is False
     assert not a.mesh.trust.get(b.mesh.id).enc  # type: ignore[union-attr]
+
+
+def test_a_discovery_announcement_doesnt_forget_the_peers_key(make_node: NodeFactory) -> None:
+    # Multicast announcements are short (no "kx"); they used to wipe the key a hello had
+    # given, and the next unpaired transfer then went plain.
+    a, b = make_node("Alpha"), make_node("Bravo")
+    connect(a, b)
+    bravo = device_id(owner(a), "Bravo")
+    assert a.mesh._peers[bravo].kx == b.mesh.kx_public.hex()
+    a.mesh._upsert_peer({**b.mesh._describe(), "type": "announce"}, "127.0.0.1")
+    assert a.mesh._peers[bravo].kx == b.mesh.kx_public.hex()
 
 
 def test_apps_advertise_ot_file_2(make_node: NodeFactory) -> None:
