@@ -379,13 +379,16 @@ AES-256-GCM on its own (encrypt and decrypt, one core): about 2 GB/s.
   2 MiB piece when resuming.
 
 **Every OS in CI** (`bench_encryption.py --mb 256` on GitHub's runners, run
-41222156917: shared, slower CPUs than the M5; same one-process setup):
+41614032411 on `4c9a80a`: shared, slower CPUs than the M5; same one-process setup):
 
-| Runner | AES-GCM alone | Plain, 1 stream | Encrypted, 1 stream | Encrypted, 4 at once | Peak memory | 1 KiB latency (plain / encrypted) |
-|---|---|---|---|---|---|---|
-| Linux x64 | 460 MB/s | 347 MB/s | 178 MB/s | 105 MB/s | 55–78 MB | 4.4 / 4.7 ms |
-| Windows x64 | 460 MB/s | 227 MB/s | 143 MB/s | 105 MB/s | (fixed after this run) | 32 / 9 ms |
-| macOS arm64 | 1839 MB/s | 465 MB/s | 253 MB/s | 173 MB/s | 61–73 MB | 4.3 / 9.8 ms |
+| Runner | AES-GCM alone | Plain, 1 stream | One-off key, 1 stream | Paired, 1 stream | Paired, 4 at once | Peak memory | 1 KiB latency (plain / paired) |
+|---|---|---|---|---|---|---|---|
+| Linux x64 | 462 MB/s | 314 MB/s | 171 MB/s | 172 MB/s | 105 MB/s | 56–77 MB | 4.2 / 4.6 ms |
+| Windows x64 | 371 MB/s | 258 MB/s | 195 MB/s | 187 MB/s | 164 MB/s | 57–74 MB | 27 / 12 ms |
+| macOS arm64 | 1912 MB/s | 595 MB/s | 290 MB/s | 269 MB/s | 253 MB/s | 58–74 MB | 4.9 / 7.4 ms |
+
+Shared runners vary from run to run (Windows paired, 4 at once, was 105 MB/s
+in run 41222156917); read these as “several times Wi‑Fi”, not as exact figures.
 
 **Android emulator** (the CI smoke test, phone → runner over the emulator's
 network, 32 MB): 3.8 MB/s plain, 3.2 MB/s encrypted. The emulator's
