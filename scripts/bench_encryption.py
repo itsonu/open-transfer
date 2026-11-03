@@ -222,8 +222,10 @@ def main() -> None:
         for mode in ("plain", "one-off", "encrypted"):
             out = subprocess.run(  # noqa: S603 - this script, by its own path
                 [sys.executable, __file__, "--one", mode, "--mb", str(args.mb), "--streams", str(streams)],
-                capture_output=True, text=True, check=True,
+                capture_output=True, text=True, check=False,
             )  # fmt: skip
+            if out.returncode:
+                sys.exit(f"{mode}, {streams} stream(s) failed:\n{out.stdout}{out.stderr}")
             rows.append(json.loads(out.stdout.strip().splitlines()[-1]))
     print(f"AES-256-GCM alone (encrypt + decrypt, one core): {cipher_only(args.mb)['mb_s']} MB/s\n")
     print("| Mode | Streams | Size | Time | Throughput | CPU | Peak memory | 1 KiB latency |")

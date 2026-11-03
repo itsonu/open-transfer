@@ -402,6 +402,19 @@ def test_unpairing_stops_transfers_from_that_device(make_node: NodeFactory) -> N
     assert not (Path(b.config.storage_dir) / "late.bin").exists()
 
 
+def test_a_device_that_was_unpaired_cant_send_with_the_old_key(
+    make_node: NodeFactory, tap: Tap
+) -> None:
+    a, b = paired(make_node)
+    assert b.mesh.unpair(a.mesh.id)  # Bravo forgets; Alpha isn't told and still trusts it
+    alice = owner(a)
+    job = send(alice, [b.mesh.id], [("after.txt", b"after")])
+    wait_for(lambda: target_states(alice, job) == {"Bravo": "failed"})
+    assert "encryption" in target(a, job)["reason"]  # refused, never sent plain
+    assert b"after" not in tap.to(b)
+    assert not (Path(b.config.storage_dir) / "after.txt").exists()
+
+
 def test_re_pairing_gives_a_new_key_and_transfers_still_work(make_node: NodeFactory) -> None:
     a, b = paired(make_node)
     old = a.mesh.trust.get(b.mesh.id).key  # type: ignore[union-attr]

@@ -146,6 +146,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="only accept files from paired devices",
     )
     nearby.add_argument(
+        "--encrypted-only",
+        action="store_true",
+        default=None,
+        help="refuse transfers to and from apps that can't encrypt (older versions)",
+    )
+    nearby.add_argument(
         "--clipboard",
         action="store_true",
         default=None,
@@ -233,6 +239,7 @@ def config_from_args(args: argparse.Namespace) -> Config:
         peers=tuple(args.peer or [p for p in (env("PEERS") or "").split(",") if p]),
         auto_accept=bool(args.auto_accept) or env_bool("AUTO_ACCEPT"),
         paired_only=bool(args.paired_only) or env_bool("PAIRED_ONLY"),
+        encrypted_only=bool(args.encrypted_only) or env_bool("ENCRYPTED_ONLY"),
         share_folder=bool(args.share_folder) or env_bool("SHARE_FOLDER"),
         owner_loopback=env_bool("OWNER_LOOPBACK", True),
         clipboard=bool(args.clipboard) or env_bool("CLIPBOARD"),

@@ -280,7 +280,7 @@ def create_app(config: Config | None = None) -> Flask:
     # ------------------------------------------------------------- middleware
 
     @app.before_request
-    def guard() -> Response | None:
+    def guard() -> Any:
         g.started = time.perf_counter()
         if not host_allowed(request.host, config.allowed_hosts, machine_names):
             return error(
@@ -289,6 +289,17 @@ def create_app(config: Config | None = None) -> Flask:
                 f"Requests for '{request.host}' are not accepted. "
                 "Start Open Transfer with --allow-host to permit this name.",
             )
+        https_port = app.config.get("OT_HTTPS_PORT")
+        if (
+            https_port
+            and request.scheme == "http"
+            and request.method == "GET"
+            and not request.path.startswith("/api/")  # apps, and pages already loaded
+            and not is_owner()  # this device's own window never crosses the network
+        ):  # --https: a browser following an old http:// link goes over TLS
+            host = request_host_port()[0]
+            host = f"[{host}]" if ":" in host else host
+            return redirect(f"https://{host}:{https_port}{request.full_path.rstrip('?')}")
         if request.method not in SAFE_METHODS and not same_origin(request):
             return error(403, "cross_origin", "Cross-site requests are not allowed.")
         if request.endpoint not in PUBLIC_ENDPOINTS and not is_authenticated():

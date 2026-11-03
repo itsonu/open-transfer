@@ -98,6 +98,9 @@ class Config:
     auto_accept: bool = False
     #: Only accept files from paired devices (AirDrop's "Contacts only").
     paired_only: bool = False
+    #: Refuse app-to-app transfers that can't be encrypted (older versions). The
+    #: owner can also turn it on in the page; it's saved in ``<state>/settings.json``.
+    encrypted_only: bool = False
     #: Let browsers that connect to this device see and download its folder
     #: (the classic shared-folder mode). Off by default: files are sent to
     #: chosen devices instead.

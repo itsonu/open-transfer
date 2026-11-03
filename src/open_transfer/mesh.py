@@ -61,6 +61,7 @@ from open_transfer.devices import (
     IdentityStore,
     SignatureChecker,
     TrustStore,
+    _read_json,
     clean_form,
     clean_name,
     clean_platform,
@@ -69,6 +70,7 @@ from open_transfer.devices import (
     new_visitor_id,
     sign,
     valid_id,
+    write_private,
 )
 from open_transfer.discovery import Discovery
 from open_transfer.history import History
@@ -241,6 +243,8 @@ class IncomingSession:
     enc_base: bytes = field(
         default=b"", repr=False
     )  # unpaired sender: the one-off key, not a pair key
+    signals_out: int = 0  # WebRTC messages sent and the last one taken (counts against replays)
+    signals_in: int = 0
 
     @property
     def total(self) -> int:
@@ -271,6 +275,8 @@ class Delivery:
     enc_salt: bytes = field(default=b"", repr=False)
     enc_base: bytes = field(default=b"", repr=False)  # unpaired: one-off key (not verified)
     encrypted: bool = False  # the receiving app takes this transfer as ot-file/1
+    signals_out: int = 0
+    signals_in: int = 0
 
     def view_state(self) -> str:
         if self.canceled:
@@ -315,6 +321,9 @@ class Mesh:
             platform=config.device_platform,
         )
         self.trust = TrustStore(state)
+        self._settings_path = state / "settings.json"  # what the owner set in the page
+        if _read_json(self._settings_path).get("encrypted_only") is True:
+            config.encrypted_only = True  # saved off, --encrypted-only still keeps it on
         # Unpaired apps encrypt to this; a new one each run, never stored (forward secrecy).
         self._kx, self.kx_public = filecrypt.new_kx()
         self.https: dict[str, Any] = {}  # --https: {"port", "fingerprint"} (set by Node)
@@ -1209,6 +1218,14 @@ class Mesh:
                 )
         return sorted(out, key=lambda d: d["name"].lower())
 
+    def set_settings(self, *, encrypted_only: Any) -> dict[str, Any]:
+        if not isinstance(encrypted_only, bool):
+            raise MeshError(400, "bad_request", "Expected true or false.")
+        self.config.encrypted_only = encrypted_only
+        write_private(self._settings_path, {"encrypted_only": encrypted_only})
+        self._bump()
+        return {"encrypted_only": encrypted_only}
+
     def set_clipboard_settings(
         self,
         *,
@@ -1373,6 +1390,13 @@ class Mesh:
             raise MeshError(
                 403, "paired_only", f"{self.identity.name} only accepts files from paired devices."
             )
+        if self.config.encrypted_only and not local and not enc_salt:
+            raise MeshError(
+                403,
+                "encrypted_only",
+                f"{self.identity.name} takes only encrypted transfers. "
+                "Update Open Transfer on this device to send to it.",
+            )
         session = IncomingSession(
             id=secrets.token_urlsafe(9),
             secret=secrets.token_urlsafe(18),
@@ -1463,16 +1487,18 @@ class Mesh:
     ) -> filecrypt.Cipher:
         """One file's ot-file/1 cipher, keyed from the pair key we share with ``peer_id``
         (or, unpaired, from that transfer's one-off ``base`` key)."""
-        if base:
-            pair_key = base
-        else:
-            trusted = self.trust.get(peer_id)
-            if trusted is None:
-                raise MeshError(403, "not_paired", "No longer paired with that device.")
-            pair_key = bytes.fromhex(trusted.key)
+        pair_key = self._transfer_key(peer_id, base)
         return filecrypt.Cipher(
             filecrypt.file_key(pair_key, salt, sender, receiver, target, index, size), size
         )
+
+    def _transfer_key(self, peer_id: str, base: bytes = b"") -> bytes:
+        if base:
+            return base
+        trusted = self.trust.get(peer_id)
+        if trusted is None:
+            raise MeshError(403, "not_paired", "No longer paired with that device.")
+        return bytes.fromhex(trusted.key)
 
     def _receive_cipher(self, session: IncomingSession, index: int) -> filecrypt.Cipher:
         sender = session.sender_node
@@ -1820,6 +1846,9 @@ class Mesh:
         # Unpaired, but it has a per-run key: encrypt to that (one-off, not verified).
         one_off = not trusted and bool(peer.kx)
         salt = bytes.fromhex(filecrypt.new_salt()) if trusted or one_off else b""
+        if self.config.encrypted_only and not salt:
+            delivery.state, delivery.reason = FAILED, _cant_encrypt(peer.name)
+            return
         base = b""
         if one_off:
             try:
@@ -1860,11 +1889,14 @@ class Mesh:
             delivery.enc_salt, delivery.enc_base, delivery.encrypted = salt, base, True
         # It speaks ot-file/1 yet this answer says not: someone in between. Never fall back.
         downgraded = bool(((trusted and trusted.enc) or one_off) and not delivery.encrypted)
-        if downgraded or job.canceled or delivery.canceled:
+        refused = self.config.encrypted_only and not delivery.encrypted  # an older paired app
+        if downgraded or refused or job.canceled or delivery.canceled:
             # Canceled while the offer was on its way: withdraw it now we know its id.
             if downgraded:
                 delivery.state = FAILED
                 delivery.reason = f"Couldn’t set up encryption with {peer.name}."
+            elif refused:
+                delivery.state, delivery.reason = FAILED, _cant_encrypt(peer.name)
             else:
                 delivery.state = CANCELED
             with contextlib.suppress(OSError):
@@ -2707,12 +2739,13 @@ class Mesh:
                 raise MeshError(409, "not_accepted", "That device hasn’t accepted this transfer.")
             if delivery.session is not None:
                 self._post_mail(target, {**message, "session": delivery.session.id})
-            elif delivery.peer is not None:
-                self._send_signal(
-                    delivery.peer,
-                    {**message, "dir": "to_receiver", "session": delivery.remote_id,
-                     "secret": delivery.remote_secret},
-                )  # fmt: skip
+            elif (to := delivery.peer) is not None:
+                out = {**message, "dir": "to_receiver", "session": delivery.remote_id,
+                       "secret": delivery.remote_secret}  # fmt: skip
+                if delivery.encrypted:
+                    key = self._delivery_signal_key(delivery, to, target)
+                    self._seal_signal(delivery, key, out, delivery.remote_id, job.id, target)
+                self._send_signal(to, out)
             return
         # Receiver → sender.
         session = self._session_for(str(body.get("session", "")), viewer)
@@ -2726,7 +2759,11 @@ class Mesh:
             peer = self._peers.get(session.sender_node)
         if peer is None:
             raise MeshError(404, "unreachable", "The sending device isn’t nearby anymore.")
-        self._send_signal(peer, {**reply, "dir": "to_sender", "secret": session.secret})
+        out = {**reply, "dir": "to_sender", "secret": session.secret}
+        if session.enc_salt:
+            key = self._signal_key(session)
+            self._seal_signal(session, key, out, session.id, session.job, session.target)
+        self._send_signal(peer, out)
 
     def _send_signal(self, peer: Peer, body: dict[str, Any]) -> None:
         try:
@@ -2748,6 +2785,11 @@ class Mesh:
         secret = str(body.get("secret", ""))
         if body.get("dir") == "to_receiver":
             session = self._session_by_secret(str(body.get("session", "")), secret)
+            if session.state not in {ACCEPTED, RECEIVING}:
+                raise MeshError(409, "not_accepted", "This transfer isn’t active.")
+            if session.enc_salt:
+                fields = ["to_receiver", session.id, session.job, session.target]
+                self._open_signal(session, self._signal_key(session), body, fields)
             self._post_mail(session.target, {**message, "session": session.id})
         elif body.get("dir") == "to_sender":
             with self._lock:
@@ -2759,11 +2801,61 @@ class Mesh:
                 or delivery is None
                 or not delivery.remote_secret
                 or not secrets.compare_digest(delivery.remote_secret, secret)
+                or delivery.peer is None
             ):
                 raise MeshError(404, "not_found", "Unknown transfer.")
+            if delivery.view_state() not in {ACCEPTED, "sending"}:
+                raise MeshError(409, "not_accepted", "This transfer isn’t active.")
+            if delivery.encrypted:
+                key = self._delivery_signal_key(delivery, delivery.peer, target)
+                fields = ["to_sender", delivery.remote_id, job.id, target]
+                self._open_signal(delivery, key, body, fields)
             self._post_mail(job.owner, {**message, "job": job.id, "target": target})
         else:
             raise MeshError(400, "bad_signal", "Invalid connection message.")
+
+    # An encrypted transfer's messages carry a MAC under its key over the transfer,
+    # the direction, a counter and the SDP: nobody else can change the DTLS
+    # fingerprint or ICE candidates, move a message to another transfer or
+    # receiver, or replay one. A plain (older app's) transfer has only its secret.
+
+    def _signal_key(self, session: IncomingSession) -> bytes:
+        sender = session.sender_node
+        base = self._transfer_key(sender, session.enc_base)
+        return filecrypt.signal_key(base, session.enc_salt, sender, self.id, session.target)
+
+    def _delivery_signal_key(self, delivery: Delivery, peer: Peer, target: str) -> bytes:
+        base = self._transfer_key(peer.id, delivery.enc_base)
+        return filecrypt.signal_key(base, delivery.enc_salt, self.id, peer.id, target)
+
+    def _seal_signal(
+        self,
+        ends: IncomingSession | Delivery,
+        key: bytes,
+        body: dict[str, Any],
+        session: str,
+        job: str,
+        target: str,
+    ) -> None:
+        with self._lock:
+            ends.signals_out += 1
+            n = ends.signals_out
+        fields = [body["dir"], session, job, target, body["kind"], body["sdp"], n]
+        body.update(n=n, mac=filecrypt.signal_mac(key, fields))
+
+    def _open_signal(
+        self, ends: IncomingSession | Delivery, key: bytes, body: dict[str, Any], fields: list[Any]
+    ) -> None:
+        n, mac = body.get("n"), body.get("mac")
+        if type(n) is not int or not isinstance(mac, str):
+            raise MeshError(403, "bad_signal", "Connection message not from the other device.")
+        expected = filecrypt.signal_mac(key, [*fields, body["kind"], body["sdp"], n])
+        if not secrets.compare_digest(expected, mac):
+            raise MeshError(403, "bad_signal", "Connection message not from the other device.")
+        with self._lock:
+            if n <= ends.signals_in:
+                raise MeshError(403, "replayed_signal", "That connection message was used already.")
+            ends.signals_in = n
 
     def set_direct(
         self, job_id: str, viewer: Viewer, target_id: str, state: str, sent: int = 0
@@ -3181,6 +3273,7 @@ class Mesh:
             state["settings"] = {
                 "auto_accept": self.config.auto_accept,
                 "paired_only": self.config.paired_only,
+                "encrypted_only": self.config.encrypted_only,
             }
             if self.https:
                 state["https"] = dict(self.https)
@@ -3608,6 +3701,14 @@ def _remote_error(status: int, data: dict[str, Any], fallback: str) -> MeshError
         status if 400 <= status < 500 else 502,
         str(code)[:40] if isinstance(code, str) else "pair_failed",
         _remote_message(data, fallback),
+    )
+
+
+def _cant_encrypt(name: str) -> str:
+    return (
+        f"Not sent: {name} can’t encrypt (an older version?) and this device sends only "
+        f"encrypted transfers. Update Open Transfer on {name}, or turn off "
+        "“Encrypted transfers only”."
     )
 
 

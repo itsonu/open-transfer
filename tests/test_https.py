@@ -8,6 +8,7 @@ is self-signed; its key is sealed in the vault like the pair keys.
 from __future__ import annotations
 
 import hashlib
+import http.client
 import json
 import socket
 import ssl
@@ -138,3 +139,20 @@ def test_a_failed_https_start_leaves_nothing_running(
         node.start()
     leftover = [t for t in set(threading.enumerate()) - before if not t.daemon and t.is_alive()]
     assert not leftover  # non-daemon worker threads would keep the process from exiting
+
+
+def test_a_browser_on_the_plain_port_is_sent_to_https(make_node: NodeFactory) -> None:
+    from tests.test_mesh import lan_ip
+
+    node = make_node("Alpha", https=True)
+    host = lan_ip()
+    conn = http.client.HTTPConnection(host, node.port, timeout=5)
+    conn.request("GET", "/?x=1", headers={"Accept": "text/html", "Host": f"{host}:{node.port}"})
+    res = conn.getresponse()
+    assert res.status == 302
+    assert res.getheader("Location") == f"https://{host}:{node.https_port}/?x=1"
+    # The device's own window and the apps' own API stay where they are.
+    assert urllib.request.urlopen(node.local_url + "/").status == 200
+    conn = http.client.HTTPConnection(host, node.port, timeout=5)
+    conn.request("GET", "/api/p2p/v1/info", headers={"Host": f"{host}:{node.port}"})
+    assert conn.getresponse().status == 200

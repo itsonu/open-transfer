@@ -1792,6 +1792,8 @@ export function openAddDevice({ tab = "show" } = {}) {
   const tls = owner ? mesh.data?.https : null; // --https: the self-signed certificate to compare
   $("#tls-note").hidden = !tls;
   $("#tls-note-value").textContent = tls ? tls.fingerprint : "";
+  $("#enc-only-row").hidden = !owner;
+  $("#enc-only").checked = Boolean(mesh.data?.settings?.encrypted_only);
   $("#share-url-button").hidden = !navigator.share;
   const others = (info.urls || []).filter((u) => u !== info.share_url);
   $("#other-urls").hidden = others.length === 0;
@@ -2009,6 +2011,17 @@ function setupConnectSheet() {
   $("#scan-switch").addEventListener("click", switchCamera);
   document.addEventListener("visibilitychange", () => document.hidden && stopScanner());
   window.addEventListener("ot-native-scan", (event) => handleScan(event.detail));
+  $("#enc-only").addEventListener("change", async (event) => {
+    const box = event.target;
+    try {
+      await api("/api/settings", { method: "PUT", json: { encrypted_only: box.checked } });
+      mesh.etag = null;
+      ctx.requestPoll();
+    } catch (err) {
+      box.checked = !box.checked;
+      toast(err.message || "Couldn’t change that setting", { tone: "error", icon: "alert" });
+    }
+  });
   $("#copy-url").addEventListener("click", async () => {
     const button = $("#copy-url");
     const ok = await copyText(state.info.share_url);

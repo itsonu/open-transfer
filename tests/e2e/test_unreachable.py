@@ -198,3 +198,19 @@ def test_with_https_the_share_sheet_shows_the_certificate(page, devices: list[Se
     note = page.locator("#tls-note")
     expect(note).to_be_visible()
     expect(note).to_contain_text(print_)
+
+
+def test_the_owner_can_refuse_unencrypted_transfers(page, devices: list[Server]) -> None:  # type: ignore[no-untyped-def]
+    page.goto(devices[0].url)
+    expect(page.locator("#me-status")).to_be_visible(timeout=10_000)
+    page.click("#connect-button")
+    box = page.locator("#enc-only")
+    expect(box).not_to_be_checked()
+    box.check()
+    expect(box).to_be_checked()
+    state = page.evaluate("fetch('/api/state').then((r) => r.json())")
+    assert state["settings"]["encrypted_only"] is True
+    page.reload()
+    expect(page.locator("#me-status")).to_be_visible(timeout=10_000)
+    page.click("#connect-button")
+    expect(page.locator("#enc-only")).to_be_checked()

@@ -596,6 +596,12 @@ def register(
             }
         )
 
+    @app.put("/api/settings")
+    def ui_settings() -> Response:
+        owner_only()
+        settings = mesh.set_settings(encrypted_only=body_json().get("encrypted_only"))
+        return jsonify({"settings": settings})
+
     @app.put("/api/clipboard/settings")
     def ui_clipboard_settings() -> Response:
         owner_only()

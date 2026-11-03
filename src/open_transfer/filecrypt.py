@@ -96,6 +96,18 @@ def _one_off(
     return hkdf(shared, salt=salt, info=info.encode())
 
 
+def signal_key(base: bytes, salt: bytes, sender: str, receiver: str, target: str) -> bytes:
+    """MAC key for a transfer's WebRTC connection messages: whoever can change an SDP
+    (its DTLS fingerprint, its ICE candidates) between the apps could sit in the middle."""
+    info = f"open-transfer-signal/{VERSION}|{sender}|{receiver}|{target}"
+    return hkdf(base, salt=salt, info=info.encode())
+
+
+def signal_mac(key: bytes, fields: list[Any]) -> str:
+    data = json.dumps(fields, separators=(",", ":")).encode()
+    return hmac.new(key, data, hashlib.sha256).hexdigest()
+
+
 def verify_mac(key: bytes, sha256_hex: str) -> str:
     """Confirms a file's checksum without showing it (a bare hash lets a listener test guesses)."""
     mac_key = hkdf(key, salt=b"", info=f"open-transfer-verify/{VERSION}".encode())
