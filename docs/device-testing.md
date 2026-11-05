@@ -12,7 +12,7 @@ iPhone/iPad is a bonus for the browser-only path.
 
 **Install** from the [latest release](https://github.com/itsonu/open-transfer/releases/latest)
 — or, before a release exists, from a green CI run's **Artifacts** (bottom of the
-run page, signed in to GitHub; each download is a .zip): `open-transfer-windows-x64.exe`,
+run page, signed in to GitHub; each download is a .zip): `open-transfer-windows-x64-setup.exe` (or the portable `open-transfer-windows-x64.exe`),
 `open-transfer-macos-<arch>.dmg`, `open-transfer-android.apk` on both Android
 devices. First launch: allow **Private networks** (Windows firewall), **Local
 Network** (macOS), notifications (Android).

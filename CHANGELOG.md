@@ -5,6 +5,7 @@ All notable changes are documented here. The format follows [Keep a Changelog](h
 ## [Unreleased]
 
 ### Added
+- **Windows installer** (`open-transfer-windows-x64-setup.exe`) next to the portable .exe: installs for your user only (no admin prompt) to `%LOCALAPPDATA%\Programs\Open Transfer`, adds a Start menu entry (and a desktop one if you tick it) and an entry under Settings → Apps; installing a newer one updates in place, closing and reopening the app. Uninstalling turns off Start at login and keeps your files, pairings and history. CI installs it, starts the installed app and uninstalls it on every run. The README now says how to update and how to remove Open Transfer completely on each platform.
 - **Android: Send what you copied sends a copied image.** The app serves it to the page the way it serves a shared photo, and it's staged as *Clipboard image ….png*.
 - **Android: Accept or Decline from the notification.** When someone wants to send files while the app is in the background, the notification now has **Accept** and **Decline** buttons; you don't have to open the app. An offer already answered or expired says so.
 - **Manage a device from its tile.** On your own device, each app's tile has a ⋯ menu (right-click works too). A paired device offers **Remove pairing**: it asks first, the other device is told and forgets this one, and history stays. An unpaired device offers **Pair…**, which opens Add device ready for its code.

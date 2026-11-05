@@ -57,7 +57,7 @@ Install it on each device from the [latest release](https://github.com/itsonu/op
 
 | Device | File | First launch |
 | ------ | ---- | ------------ |
-| **Windows 10/11** (x64) | `open-transfer-windows-x64.exe` | SmartScreen may warn about an unknown publisher → **More info → Run anyway**. Allow **Private networks** when the firewall asks (needed to be found). |
+| **Windows 10/11** (x64) | `open-transfer-windows-x64-setup.exe` (installer), or `open-transfer-windows-x64.exe` (portable, nothing installed) | The installer needs no admin rights and adds Open Transfer to the Start menu; running it again updates in place. SmartScreen may warn about an unknown publisher → **More info → Run anyway**. Allow **Private networks** when the firewall asks (needed to be found). |
 | **macOS 11+** Apple silicon | `open-transfer-macos-arm64.dmg` | Open the .dmg, drag **Open Transfer** to Applications. The app isn't notarised yet: the first time, **right-click → Open** (or System Settings → Privacy & Security → **Open Anyway**). Allow **local network** access when asked. |
 | **macOS 11+** Intel | `open-transfer-macos-x64.dmg` | Same as above. |
 | **Android 10+** phones & tablets (incl. Samsung Galaxy Tab) | `open-transfer-android.apk` | Allow installing from your browser/Files app when Android asks ("Install unknown apps"). Allow notifications so you see incoming files. 64-bit devices only. |
@@ -67,14 +67,26 @@ Received files go to **Downloads/Open Transfer** on every platform.
 
 **With Homebrew** (Mac): `brew install --cask itsonu/tap/open-transfer`. The first launch needs the same **Open Anyway** step as above.
 
-**Check your download** (optional): every release has a `SHA256SUMS` file. Put it next to what you downloaded and run `shasum -a 256 -c SHA256SUMS --ignore-missing` (macOS) or `sha256sum -c SHA256SUMS --ignore-missing` (Linux); each file should say **OK**. On Windows: `Get-FileHash .\open-transfer-windows-x64.exe` and compare with the line in `SHA256SUMS`.
+**Check your download** (optional): every release has a `SHA256SUMS` file. Put it next to what you downloaded and run `shasum -a 256 -c SHA256SUMS --ignore-missing` (macOS) or `sha256sum -c SHA256SUMS --ignore-missing` (Linux); each file should say **OK**. On Windows: `Get-FileHash .\open-transfer-windows-x64-setup.exe` and compare with the line in `SHA256SUMS`.
+
+**Updating** keeps your pairings, history and received files: install the new version over the old one (Windows installer, Mac: replace the app in Applications, Android: install the new APK, which must be signed with the same key).
+
+**Uninstalling.** Received files, pairings and history are kept unless you delete them too.
+
+| Platform | Remove the app | Remove everything else (optional) |
+| -------- | -------------- | --------------------------------- |
+| Windows (installer) | Settings → Apps → **Open Transfer** → Uninstall (it also turns off Start at login) | Delete `Downloads\Open Transfer` (files, and `.open-transfer` with pairings and history) and `%LOCALAPPDATA%\Open Transfer` (the window's data). Firewall rules (admin): Windows Defender Firewall → Advanced settings → Inbound Rules → delete those named **Open Transfer** |
+| Windows (portable .exe) | In the app, turn off **Start at login**, quit, delete the .exe | Same as above |
+| macOS | Turn off **Start at login**, **Quit** (menu bar ⇄), then drag **Open Transfer** from Applications to the Trash | Delete `~/Downloads/Open Transfer`, and the **Open Transfer** item in Keychain Access (the vault key; without it the saved pairings can't be opened anyway) |
+| Android | Long-press the icon → **Uninstall** | Android deletes its pairings and keys with the app; received files in `Download/Open Transfer` stay until you delete them |
+| Linux | Delete the binary; `~/.config/autostart/open-transfer.desktop` if you turned on Start at login | Delete `~/Downloads/Open Transfer` and the **Open Transfer vault key** entry in your keyring |
 
 **iPhone / iPad, or a device you can't install on?** Open the link or scan the QR code shown under **Add device** on any device that runs the app. The browser joins the group and can send and receive (through that device).
 
 **Build the apps yourself** (Python 3.10+, on the OS you want it for):
 
 ```bash
-python3 scripts/build_app.py --desktop   # Windows: dist/Open Transfer.exe · macOS: dist/open-transfer-macos-<arch>.dmg
+python3 scripts/build_app.py --desktop   # Windows: dist/Open Transfer.exe (+ installer with Inno Setup 6) · macOS: dist/open-transfer-macos-<arch>.dmg
 python3 scripts/build_app.py             # the single-file command-line build
 gradle -p android assembleRelease        # Android (needs the Android SDK; see android/README.md)
 ```

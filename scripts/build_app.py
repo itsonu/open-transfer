@@ -13,6 +13,9 @@ command-line app (it shows the address, QR code and PIN in a terminal):
 native window (WebView2 on Windows, WKWebView on macOS):
 
     dist/Open Transfer.exe                     Windows (one windowed .exe)
+    dist/open-transfer-windows-x64-setup.exe   Windows installer (per user, with
+                                               Inno Setup 6; installed, started and
+                                               uninstalled as its smoke test)
     dist/open-transfer-macos-<arch>.dmg        macOS ("Open Transfer.app", ad-hoc signed;
                                                arch is arm64 or x64)
 
@@ -32,6 +35,7 @@ import argparse
 import os
 import platform
 import plistlib
+import re
 import shutil
 import socket
 import subprocess
@@ -289,6 +293,62 @@ def smoke_test_dmg(dmg: Path, require_window: bool) -> None:
             time.sleep(2)
 
 
+def make_installer() -> Path | None:
+    """dist/open-transfer-windows-x64-setup.exe from packaging/windows-installer.iss."""
+    default = Path(
+        os.environ.get("PROGRAMFILES(X86)", r"C:\Program Files (x86)"), "Inno Setup 6", "ISCC.exe"
+    )
+    iscc = shutil.which("iscc") or (default if default.exists() else None)
+    if not iscc:
+        warn("Inno Setup 6 isn't installed: no installer (the .exe works on its own).")
+        return None
+    init = (ROOT / "src" / "open_transfer" / "__init__.py").read_text(encoding="utf-8")
+    version = re.search(r'__version__ = "([^"]+)"', init).group(1)  # type: ignore[union-attr]
+    say("Making the installer…")
+    run(iscc, "/Q", f"/DAppVersion={version}", ROOT / "packaging" / "windows-installer.iss")
+    return DIST / "open-transfer-windows-x64-setup.exe"
+
+
+def smoke_test_installer(setup: Path, require_window: bool) -> None:
+    """Install for this user, start the installed app, uninstall; nothing may be left.
+
+    CI only: on your own PC it would replace, then remove, an installed copy.
+    """
+    if not os.environ.get("GITHUB_ACTIONS"):
+        say(f"Installer: {setup.relative_to(ROOT)} (its install test runs in CI only).")
+        return
+    import winreg  # Windows only, like this test
+
+    say("Installing, starting and uninstalling it…")
+    folder = Path(os.environ["LOCALAPPDATA"]) / "Programs" / APP_NAME
+    shortcut = (
+        Path(os.environ["APPDATA"]) / r"Microsoft\Windows\Start Menu\Programs" / f"{APP_NAME}.lnk"
+    )
+    quiet = ("/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART")
+    run(setup, *quiet)
+    program = folder / f"{APP_NAME}.exe"
+    if not (program.exists() and shortcut.exists()):
+        sys.exit(f"The installer didn't put {program} and its Start menu shortcut in place.")
+    desktop_smoke(program, require_window)
+    run_key = r"Software\Microsoft\Windows\CurrentVersion\Run"
+    with winreg.CreateKey(winreg.HKEY_CURRENT_USER, run_key) as key:  # as Start at login does
+        winreg.SetValueEx(key, APP_NAME, 0, winreg.REG_SZ, f'"{program}" --background')
+    run(folder / "unins000.exe", *quiet)
+    deadline = time.monotonic() + 60  # the uninstaller finishes from a copy in %TEMP%
+    while (program.exists() or shortcut.exists()) and time.monotonic() < deadline:
+        time.sleep(1)
+    if program.exists() or shortcut.exists():
+        sys.exit("Uninstalling left the app or its shortcut behind.")
+    with winreg.OpenKey(winreg.HKEY_CURRENT_USER, run_key) as key:
+        try:
+            winreg.QueryValueEx(key, APP_NAME)
+        except FileNotFoundError:
+            pass
+        else:
+            sys.exit("Uninstalling left Start at login pointing at the removed app.")
+    say("  installer: install, start and uninstall OK")
+
+
 def build_desktop(require_window: bool) -> Path:
     build(DESKTOP_SPEC, [".[desktop]", "pyinstaller>=6.10", "pillow>=10"])
     if IS_MAC:
@@ -299,6 +359,10 @@ def build_desktop(require_window: bool) -> Path:
     if not IS_WIN:
         say("Note: on Linux pywebview needs GTK or Qt bindings, or the app uses the browser.")
     desktop_smoke(program, require_window)
+    if IS_WIN:
+        setup = make_installer()
+        if setup:
+            smoke_test_installer(setup, require_window)
     return program
 
 
