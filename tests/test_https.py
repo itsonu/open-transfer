@@ -156,3 +156,32 @@ def test_a_browser_on_the_plain_port_is_sent_to_https(make_node: NodeFactory) ->
     conn = http.client.HTTPConnection(host, node.port, timeout=5)
     conn.request("GET", "/api/p2p/v1/info", headers={"Host": f"{host}:{node.port}"})
     assert conn.getresponse().status == 200
+
+
+@pytest.mark.parametrize(
+    ("host_header", "path", "expected"),
+    [
+        ("evil.example", "/", None),  # a foreign name never gets a redirect (DNS rebinding)
+        ("{ip}:{port}", "//evil.example/x", None),  # refused (400) before any redirect
+        ("{ip}:{port}", "/?next=a%26b", "https://{ip}:{https}/?next=a%26b"),  # kept encoded
+    ],
+)
+def test_the_https_redirect_stays_on_this_device(
+    make_node: NodeFactory, host_header: str, path: str, expected: str | None
+) -> None:
+    # CodeQL's "URL redirection from remote source": the host is one host_allowed()
+    # accepted, and the path comes after it, so the redirect can't leave the device.
+    from tests.test_mesh import lan_ip
+
+    node = make_node("Alpha", https=True)
+    ip = lan_ip()
+    fill = {"ip": ip, "port": node.port, "https": node.https_port}
+    conn = http.client.HTTPConnection(ip, node.port, timeout=5)
+    conn.request("GET", path, headers={"Accept": "text/html", "Host": host_header.format(**fill)})
+    res = conn.getresponse()
+    if expected is None:
+        assert res.status in {400, 421}
+        assert res.getheader("Location") is None
+    else:
+        assert res.status == 302
+        assert res.getheader("Location") == expected.format(**fill)
