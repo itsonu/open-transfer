@@ -5,6 +5,7 @@ All notable changes are documented here. The format follows [Keep a Changelog](h
 ## [Unreleased]
 
 ### Added
+- **Android: Send what you copied sends a copied image.** The app serves it to the page the way it serves a shared photo, and it's staged as *Clipboard image ….png*.
 - **Android: Accept or Decline from the notification.** When someone wants to send files while the app is in the background, the notification now has **Accept** and **Decline** buttons; you don't have to open the app. An offer already answered or expired says so.
 - **Manage a device from its tile.** On your own device, each app's tile has a ⋯ menu (right-click works too). A paired device offers **Remove pairing**: it asks first, the other device is told and forgets this one, and history stays. An unpaired device offers **Pair…**, which opens Add device ready for its code.
 - **Every transfer says how it's protected**, from its weakest hop: “encrypted” (paired apps, authenticated), “encrypted, not verified” (an unpaired app, or a direct browser transfer whose connection messages crossed plain HTTP), “encrypted in transit” (HTTPS to a browser, WebRTC between browsers), or “not encrypted” (a browser on plain HTTP, an older app).
@@ -46,6 +47,7 @@ All notable changes are documented here. The format follows [Keep a Changelog](h
 - Android: the background service runs as a *connected device* service, so Android 15+ no longer stops it after about 6 hours a day.
 
 ### Fixed
+- **Android: a copied photo was sent as its `content://…` address.** Clipboard sync and *Send what you copied* turned a copied image or file into text; copied images are now sent as images, and clipboard sync skips them (it carries text and links).
 - Between unpaired apps, a transfer right after the other app's multicast announcement could go unencrypted: the announcement made the app forget the other's key.
 - With `--https`, a device whose name made the certificate's name longer than 64 characters couldn't start, and the half-started app never exited.
 - **Security: a paired device can't be redirected by someone else on the Wi‑Fi.** One packet with its id used to move it to their address, so files meant for it went to them. A paired device's new address is now believed only when it proves it with the pair's key (after a Wi‑Fi reconnect or a new address, it is followed within seconds).

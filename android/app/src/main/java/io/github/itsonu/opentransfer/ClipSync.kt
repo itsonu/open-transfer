@@ -74,7 +74,10 @@ object ClipSync {
             return null // one we wrote
         }
         val text = try {
-            cm.primaryClip?.takeIf { it.itemCount > 0 }?.getItemAt(0)?.coerceToText(context)?.toString()
+            // A copied image or file is a URI: coerceToText would turn it into "content://…".
+            cm.primaryClip?.takeIf { it.itemCount > 0 }?.getItemAt(0)
+                ?.takeUnless { it.text == null && it.uri != null }
+                ?.coerceToText(context)?.toString()
         } catch (e: Exception) {
             Log.w(LOG_TAG, "Couldn't read the clipboard", e)
             null

@@ -4,6 +4,7 @@ shortcuts, privacy checks, and syncing between paired apps."""
 from __future__ import annotations
 
 import json
+import re
 import urllib.request
 from collections.abc import Iterator
 from pathlib import Path
@@ -143,6 +144,44 @@ def test_the_android_app_reads_the_clipboard_itself(mac: Server, browser) -> Non
     page.locator("#dropzone-clipboard").click()
     expect(page.locator("#send-bar-files")).to_contain_text("Clipboard")
     expect(page.locator("#toasts")).not_to_contain_text("Allow clipboard access")
+    context.close()
+
+
+PNG = b"\x89PNG\r\n\x1a\n" + b"i" * 5_000
+
+
+def test_the_android_app_sends_a_copied_image(mac: Server, browser) -> None:  # type: ignore[no-untyped-def]
+    # The app serves the copied image like a share (/__shared/…), never as text.
+    context = browser.new_context()
+    page = context.new_page()
+    page.add_init_script(
+        "window.OpenTransferAndroid = {"
+        " readClipboardImage: () => JSON.stringify({ url: '/__shared/tok/0', mime: 'image/png', size: 5008 }),"
+        " readClipboard: () => 'content://media/external/images/1' };"
+    )
+    page.route(
+        "**/__shared/tok/0", lambda r: r.fulfill(status=200, body=PNG, content_type="image/png")
+    )
+    page.goto(mac.url)
+    expect(page.locator("#main-view")).to_be_visible(timeout=10_000)
+    page.locator("#dropzone-clipboard").click()
+    files = page.locator("#send-bar-files")
+    expect(files).to_contain_text(re.compile(r"Clipboard image .*\.png"))
+    expect(files).not_to_contain_text("content://")
+    context.close()
+
+
+def test_with_no_image_copied_the_android_app_sends_text(mac: Server, browser) -> None:  # type: ignore[no-untyped-def]
+    context = browser.new_context()
+    page = context.new_page()
+    page.add_init_script(
+        "window.OpenTransferAndroid = { readClipboardImage: () => '', readClipboard: () => 'Gate 14' };"
+    )
+    page.goto(mac.url)
+    expect(page.locator("#main-view")).to_be_visible(timeout=10_000)
+    page.locator("#dropzone-clipboard").click()
+    expect(page.locator("#send-bar-files")).to_contain_text("Clipboard")
+    expect(page.locator("#send-bar-files")).not_to_contain_text("Clipboard image")
     context.close()
 
 

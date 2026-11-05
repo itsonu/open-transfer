@@ -119,6 +119,25 @@ object SharedFiles {
         Log.i(LOG_TAG, "Shared ${items.size} file(s)${if (text != null) " and text" else ""}") // never names
     }
 
+    /**
+     * A copied image ([uri] from the clipboard), served like a share so the page fetches it
+     * from `/__shared/…`: JSON `{url, mime, size}`, or "" if it isn't another app's content.
+     */
+    fun copiedImage(context: Context, uri: Uri, mime: String): String {
+        if (!SharePolicy.accepts(uri.scheme, uri.authority, context.packageName)) return ""
+        val item = describe(context.contentResolver, uri, mime, 0)
+        val token = SharePolicy.newToken()
+        synchronized(lock) {
+            served[token] = listOf(item)
+            while (served.size > KEEP_TOKENS) served.remove(served.keys.first())
+        }
+        return JSONObject()
+            .put("url", SharePolicy.path(token, 0))
+            .put("mime", item.mime)
+            .put("size", item.size)
+            .toString()
+    }
+
     /** For the page (bridge): what was shared since it last asked, as JSON; "" if nothing. */
     fun take(): String {
         val token = SharePolicy.newToken()

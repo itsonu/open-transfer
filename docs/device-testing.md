@@ -225,6 +225,7 @@ Each row: share from the named app → pick **Open Transfer** → the items are 
 | 9.11 | Share from an app, then cancel in Open Transfer → nothing is sent | |
 | 9.12 | A received file → ⋯ → **Share…** → the system share sheet → send it to another app (Gmail, Drive) | |
 | 9.13 | A paired receiver: the transfer shows **encrypted** (§3) | |
+| 9.14 | Copy a photo (Photos → Copy) → Open Transfer → **Send what you copied** → it arrives as an image, not as a `content://` line; with clipboard sync on, copying a photo syncs nothing | |
 
 ## 10. Keys at rest, unpaired encryption and `--https`
 
