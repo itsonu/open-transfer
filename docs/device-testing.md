@@ -74,6 +74,7 @@ Copy the tables into an issue and fill in ✅ / ❌ (+ a note or screenshot for 
 | 1.3 | Rename a device (✎ next to its name) → others show the new name within ~10 s | | | | |
 | 1.4 | Close the app on one device → it disappears (or shows *Not nearby* if paired) on the others | | | | |
 | 1.5 | Reopen it → it comes back without restarting the others | | | | |
+| 1.6 | ⋯ on a paired device → **Remove pairing** → the other device says “… unpaired this device”; ⋯ → **Pair…** pairs again | | | | |
 
 ## 2. Pairing (QR and code)
 

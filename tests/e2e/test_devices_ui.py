@@ -15,6 +15,7 @@ from pathlib import Path
 import pytest
 
 from open_transfer import network
+from tests.e2e.test_clipboard import call
 from tests.e2e.test_ui import Server, sync_api
 
 pytestmark = pytest.mark.e2e
@@ -225,6 +226,53 @@ def test_rename_this_device(devices: list[Server], page) -> None:  # type: ignor
     assert _api(alpha, "/api/p2p/v1/info")["name"] == "Studio iMac"
 
 
+def test_remove_a_pairing_from_its_tile(devices: list[Server], page, second_page) -> None:  # type: ignore[no-untyped-def]
+    alpha, bravo, _ = devices
+    code = call(bravo, "POST", "/api/pair/open")["code"]
+    call(alpha, "POST", "/api/pair", {"code": code, "address": bravo.url.removeprefix("http://")})
+    page.goto(alpha.url)
+    second_page.goto(bravo.url)
+    bravo_tile = tile(page, "Bravo")
+    expect(bravo_tile).to_have_class(re.compile(r"\bis-paired\b"), timeout=8000)
+
+    bravo_tile.locator(".device-more").click()
+    page.get_by_role("menuitem", name="Remove pairing").click()
+    expect(page.locator("#confirm-title")).to_have_text("Remove the pairing with Bravo?")
+    page.click("#confirm-ok")
+    expect(bravo_tile).not_to_have_class(re.compile(r"\bis-paired\b"), timeout=8000)
+    assert not any(d.get("paired") for d in _api(alpha, "/api/state")["devices"])
+    # Bravo was told, forgot Alpha too, and says how to fix it.
+    expect(second_page.locator("#me-status")).to_contain_text(
+        "Alpha unpaired this device", timeout=8000
+    )
+
+
+def test_cancel_keeps_the_pairing(devices: list[Server], page) -> None:  # type: ignore[no-untyped-def]
+    alpha, bravo, _ = devices
+    code = call(bravo, "POST", "/api/pair/open")["code"]
+    call(alpha, "POST", "/api/pair", {"code": code, "address": bravo.url.removeprefix("http://")})
+    page.goto(alpha.url)
+    bravo_tile = tile(page, "Bravo")
+    expect(bravo_tile).to_have_class(re.compile(r"\bis-paired\b"), timeout=8000)
+    bravo_tile.click(button="right")  # right-click opens the same menu
+    page.get_by_role("menuitem", name="Remove pairing").click()
+    page.locator("#confirm-dialog").get_by_role("button", name="Cancel").click()
+    expect(bravo_tile).to_have_class(re.compile(r"\bis-paired\b"))
+
+
+def test_pair_with_an_unpaired_device_from_its_tile(devices: list[Server], page) -> None:  # type: ignore[no-untyped-def]
+    page.goto(devices[0].url)
+    charlie = tile(page, "Charlie")
+    expect(charlie).to_be_visible(timeout=10_000)
+    charlie.locator(".device-more").click()
+    expect(page.get_by_role("menuitem", name="Remove pairing")).to_have_count(0)
+    page.get_by_role("menuitem", name="Pair…").click()
+    expect(page.locator("#connect-dialog")).to_be_visible()
+    expect(page.locator("#connect-dialog [data-tab=enter]")).to_have_attribute(
+        "aria-selected", "true"
+    )
+
+
 def test_phone_browser_sends_through_the_app(devices: list[Server], browser, second_page) -> None:  # type: ignore[no-untyped-def]
     ip = network.primary_ip()
     if not ip:
@@ -243,6 +291,7 @@ def test_phone_browser_sends_through_the_app(devices: list[Server], browser, sec
         expect(phone.locator("#me-name-text")).to_have_text("Galaxy phone")
         expect(tile(phone, "Alpha")).to_be_visible()
         expect(tile(phone, "Bravo")).to_be_visible(timeout=10_000)
+        expect(tile(phone, "Bravo").locator(".device-more")).to_be_hidden()  # owner only
         second_page.goto(bravo.url)
         expect(tile(second_page, "Galaxy phone")).to_be_visible(timeout=15_000)
 

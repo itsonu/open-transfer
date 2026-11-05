@@ -1648,7 +1648,8 @@ body.is-dragging .device[data-online="1"] .device-button {
 
 /* Favorite star, quick send and the "drop here" hint on a tile. */
 .device-fav,
-.device-quick {
+.device-quick,
+.device-more {
   position: absolute;
   top: 6px;
   width: 32px;
@@ -1657,7 +1658,8 @@ body.is-dragging .device[data-online="1"] .device-button {
 }
 
 .device-fav .icon,
-.device-quick .icon {
+.device-quick .icon,
+.device-more .icon {
   width: 17px;
   height: 17px;
 }
@@ -1673,8 +1675,26 @@ body.is-dragging .device[data-online="1"] .device-button {
 
 .device:hover .device-fav,
 .device:focus-within .device-fav,
-.device.is-favorite .device-fav {
+.device.is-favorite .device-fav,
+.device:hover .device-more,
+.device:focus-within .device-more,
+.device-more[aria-expanded="true"] {
   opacity: 1;
+}
+
+/* The owner's ⋯ menu (remove pairing, pair): bottom corner, shown like the star;
+   its tile keeps the status line clear of it. */
+.device.has-menu .device-button {
+  padding-bottom: 34px;
+}
+
+.device-more {
+  top: auto;
+  right: 6px;
+  bottom: 6px;
+  color: var(--text-2);
+  opacity: 0;
+  transition: opacity var(--t-fast) var(--ease-out);
 }
 
 .device.is-favorite .device-fav {
@@ -1759,7 +1779,8 @@ body.is-dragging .everyone-target[data-ready="1"] {
 
 /* Touch screens have no hover: show the star, and leave room for it. */
 @media (pointer: coarse) {
-  .device-fav {
+  .device-fav,
+  .device-more {
     opacity: 1;
   }
 

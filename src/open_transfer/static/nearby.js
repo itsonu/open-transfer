@@ -5,7 +5,7 @@
 import { DIRECT_MAX_BYTES, directSupported, handleSignals, sendDirect } from "./direct.js";
 import { $, ApiError, addHistory, api, chunkLimits, copyText, formatBytes, formatDuration, guessKind, h, icon, looksSensitive, newUploadId, plural, pushSample, SENSITIVE_REASONS, shouldChunk, sparklineSVG, state, toast, uploadParallel } from "./lib.js";
 import { saveThumb } from "./activity.js";
-import { isImage, makeThumb } from "./media.js";
+import { isImage, makeThumb, openMenu } from "./media.js";
 import { notify } from "./notify.js";
 import { collectDropped, zipFiles, zipName } from "./zip.js";
 
@@ -391,9 +391,16 @@ function buildTile(d) {
     h("span", { class: "device-signal", role: "img", hidden: true }),
     h("button", { class: "icon-btn device-fav", type: "button", "aria-pressed": "false", onclick: () => toggleFavorite(el._device) }, icon("star")),
     h("button", { class: "icon-btn device-quick", type: "button", hidden: true, onclick: () => quickSend(el.dataset.id) }, icon("send")),
+    h("button", { class: "icon-btn device-more", type: "button", hidden: true, "aria-haspopup": "menu", "aria-expanded": "false", title: "More", onclick: (event) => openDeviceMenu(el, event.currentTarget) }, icon("more")),
   );
   const button = el.querySelector(".device-button");
   button.addEventListener("click", () => toggle(el.dataset.id));
+  el.addEventListener("contextmenu", (event) => {
+    const more = el.querySelector(".device-more");
+    if (more.hidden) return;
+    event.preventDefault();
+    openDeviceMenu(el, { x: event.clientX, y: event.clientY }, more);
+  });
   // Drop files straight onto a device to send them to it — the AirDrop gesture.
   // Onto a selected device: to every selected device.
   el.addEventListener("dragover", (event) => {
@@ -423,6 +430,31 @@ function buildTile(d) {
     sendDropped(event, dropRecipients(el.dataset.id));
   });
   return el;
+}
+
+/** The owner's actions for a device: remove its pairing, or pair with it. */
+function openDeviceMenu(el, at, opener = at) {
+  const d = el._device;
+  const items = d.paired
+    ? [{ label: "Remove pairing", icon: "x", danger: true, run: () => removePairing(d) }]
+    : [{ label: "Pair…", icon: "link", run: () => openAddDevice({ tab: "enter" }) }];
+  openMenu(items, { at, opener, label: `Actions for ${d.name}` });
+}
+
+async function removePairing(d) {
+  const ok = await confirmDialog({
+    title: `Remove the pairing with ${d.name}?`,
+    text: `${d.name} is told and forgets this device too. Sending will ask to accept again, and transfers aren’t verified until you pair again. History stays.`,
+    confirm: "Remove",
+  });
+  if (!ok) return;
+  try {
+    await api(`/api/pairs/${encodeURIComponent(d.id)}`, { method: "DELETE" });
+    toast(`Removed the pairing with ${d.name}`, { icon: "check" });
+  } catch (err) {
+    toast(err.message, { tone: "error", icon: "alert" });
+  }
+  ctx.requestPoll();
 }
 
 const hasFiles = (event) => [...(event.dataTransfer?.types || [])].includes("Files");
@@ -478,6 +510,10 @@ function updateTile(el, d) {
   quick.hidden = !(favorite && d.online);
   quick.setAttribute("aria-label", `Quick send to ${d.name}`);
   quick.title = `Send files to ${d.name}`;
+  const more = el.querySelector(".device-more");
+  more.hidden = !(state.info.owner && d.kind === "app");
+  el.classList.toggle("has-menu", !more.hidden);
+  more.setAttribute("aria-label", `More for ${d.name}`);
   const together = selected ? [...mesh.selected].filter((id) => onlineDevices().some((o) => o.id === id)).length : 0;
   const hint = together > 1 ? `Drop to send to ${together}` : "Drop to send";
   const hintEl = el.querySelector(".device-drop-hint");
