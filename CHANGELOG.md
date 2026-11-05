@@ -5,6 +5,7 @@ All notable changes are documented here. The format follows [Keep a Changelog](h
 ## [Unreleased]
 
 ### Added
+- **Android: Accept or Decline from the notification.** When someone wants to send files while the app is in the background, the notification now has **Accept** and **Decline** buttons; you don't have to open the app. An offer already answered or expired says so.
 - **Manage a device from its tile.** On your own device, each app's tile has a ⋯ menu (right-click works too). A paired device offers **Remove pairing**: it asks first, the other device is told and forgets this one, and history stays. An unpaired device offers **Pair…**, which opens Add device ready for its code.
 - **Every transfer says how it's protected**, from its weakest hop: “encrypted” (paired apps, authenticated), “encrypted, not verified” (an unpaired app, or a direct browser transfer whose connection messages crossed plain HTTP), “encrypted in transit” (HTTPS to a browser, WebRTC between browsers), or “not encrypted” (a browser on plain HTTP, an older app).
 - **New installations start with “Encrypted transfers only” on.** An existing installation keeps working with older apps (recorded once in `settings.json`); turn it on under Add device.

@@ -146,7 +146,7 @@ from Files sends the file, not the clipboard.
 | 6.3 | Cancel from the sender mid-transfer → receiver shows it stopped; no half file in the folder | |
 | 6.4 | Not enough space / file too big → declined up front with a reason | |
 | 6.5 | Android: switch apps during a transfer → it keeps going (notification shown) | |
-| 6.6 | Android: incoming offer while the app is in the background → notification | |
+| 6.6 | Android: incoming offer while the app is in the background → notification; **Accept** on it starts the transfer, **Decline** tells the sender, without opening the app | |
 
 ## 7. Clipboard sync network
 

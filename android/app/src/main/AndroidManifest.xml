@@ -77,6 +77,10 @@
             </intent-filter>
         </activity>
 
+        <receiver
+            android:name=".OfferActionReceiver"
+            android:exported="false" />
+
         <service
             android:name=".TransferService"
             android:exported="false"
