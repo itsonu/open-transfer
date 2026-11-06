@@ -5,6 +5,7 @@ All notable changes are documented here. The format follows [Keep a Changelog](h
 ## [Unreleased]
 
 ### Added
+- **Received text and links read in the list.** A short text someone sent shows its first line under its name, and one that holds a web address gets an **Open link** button (opens in your browser; only `http`/`https` addresses). Text that is just an address is sent as `link-….txt` rather than `note-….txt`.
 - **Windows installer** (`open-transfer-windows-x64-setup.exe`) next to the portable .exe: installs for your user only (no admin prompt) to `%LOCALAPPDATA%\Programs\Open Transfer`, adds a Start menu entry (and a desktop one if you tick it) and an entry under Settings → Apps; installing a newer one updates in place, closing and reopening the app. Uninstalling turns off Start at login and keeps your files, pairings and history. CI installs it, starts the installed app and uninstalls it on every run. The README now says how to update and how to remove Open Transfer completely on each platform.
 - **Android: Send what you copied sends a copied image.** The app serves it to the page the way it serves a shared photo, and it's staged as *Clipboard image ….png*.
 - **Android: Accept or Decline from the notification.** When someone wants to send files while the app is in the background, the notification now has **Accept** and **Decline** buttons; you don't have to open the app. An offer already answered or expired says so.
@@ -48,6 +49,7 @@ All notable changes are documented here. The format follows [Keep a Changelog](h
 - Android: the background service runs as a *connected device* service, so Android 15+ no longer stops it after about 6 hours a day.
 
 ### Fixed
+- **Activity showed a green “Received” for transfers that never arrived.** The badge now says what happened (“No answer”, “Declined”, “Failed” in red) and says Sent or Received only for transfers that finished.
 - **A long transfer was cut off after an hour.** The receiver failed any transfer an hour after it was offered, however fast it was still going (a 10 GB video at 2 MB/s needs about 83 minutes). A transfer now fails only after 10 minutes without a new byte, saying “*Sender* stopped sending.” One that was accepted but never started now says “*Sender* didn’t start sending.” instead of “No answer”.
 - **Android: a copied photo was sent as its `content://…` address.** Clipboard sync and *Send what you copied* turned a copied image or file into text; copied images are now sent as images, and clipboard sync skips them (it carries text and links).
 - Between unpaired apps, a transfer right after the other app's multicast announcement could go unencrypted: the announcement made the app forget the other's key.

@@ -165,3 +165,43 @@ def test_a_send_between_paired_apps_says_it_is_encrypted(
     expect(target.locator(".job-target-path")).to_have_text("Direct · encrypted")
     expect(target).to_have_attribute("data-state", "done", timeout=15_000)
     assert (bravo.root / "sealed.txt").read_text() == "between paired apps"
+
+
+def test_the_badge_says_what_happened_not_only_which_way(tmp_path: Path, page) -> None:  # type: ignore[no-untyped-def]
+    import json
+    import time
+
+    from tests.e2e.test_ui import _start
+
+    state = tmp_path / "Tab" / ".open-transfer"
+    state.mkdir(parents=True)
+    now = time.time()
+    entries = [
+        ("got.txt", "received", "done"),
+        ("never.txt", "received", "expired"),
+        ("broke.bin", "received", "failed"),
+        ("sent.txt", "sent", "done"),
+        ("refused.txt", "sent", "declined"),
+    ]
+    (state / "history.jsonl").write_text(
+        "".join(
+            json.dumps({"id": f"h-{i}", "at": now - i, "kind": "transfer", "direction": d,
+                        "title": t, "files": 1, "size": 10, "status": s,
+                        "devices": [{"id": "d-x", "name": "Studio Mac", "status": s}]}) + "\n"
+            for i, (t, d, s) in enumerate(entries)
+        )
+    )  # fmt: skip
+    gen = _start(tmp_path, name="Tab", owner=True)
+    server = next(gen)
+    try:
+        page.goto(server.url)
+        badge = lambda title: page.locator(".history-row", has_text=title).locator(".history-dir")  # noqa: E731
+        expect(badge("got.txt")).to_have_text("Received")
+        expect(badge("sent.txt")).to_have_text("Sent")
+        expect(badge("never.txt")).to_have_text("No answer")  # not a green "Received"
+        expect(badge("broke.bin")).to_have_text("Failed")
+        expect(badge("broke.bin")).to_have_attribute("data-dir", "failed")
+        expect(badge("refused.txt")).to_have_text("Declined")
+    finally:
+        for _ in gen:
+            pass

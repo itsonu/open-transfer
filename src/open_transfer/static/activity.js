@@ -134,7 +134,7 @@ function row(e, thumbs) {
     thumb.append(img);
   }
   const speed = e.speed >= 1000 ? `${formatBytes(e.speed)}/s` : "";
-  const sub = [formatBytes(e.size), relativeTime(e.at), speed, STATUS[e.status]].filter(Boolean).join(" · ");
+  const sub = [formatBytes(e.size), relativeTime(e.at), speed].filter(Boolean).join(" · ");
   const title = clip ? `Clipboard · ${e.title}` : e.title;
   const sent = e.direction === "sent";
   const line = h("div", { class: "history-head" }, h("span", { class: "row-title", title }, title), who(e) && h("span", { class: "history-who" }, who(e)));
@@ -146,8 +146,15 @@ function row(e, thumbs) {
     { class: "row history-row", dataset: { status: e.status, kind: e.kind } },
     thumb,
     main,
-    h("span", { class: "history-dir", dataset: { dir: sent ? "up" : "down" } }, sent ? "Sent" : "Received"),
+    badge(e, sent),
   );
+}
+
+/** Which way it went when it worked; otherwise what happened (a failure in red). */
+function badge(e, sent) {
+  const ok = (e.status || "done") === "done";
+  const dir = ok ? (sent ? "up" : "down") : e.status === "failed" ? "failed" : "off";
+  return h("span", { class: "history-dir", dataset: { dir } }, ok ? (sent ? "Sent" : "Received") : STATUS[e.status] || e.status);
 }
 
 function render(total) {

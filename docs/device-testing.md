@@ -126,6 +126,7 @@ from Files sends the file, not the clipboard.
 | 4.5 | Drop a file **onto a device tile** (desktop) → goes only to that device | |
 | 4.6 | One receiver leaves (close app / Wi‑Fi off) mid-transfer → others still finish; that one shows *Failed* with **Retry** | |
 | 4.7 | **Send now** while one device hasn't answered → the accepted ones get it | |
+| 4.8 | Send bar → **Text** → paste a link → send: the receiver's Received list shows the address with **Open link**, which opens the browser (Android: the system browser) | |
 
 ## 5. Browsers without the app (iPhone / iPad / any browser)
 

@@ -826,6 +826,14 @@ a.row-title:hover {
   text-decoration: none;
 }
 
+.row-text {
+  overflow: hidden;
+  color: var(--text);
+  font-size: 13px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .row-sub {
   overflow: hidden;
   color: var(--text-2);
@@ -2400,6 +2408,11 @@ body.has-send-bar .toasts {
 .history-dir[data-dir="down"] {
   background: var(--success-soft);
   color: var(--success);
+}
+
+.history-dir[data-dir="failed"] {
+  background: var(--danger-soft);
+  color: var(--danger);
 }
 
 /* ------------------------------------------------------- invite links */

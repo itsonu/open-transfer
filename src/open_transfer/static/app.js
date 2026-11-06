@@ -326,7 +326,39 @@ function buildFileRow(file) {
   });
   row._file = file;
   updateRowTime(row);
+  if (file.mime === "text/plain" && file.size <= TEXT_PEEK_BYTES && file.name.toLowerCase().endsWith(".txt")) peekText(file, row);
   return row;
+}
+
+/** A short text someone sent: its first line under the name, and Open link when it holds one. */
+async function peekText(file, row) {
+  let text;
+  try {
+    text = await (await fetch(urlFor(file))).text();
+  } catch {
+    return;
+  }
+  const first = text.split("\n").map((line) => line.trim()).find(Boolean);
+  if (!first) return;
+  row.querySelector(".row-sub").before(h("span", { class: "row-text", title: first }, first));
+  const url = webLink(text);
+  if (url) {
+    const open = h("a", { class: "icon-btn is-accent", href: url, target: "_blank", rel: "noopener noreferrer", "aria-label": `Open link in ${file.name}`, title: url }, icon("link"));
+    row.querySelector(".row-actions").prepend(open);
+  }
+}
+
+/** The first http(s) address in ``text`` (never javascript:, file: or the like). */
+function webLink(text) {
+  for (const word of text.split(/\s+/)) {
+    try {
+      const url = new URL(word);
+      if (url.protocol === "http:" || url.protocol === "https:") return url.href;
+    } catch {
+      /* not an address */
+    }
+  }
+  return null;
 }
 
 function showPreview(file, trigger) {
@@ -336,6 +368,7 @@ function showPreview(file, trigger) {
 }
 
 const COPYABLE_TEXT_BYTES = 200000;
+const TEXT_PEEK_BYTES = 4096; // received texts this short show their first line in the list
 
 async function copyFileText(file) {
   try {

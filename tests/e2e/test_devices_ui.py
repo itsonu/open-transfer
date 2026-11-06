@@ -382,3 +382,32 @@ def test_browsers_send_to_each_other_directly(
     finally:
         ctx_a.close()
         ctx_b.close()
+
+
+def test_send_a_link_and_open_it_on_the_other_device(
+    devices: list[Server], page, second_page
+) -> None:  # type: ignore[no-untyped-def]
+    alpha, bravo, _ = devices
+    page.goto(alpha.url)
+    second_page.goto(bravo.url)
+    tile(page, "Bravo").locator(".device-button").click(timeout=10_000)
+    page.click("#send-text")
+    page.fill("#text-input", "https://example.com/trip?id=42")
+    page.click("#text-submit")
+    expect(page.locator("#send-bar-files")).to_contain_text(re.compile(r"link-[\d-]+\.txt"))
+    page.click("#send-go")
+    second_page.click("#incoming-accept", timeout=10_000)
+    row = second_page.locator("#file-list .file-row", has_text="link-")
+    expect(row.locator(".row-text")).to_have_text("https://example.com/trip?id=42", timeout=10_000)
+    expect(row.get_by_role("link", name="Open link")).to_have_attribute(
+        "href", "https://example.com/trip?id=42"
+    )
+
+
+def test_a_note_keeps_the_note_name(devices: list[Server], page) -> None:  # type: ignore[no-untyped-def]
+    page.goto(devices[0].url)
+    tile(page, "Bravo").locator(".device-button").click(timeout=10_000)
+    page.click("#send-text")
+    page.fill("#text-input", "Gate code 4411, see https://example.com")
+    page.click("#text-submit")
+    expect(page.locator("#send-bar-files")).to_contain_text(re.compile(r"note-[\d-]+\.txt"))

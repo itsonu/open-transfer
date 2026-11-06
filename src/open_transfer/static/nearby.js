@@ -619,7 +619,8 @@ export function stageText(text, filename = "") {
   const clean = String(text || "").replace(/\r\n/g, "\n");
   if (!clean.trim()) return null;
   if (clean.length > 200000) throw new Error("That text is too long (200,000 characters max).");
-  let name = String(filename || "").trim() || `note-${new Date().toISOString().slice(0, 16).replace("T", "-").replace(":", "")}.txt`;
+  const kind = /^https?:\/\/\S+$/i.test(clean.trim()) ? "link" : "note"; // just an address: a link
+  let name = String(filename || "").trim() || `${kind}-${new Date().toISOString().slice(0, 16).replace("T", "-").replace(":", "")}.txt`;
   if (!name.toLowerCase().endsWith(".txt")) name += ".txt";
   const file = new File([clean], name, { type: "text/plain" });
   stageFiles([file]);

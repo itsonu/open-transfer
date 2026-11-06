@@ -274,3 +274,32 @@ def test_the_android_app_shares_a_received_file_to_other_apps(mac: Server, page)
     row.locator(".row-more").click()
     page.locator("#file-menu [role=menuitem]", has_text="Share…").click()
     assert page.evaluate("window.__out") == ["notes.txt"]
+
+
+# ------------------------------------------------------- received text, links
+
+
+def test_received_text_and_links_read_in_the_list(mac: Server, page) -> None:  # type: ignore[no-untyped-def]
+    (mac.root / "Link Trip plan.txt").write_bytes(b"Trip plan\nhttps://example.com/trip?id=42")
+    (mac.root / "sneaky.txt").write_bytes(b"javascript:alert(1)")
+    (mac.root / "long.txt").write_bytes(b"https://example.com/big\n" + b"x" * 8_000)
+    page.goto(mac.url)
+
+    trip = page.locator(".file-row", has_text="Link Trip plan.txt")
+    expect(trip.locator(".row-text")).to_have_text("Trip plan")
+    link = trip.get_by_role("link", name="Open link")
+    expect(link).to_have_attribute("href", "https://example.com/trip?id=42")
+    expect(link).to_have_attribute("target", "_blank")
+    expect(link).to_have_attribute("rel", "noopener noreferrer")
+
+    notes = page.locator(".file-row", has_text="notes.txt")
+    expect(notes.locator(".row-text")).to_have_text("Gate code 4411")  # a note: its first line
+    expect(notes.get_by_role("link", name="Open link")).to_have_count(0)
+
+    sneaky = page.locator(".file-row", has_text="sneaky.txt")
+    expect(sneaky.locator(".row-text")).to_have_text("javascript:alert(1)")  # shown, never a link
+    expect(sneaky.get_by_role("link", name="Open link")).to_have_count(0)
+
+    big = page.locator(".file-row", has_text="long.txt")
+    expect(big).to_be_visible()
+    expect(big.locator(".row-text")).to_have_count(0)  # only short texts are read
