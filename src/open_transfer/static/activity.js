@@ -143,7 +143,7 @@ function row(e, thumbs) {
   const missed = (e.devices || []).filter((d) => d.status && d.status !== "done");
   if (e.status !== "done" && missed.length) {
     const say = (d) => d.reason || STATUS[d.status] || d.status;
-    const why = missed.map((d) => (say(d).startsWith(d.name) ? say(d) : `${d.name}: ${say(d)}`)).join(" · ");
+    const why = missed.map((d) => (say(d).includes(d.name) ? say(d) : `${d.name}: ${say(d)}`)).join(" · ");
     main.append(h("span", { class: "history-why", title: why }, why));
   }
   const graph = e.samples?.length >= 2 ? sparklineSVG(e.samples) : null;

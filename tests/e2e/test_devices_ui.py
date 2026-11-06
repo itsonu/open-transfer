@@ -86,6 +86,10 @@ def test_declining_tells_the_sender(
     second_page.locator("#incoming-decline").click(timeout=10_000)
     expect(page.locator(".toast", has_text="Bravo declined")).to_be_visible(timeout=10_000)
     assert not (bravo.root / "nope.txt").exists()
+    # Nothing crossed the network: no "Direct · encrypted…" on it.
+    target = page.locator(".job-target", has_text="Bravo")
+    expect(target.locator(".job-target-state")).to_have_text("Declined")
+    expect(target.locator(".job-target-path")).to_have_text("")
 
 
 def test_drop_files_onto_a_device(devices: list[Server], page, second_page) -> None:  # type: ignore[no-untyped-def]
@@ -394,10 +398,10 @@ def test_send_a_link_and_open_it_on_the_other_device(
     page.click("#send-text")
     page.fill("#text-input", "https://example.com/trip?id=42")
     page.click("#text-submit")
-    expect(page.locator("#send-bar-files")).to_contain_text(re.compile(r"link-[\d-]+\.txt"))
+    expect(page.locator("#send-bar-files")).to_contain_text("Link example.com.txt")
     page.click("#send-go")
     second_page.click("#incoming-accept", timeout=10_000)
-    row = second_page.locator("#file-list .file-row", has_text="link-")
+    row = second_page.locator("#file-list .file-row", has_text="Link example.com")
     expect(row.locator(".row-text")).to_have_text("https://example.com/trip?id=42", timeout=10_000)
     expect(row.get_by_role("link", name="Open link")).to_have_attribute(
         "href", "https://example.com/trip?id=42"
@@ -410,4 +414,5 @@ def test_a_note_keeps_the_note_name(devices: list[Server], page) -> None:  # typ
     page.click("#send-text")
     page.fill("#text-input", "Gate code 4411, see https://example.com")
     page.click("#text-submit")
-    expect(page.locator("#send-bar-files")).to_contain_text(re.compile(r"note-[\d-]+\.txt"))
+    # Named after its first words, so several notes don't all read "note-…".
+    expect(page.locator("#send-bar-files")).to_contain_text("Gate code 4411, see.txt")

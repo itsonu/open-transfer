@@ -615,12 +615,26 @@ export function stageFiles(files) {
   toast(count ? `${plural(mesh.staged.length, "file")} ready — choose who to send to` : "Files ready — waiting for a device to appear", { icon: "send" });
 }
 
+/** A name from what the text says: "Link example.com" for an address, else its first words. */
+function textName(text) {
+  const words = text.trim();
+  if (/^https?:\/\/\S+$/i.test(words)) {
+    try {
+      return `Link ${new URL(words).hostname.replace(/^www\./, "")}`;
+    } catch {
+      /* not a usable address: name it by its words */
+    }
+  }
+  const first = words.split("\n")[0].replace(/https?:\/\/\S+/gi, "").replace(/[\\/:*?"<>|]+/g, " ").replace(/\s+/g, " ").trim();
+  const short = first.length > 32 ? first.slice(0, 32).replace(/\s+\S*$/, "") : first;
+  return short.replace(/[\s.,;:!-]+$/, "");
+}
+
 export function stageText(text, filename = "") {
   const clean = String(text || "").replace(/\r\n/g, "\n");
   if (!clean.trim()) return null;
   if (clean.length > 200000) throw new Error("That text is too long (200,000 characters max).");
-  const kind = /^https?:\/\/\S+$/i.test(clean.trim()) ? "link" : "note"; // just an address: a link
-  let name = String(filename || "").trim() || `${kind}-${new Date().toISOString().slice(0, 16).replace("T", "-").replace(":", "")}.txt`;
+  let name = String(filename || "").trim() || `${textName(clean) || `note-${new Date().toISOString().slice(0, 16).replace("T", "-").replace(":", "")}`}.txt`;
   if (!name.toLowerCase().endsWith(".txt")) name += ".txt";
   const file = new File([clean], name, { type: "text/plain" });
   stageFiles([file]);
@@ -1414,7 +1428,8 @@ function renderJobs() {
             h(
               "span",
               { class: "job-target-path", title: [PATH_HINT[path], SECURITY_HINT[original.security]].filter(Boolean).join(". ") },
-              pathLabel(path, original) + (SECURITY_LABEL[original.security] || ""),
+              // Declined, or failed before a byte went out: nothing crossed the network to label.
+              FINAL.has(original.state) && original.state !== "done" && !original.sent ? "" : pathLabel(path, original) + (SECURITY_LABEL[original.security] || ""),
             ),
             h("span", { class: "job-target-state" }, text),
             canRetryTarget &&

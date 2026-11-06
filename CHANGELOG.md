@@ -49,6 +49,8 @@ All notable changes are documented here. The format follows [Keep a Changelog](h
 - Android: the background service runs as a *connected device* service, so Android 15+ no longer stops it after about 6 hours a day.
 
 ### Fixed
+- **Several texts sent in the same minute all read “note-2026-…-1333.txt”**, so they couldn't be told apart in Transfers, the queue or Activity. A text is now named after its first words (“Gate code 4411.txt”) and an address after its site (“Link example.com.txt”, as Android does).
+- **A declined send, or one that couldn't reach its device, showed “Direct · encrypted, not verified” / “not encrypted”** though nothing had crossed the network; that label now appears only once something was sent.
 - **Closing the window mid-send left the transfer stuck.** The page does the uploading, so once it closed nothing ended the send: the sender kept it “accepted” for ever and never wrote it to Activity. The sending app now ends it like the receiver does (4 minutes if nothing was sent, 10 minutes after the last byte otherwise), tells the receiver, and records “Failed — the window sending it closed. Choose the files again to send them.”
 - **Quitting Open Transfer mid-transfer** (closing the desktop window, Cmd+Q) now ends what was under way as **Canceled** in Activity on both sides (“Open Transfer was closed before it finished”) and tells the receivers at once; before, the transfer vanished from the sender's history and the receiver waited.
 - **Retrying a partly delivered send saved the first files twice** on a paired device (“photo (1).jpg”). A retry now skips files already there (same name and size); an unpaired device's prompt has **Skip** chosen for them.

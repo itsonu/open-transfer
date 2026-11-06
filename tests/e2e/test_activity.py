@@ -230,8 +230,11 @@ def test_activity_says_who_didnt_get_it_and_why(tmp_path: Path, page) -> None:  
             "files": 1, "size": 10, "status": "expired", "devices": [
                 {"id": "d-m", "name": "Studio Mac", "status": "expired",
                  "reason": "Studio Mac didn’t start sending."}]}  # fmt: skip
+    lost = {**late, "id": "h-4", "direction": "sent", "title": "lost.txt", "status": "failed",
+            "devices": [{"id": "d-p", "name": "Office PC", "status": "failed",
+                         "reason": "Couldn’t reach Office PC."}]}  # fmt: skip
     (state / "history.jsonl").write_text(
-        "".join(json.dumps(e) + "\n" for e in (late, whole, group))
+        "".join(json.dumps(e) + "\n" for e in (late, lost, whole, group))
     )
     gen = _start(tmp_path, name="Mac", owner=True)
     server = next(gen)
@@ -247,6 +250,8 @@ def test_activity_says_who_didnt_get_it_and_why(tmp_path: Path, page) -> None:  
         expect(why).not_to_contain_text("Pixel")  # it got them
         mine = page.locator(".history-row", has_text="late.txt").locator(".history-why")
         expect(mine).to_have_text("Studio Mac didn’t start sending.")  # its name once
+        lost = page.locator(".history-row", has_text="lost.txt").locator(".history-why")
+        expect(lost).to_have_text("Couldn’t reach Office PC.")
         expect(
             page.locator(".history-row", has_text="ok.txt").locator(".history-why")
         ).to_have_count(0)
