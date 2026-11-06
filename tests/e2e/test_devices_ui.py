@@ -416,3 +416,23 @@ def test_a_note_keeps_the_note_name(devices: list[Server], page) -> None:  # typ
     page.click("#text-submit")
     # Named after its first words, so several notes don't all read "note-…".
     expect(page.locator("#send-bar-files")).to_contain_text("Gate code 4411, see.txt")
+
+
+def test_closing_with_files_ready_to_send_asks_first(
+    devices: list[Server], browser, tmp_path: Path
+) -> None:  # type: ignore[no-untyped-def]
+    # Staged files live only in this page: leaving it must not drop them without a word.
+    sample = tmp_path / "ready.txt"
+    sample.write_text("ready")
+    for staged in (True, False):
+        pg = browser.new_context().new_page()
+        pg.goto(devices[0].url)
+        expect(tile(pg, "Bravo")).to_be_visible(timeout=10_000)
+        if staged:
+            pg.set_input_files("#file-input", str(sample))
+            expect(pg.locator("#send-bar-files")).to_contain_text("ready.txt")
+        asked: list[str] = []
+        pg.on("dialog", lambda d: (asked.append(d.type), d.accept()))
+        pg.close(run_before_unload=True)
+        pg.wait_for_event("close")
+        assert asked == (["beforeunload"] if staged else [])

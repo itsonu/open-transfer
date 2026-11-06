@@ -114,3 +114,21 @@ def test_disconnected_partway(make_node: NodeFactory) -> None:
     assert kept["status"] == "failed"
     [received] = [e for e in b.mesh.history.query() if e["title"] == "cut.bin"]  # it's stopped
     assert received["status"] != "done"  # never recorded as received
+
+
+def test_a_group_where_one_recipient_drops_out_partway(make_node: NodeFactory) -> None:
+    a, b, c = apps(make_node, "Bravo", "Charlie")
+    payload = b"g" * 300_000
+    job = send(owner(a), [b.mesh.id, c.mesh.id], [("group.bin", payload)])
+    answer(b, True)
+    answer(c, True)
+    wait_for(lambda: set(target_states(owner(a), job).values()) == {"accepted"})
+    c.stop()
+    upload(owner(a), job, 0, payload)
+    kept = agree(a, job, "group.bin")
+    assert kept["status"] == "partial"
+    assert {d["name"]: d["status"] for d in kept["devices"]} == {
+        "Bravo": "done",
+        "Charlie": "failed",
+    }
+    assert entry(b, "group.bin", "received")["status"] == "done"

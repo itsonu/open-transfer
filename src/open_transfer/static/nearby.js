@@ -1492,7 +1492,8 @@ function renderJobs() {
 
 window.addEventListener("beforeunload", (event) => {
   const unsaved = mesh.directFiles.some((f) => !f.saved);
-  if ([...mesh.jobs.values()].some(jobActive) || unsaved) {
+  // Files staged or queued exist only in this page: leaving would drop them unsent.
+  if ([...mesh.jobs.values()].some(jobActive) || unsaved || mesh.staged.length || mesh.queue.length) {
     event.preventDefault();
     event.returnValue = "";
   }
