@@ -246,7 +246,20 @@ Each row: share from the named app → pick **Open Transfer** → the items are 
    certificate details) matches the one under the QR code → proceed → the
    page says **encrypted (HTTPS)**; send a photo from that page.
 
-## If devices don't see each other
+## 11. When things go wrong (one round per platform pair)
+
+Automated in CI with real app processes; these check the real windows, apps and networks.
+
+| # | Check | Result |
+|---|-------|--------|
+| 11.1 | Start a send from the **desktop app**, close its window before the other device accepts, accept there → within ~4 min both say it didn't happen (sender: *Failed — the window sending it closed*; receiver: *… didn't start sending*), and both Activity lists show it | |
+| 11.2 | Close the desktop window **partway** through a 1 GB send → the receiver says it stopped (at once if the app quit; otherwise within 10 min); no half file in Downloads/Open Transfer | |
+| 11.3 | Quit the **receiving** app (Cmd+Q / Quit) mid-transfer → its Activity says *Canceled — Open Transfer was closed*; the sender shows the failure; reopening leaves no partial file | |
+| 11.4 | Force-stop the Android app mid-transfer (Settings → Apps → Force stop) → the sender fails it with a reason; Android's Download/Open Transfer has no partial file after reopening | |
+| 11.5 | A paired device gets 2 of 5 photos, then Wi‑Fi drops; **Retry** when it's back → only the missing 3 arrive (no “photo (1).jpg”) | |
+| 11.6 | Send 5 files to two devices; one declines → Activity shows *Partly sent*, the names, and “*device*: Declined”; searching one file's name finds it | |
+| 11.7 | Choose files, then close the browser tab before sending → the browser asks before leaving | |
+
 
 1. Same Wi‑Fi? Guest networks and many routers isolate devices.
 2. Firewall: Windows → allow *Open Transfer* on **Private** networks; macOS →
