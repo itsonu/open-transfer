@@ -197,6 +197,7 @@ def register(
             enc_salt=salt,
             enc_base=base,
             enc_auth=bool(salt) and verified,
+            retry=data.get("retry") is True,
         )
         return jsonify(
             {

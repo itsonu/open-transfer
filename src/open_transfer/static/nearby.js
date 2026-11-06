@@ -1604,7 +1604,8 @@ function fillPrompt(s) {
     $("#incoming-dupes-text").textContent = `${one ? "1 of these files is" : `${dupes} of these files are`} already here (same name and size).`;
     $("#dupes-skip").textContent = one ? "Skip it" : "Skip them";
     $("#dupes-replace").textContent = one ? "Replace it" : "Replace them";
-    for (const radio of document.querySelectorAll("input[name=dupes]")) radio.checked = radio.value === "rename";
+    // Asked again after a failure: what already arrived needn't come twice.
+    for (const radio of document.querySelectorAll("input[name=dupes]")) radio.checked = radio.value === (s.retry ? "skip" : "rename");
   }
   $("#incoming-accept").disabled = false;
   $("#incoming-decline").disabled = false;

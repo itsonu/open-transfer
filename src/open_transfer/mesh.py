@@ -243,6 +243,7 @@ class IncomingSession:
     active: float = 0.0  # when the last byte arrived (a stall is counted from it)
     recorded: bool = False  # written to history
     on_duplicate: str = "rename"  # files already here: "rename" (keep both), "skip" or "replace"
+    retry: bool = False  # asked again after a failure: what already arrived is skipped
     enc_salt: bytes = field(default=b"", repr=False)  # ot-file/2: only encrypted bytes accepted
     enc_base: bytes = field(default=b"", repr=False)  # the session key (dropped when it's over)
     signals_out: int = 0  # WebRTC messages sent and the last one taken (counts against replays)
@@ -307,7 +308,9 @@ class Job:
     # it has nothing left to send (#44).
     relayed: dict[int, dict[str, Any]] = field(default_factory=dict)
     started: float = 0.0  # when the first byte went out (for the speed in history)
+    active: float = 0.0  # when the last byte went out (its window may have closed since)
     recorded: bool = False  # written to history
+    retry: bool = False  # a Retry: receivers skip the files they already have
 
 
 # ====================================================================== mesh
@@ -417,12 +420,46 @@ class Mesh:
         wait_futures(in_flight, timeout=HELLO_TIMEOUT)
         if self.discovery:
             self.discovery.stop()
-        with self._lock:
-            jobs = list(self._jobs.values())
-        for job in jobs:
-            if not job.finished:
-                self.cancel_job(job.id, job.owner, quiet=True)
+        self._end_unfinished()
         self._executor.shutdown(wait=False, cancel_futures=True)
+
+    def _end_unfinished(self) -> None:
+        """Shutting down: end what's under way, say so in history, tell the senders' receivers."""
+        closed = "Open Transfer was closed before it finished."
+        now = time.monotonic()
+        tells = []
+        with self._lock:
+            jobs = [j for j in self._jobs.values() if not j.finished]
+            sessions = [s for s in self._incoming.values() if s.state not in FINAL]
+        for job in jobs:
+            job.canceled, job.finished = True, now
+            for d in job.deliveries.values():
+                if d.view_state() in FINAL:
+                    continue
+                if d.session is None and d.peer is not None and d.remote_id:
+                    tells.append(threading.Thread(
+                        target=self._tell_canceled, args=(d.peer, d.remote_id, d.remote_secret), daemon=True
+                    ))  # fmt: skip
+                d.canceled, d.state = True, CANCELED
+                d.reason = f"{closed} Choose the files again to send them."
+        for session in sessions:
+            session.state, session.reason, session.finished = CANCELED, closed, now
+        self._record_finished()
+        for thread in tells:  # the thread pool is going: tell them here, briefly
+            thread.start()
+        deadline = time.monotonic() + 1.5
+        for thread in tells:
+            thread.join(max(0.0, deadline - time.monotonic()))
+
+    def _tell_canceled(self, peer: Peer, remote_id: str, secret: str) -> None:
+        with contextlib.suppress(OSError):
+            self._http(
+                peer,
+                "DELETE",
+                f"{P2P}/offers/{remote_id}",
+                headers={"X-OT-Secret": secret},
+                timeout=1.0,
+            )
 
     def add_listener(self, listener: Listener) -> None:
         """Get told about ``"offer"`` and ``"received"`` events (desktop/Android notifications)."""
@@ -1427,6 +1464,7 @@ class Mesh:
         enc_salt: bytes = b"",
         enc_base: bytes = b"",
         enc_auth: bool = False,
+        retry: bool = False,
     ) -> IncomingSession:
         """Someone wants to send ``files`` to ``target`` (our owner or a visitor)."""
         clean = _clean_files(files)
@@ -1461,6 +1499,7 @@ class Mesh:
             enc_salt=enc_salt,
             enc_base=enc_base,
             enc_auth=enc_auth,
+            retry=retry,
         )
         store = self.storage if owner_target else self.inbox(target)
         for f in session.files:
@@ -1472,7 +1511,8 @@ class Mesh:
         if problem:
             session.state, session.reason, session.finished = DECLINED, problem, time.monotonic()
         elif owner_target and (self.config.auto_accept or paired):
-            self._accept(session)
+            # Keep both, as when asked; but a retry mustn't save what arrived the first time again.
+            self._accept(session, "skip" if retry else "rename")
         with self._lock:
             live = [s for s in self._incoming.values() if s.state not in FINAL]
             if len(live) >= MAX_INCOMING:
@@ -1575,10 +1615,19 @@ class Mesh:
             return "Not enough free space on the receiving device."
         return ""
 
-    def _accept(self, session: IncomingSession) -> None:
-        session.state = ACCEPTED
+    def _accept(self, session: IncomingSession, duplicates: str = "rename") -> None:
+        session.on_duplicate = duplicates
+        # Files first, the session's state last: a sender polling the
+        # offer must never see "accepted" without what it can skip.
         for f in session.files:
             f.state = "waiting"
+            if duplicates == "skip" and f.duplicate:
+                f.state, f.skipped = DONE, True
+                f.saved_name, f.received = f.name, f.size
+        if all(f.skipped for f in session.files):
+            self._maybe_finish(session)
+        else:
+            session.state = ACCEPTED
 
     def decide(
         self, session_id: str, viewer: Viewer, accept: bool, *, duplicates: str = "rename"
@@ -1593,18 +1642,7 @@ class Mesh:
                 problem = self._space_problem(session)
                 if problem:
                     raise MeshError(507, "insufficient_storage", problem)
-                session.on_duplicate = duplicates
-                # Files first, the session's state last: a sender polling the
-                # offer must never see "accepted" without what it can skip.
-                for f in session.files:
-                    f.state = "waiting"
-                    if duplicates == "skip" and f.duplicate:
-                        f.state, f.skipped = DONE, True
-                        f.saved_name, f.received = f.name, f.size
-                if all(f.skipped for f in session.files):
-                    self._maybe_finish(session)
-                else:
-                    session.state = ACCEPTED
+                self._accept(session, duplicates)
             else:
                 session.state, session.finished = DECLINED, time.monotonic()
                 session.reason = "Declined"
@@ -1787,7 +1825,14 @@ class Mesh:
 
     # ----------------------------------------------------------- outgoing
 
-    def create_job(self, viewer: Viewer, targets: list[str], files: list[dict[str, Any]]) -> Job:
+    def create_job(
+        self,
+        viewer: Viewer,
+        targets: list[str],
+        files: list[dict[str, Any]],
+        *,
+        retry: bool = False,
+    ) -> Job:
         clean = _clean_files(files)
         targets = list(dict.fromkeys(t for t in targets if isinstance(t, str)))
         if not targets:
@@ -1804,6 +1849,7 @@ class Mesh:
             origin=origin,
             files=[{"name": f.name, "size": f.size, "mime": f.mime} for f in clean],
             deliveries=deliveries,
+            retry=retry,
         )
         with self._lock:
             self._jobs[job.id] = job
@@ -1873,6 +1919,7 @@ class Mesh:
                 paired=viewer.trusted and target_id == self.id,
                 local=True,
                 job=job.id,
+                retry=job.retry,
             )
         except MeshError as exc:
             delivery.state, delivery.reason = FAILED, str(exc)
@@ -1886,6 +1933,7 @@ class Mesh:
             "to": target_id,
             "files": job.files,
             "job": job.id,
+            "retry": job.retry,
         }
         trusted = self.trust.get(peer.id)
         # Every app that encrypts advertises its per-run key: a handshake to it, keyed by
@@ -2225,6 +2273,7 @@ class Mesh:
         if index in job.relayed:  # a resumed upload re-sending a piece: already done
             return dict(job.relayed[index])
         job.started = job.started or time.monotonic()
+        job.active = time.monotonic()
         size = int(job.files[index]["size"])
         name = str(job.files[index].get("name", "file"))
         if len(data) > MAX_CHUNK_BYTES:
@@ -2752,7 +2801,7 @@ class Mesh:
         files = [
             {"name": f["name"], "size": f["size"], "mime": f.get("mime", "")} for f in job.files
         ]
-        return self.create_job(viewer, ids, files)
+        return self.create_job(viewer, ids, files, retry=True)
 
     # ------------------------------------------------- direct (browser↔browser)
     #
@@ -2966,6 +3015,7 @@ class Mesh:
             delivery.direct = False  # the files go the usual way instead
         elif state == "progress":
             delivery.sent = max(delivery.sent, int(sent))
+            job.active = time.monotonic()
         elif state == "done":
             delivery.sent = sum(int(f["size"]) for f in job.files)
             delivery.files_done = set(range(len(job.files)))
@@ -3042,27 +3092,64 @@ class Mesh:
                         f"{sender} stopped sending.",
                         now,
                     )
+        # Our own sends: the page (window) does the uploading, so when it's closed
+        # mid-way nothing else would ever end them. Same limits as the receiver's.
+        for job in self._jobs_snapshot():
+            idle = now - max(job.created, job.active)
+            for d in job.deliveries.values():
+                if d.session is not None or d.view_state() not in {ACCEPTED, "sending"}:
+                    continue
+                if d.sent == 0 and idle > OFFER_TTL * 2:
+                    reason = "Nothing was sent: the window sending it closed. Choose the files again to send them."
+                elif d.sent and idle > RECEIVE_IDLE:
+                    reason = "Stopped partway: the window sending it closed. Choose the files again to send them."
+                else:
+                    continue
+                self._cancel_delivery(d)  # tells the receiver
+                d.canceled, d.state, d.reason = False, FAILED, reason  # failed, not canceled by you
+            if not job.finished and all(d.view_state() in FINAL for d in job.deliveries.values()):
+                job.finished = now
+        # Finished a while ago: out of the lists, and the pieces they staged go too.
+        with self._lock:
+            sessions = [
+                s for s in self._incoming.values()
+                if s.state in FINAL and now - s.finished > FINISHED_KEEP
+            ]  # fmt: skip
+            for s in sessions:
+                del self._incoming[s.id]
+            jobs = {
+                k for k, j in self._jobs.items() if j.finished and now - j.finished > FINISHED_KEEP
+            }
+            for k in jobs:
+                del self._jobs[k]
+            relayed = [u for u, m in self._relay_meta.items() if m.get("job_id") in jobs]
+            for u in relayed:
+                del self._relay_meta[u]
+            stores = {
+                s.id: self.storage if s.target == self.id else self._inboxes.get(s.target)
+                for s in sessions
+            }
+        for s in sessions:
+            store = stores[s.id]
+            for i in range(len(s.files) if store else 0):
+                store.chunks.discard(_incoming_chunk_key(s.id, i))  # type: ignore[union-attr]
+        for u in relayed:
+            self._relay_chunks.discard(u)
 
     def _housekeeping(self) -> None:
         last_hello = 0.0
         last_network = -1e9
         last_lan = time.monotonic()  # the first look waits a little: multicast goes first
+        last_sweep = -1e9
         manual_known: dict[str, float] = {}
         while not self._stop.wait(2.0):
             now = time.monotonic()
             self._expire_sessions(now)
+            if now - last_sweep >= 3600:  # staged pieces a crash left behind
+                last_sweep = now
+                self.storage.chunks.cleanup()
+                self._relay_chunks.cleanup()
             with self._lock:
-                for key in [
-                    k for k, s in self._incoming.items()
-                    if s.state in FINAL and now - s.finished > FINISHED_KEEP
-                ]:  # fmt: skip
-                    del self._incoming[key]
-                for key in [
-                    k
-                    for k, j in self._jobs.items()
-                    if j.finished and now - j.finished > FINISHED_KEEP
-                ]:
-                    del self._jobs[key]
                 for key in [
                     k for k, p in self._peers.items()
                     if now - p.last_seen > PEER_FORGET and not self.trust.get(k) and not p.manual
@@ -3186,6 +3273,7 @@ class Mesh:
                     "id": str(session.origin.get("id", "")),
                     "name": str(session.origin.get("name", "")),
                     "status": session.state,
+                    **({"reason": session.reason} if session.reason else {}),
                 }
             ],
             "speed": round(session.total / took) if took > 0 and session.state == DONE else 0,
@@ -3274,6 +3362,7 @@ class Mesh:
             "security": self._session_security(s),
             "state": s.state,
             "reason": s.reason,
+            "retry": s.retry,
             "total": s.total,
             "received": s.received,
             "files": [
@@ -3580,6 +3669,7 @@ class _Sink:
 
     def _count(self, n: int) -> None:
         self.delivery.sent += n
+        self.job.active = time.monotonic()
 
     def start(self) -> None:
         if self.delivery.session is None:
