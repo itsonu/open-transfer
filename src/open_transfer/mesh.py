@@ -105,6 +105,7 @@ FINISHED_KEEP = 90.0  # finished transfers stay in the UI this long
 PAIR_CODE_TTL = 600.0
 PAIR_WINDOW = 30.0  # a code works this long after the Add device page last renewed it
 STALL_TIMEOUT = 60.0  # a receiver that takes no data for this long is dropped
+RECEIVE_IDLE = 600.0  # an incoming transfer with no new bytes for this long has stalled
 CHUNK = 256 * 1024
 MAX_FILES = 1000
 MAX_VISITORS = 500
@@ -239,6 +240,7 @@ class IncomingSession:
     job: str = ""  # the sender's job id (to route direct-transfer signals back)
     sender_node: str = ""  # app that made the offer ("" when local)
     started: float = 0.0  # when the first byte arrived (for the speed in history)
+    active: float = 0.0  # when the last byte arrived (a stall is counted from it)
     recorded: bool = False  # written to history
     on_duplicate: str = "rename"  # files already here: "rename" (keep both), "skip" or "replace"
     enc_salt: bytes = field(default=b"", repr=False)  # ot-file/2: only encrypted bytes accepted
@@ -1688,6 +1690,7 @@ class Mesh:
 
         def count(n: int) -> None:
             item.received += n
+            session.active = time.monotonic()
 
         if cipher is not None:  # every 64 KiB record is authenticated before it's written
             stream = filecrypt.Decrypting(stream, cipher)
@@ -2544,6 +2547,7 @@ class Mesh:
             item.state = RECEIVING
             session.state = RECEIVING
             session.started = session.started or time.monotonic()
+            session.active = time.monotonic()
         if cipher is not None:
             try:
                 data = cipher.decrypt_range(offset, data)
@@ -2986,7 +2990,7 @@ class Mesh:
             if item.state == DONE:
                 return
             item.received = max(0, min(item.size, int(received)))
-            session.state = RECEIVING
+            session.state, session.active = RECEIVING, time.monotonic()
             if done:
                 item.state, item.received, item.direct = DONE, item.size, True
                 item.saved_name = item.name
@@ -3018,6 +3022,27 @@ class Mesh:
             if not self._stop.is_set():
                 raise
 
+    def _expire_sessions(self, now: float) -> None:
+        """End incoming transfers nobody answered, or whose sender stopped."""
+        with self._lock:
+            for session in self._incoming.values():
+                sender = session.origin.get("name") or "The sender"
+                if session.state == PENDING and now - session.created > OFFER_TTL:
+                    session.state, session.reason, session.finished = EXPIRED, "No answer", now
+                elif session.state == ACCEPTED and now - session.created > OFFER_TTL * 2:
+                    # Accepted but nothing came (its window closed, say): don't leak it.
+                    session.state, session.finished = EXPIRED, now
+                    session.reason = f"{sender} didn’t start sending."
+                elif (
+                    session.state == RECEIVING
+                    and now - max(session.created, session.active) > RECEIVE_IDLE
+                ):  # measured from the last byte: a long transfer that keeps moving is fine
+                    session.state, session.reason, session.finished = (
+                        FAILED,
+                        f"{sender} stopped sending.",
+                        now,
+                    )
+
     def _housekeeping(self) -> None:
         last_hello = 0.0
         last_network = -1e9
@@ -3025,24 +3050,8 @@ class Mesh:
         manual_known: dict[str, float] = {}
         while not self._stop.wait(2.0):
             now = time.monotonic()
+            self._expire_sessions(now)
             with self._lock:
-                for session in self._incoming.values():
-                    if session.state == PENDING and now - session.created > OFFER_TTL:
-                        session.state, session.reason, session.finished = EXPIRED, "No answer", now
-                    elif session.state == ACCEPTED and now - session.created > OFFER_TTL * 2:
-                        # Accepted but sender never started uploading: don't leak it.
-                        session.state, session.reason, session.finished = (
-                            EXPIRED,
-                            "No answer",
-                            now,
-                        )
-                    elif session.state == RECEIVING and now - session.created > 3600:
-                        # Stalled mid-transfer (sender vanished after ACCEPTED).
-                        session.state, session.reason, session.finished = (
-                            FAILED,
-                            "Transfer stalled.",
-                            now,
-                        )
                 for key in [
                     k for k, s in self._incoming.items()
                     if s.state in FINAL and now - s.finished > FINISHED_KEEP

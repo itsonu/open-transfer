@@ -48,6 +48,7 @@ All notable changes are documented here. The format follows [Keep a Changelog](h
 - Android: the background service runs as a *connected device* service, so Android 15+ no longer stops it after about 6 hours a day.
 
 ### Fixed
+- **A long transfer was cut off after an hour.** The receiver failed any transfer an hour after it was offered, however fast it was still going (a 10 GB video at 2 MB/s needs about 83 minutes). A transfer now fails only after 10 minutes without a new byte, saying “*Sender* stopped sending.” One that was accepted but never started now says “*Sender* didn’t start sending.” instead of “No answer”.
 - **Android: a copied photo was sent as its `content://…` address.** Clipboard sync and *Send what you copied* turned a copied image or file into text; copied images are now sent as images, and clipboard sync skips them (it carries text and links).
 - Between unpaired apps, a transfer right after the other app's multicast announcement could go unencrypted: the announcement made the app forget the other's key.
 - With `--https`, a device whose name made the certificate's name longer than 64 characters couldn't start, and the half-started app never exited.
