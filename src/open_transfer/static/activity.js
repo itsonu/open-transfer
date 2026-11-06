@@ -138,7 +138,9 @@ function row(e, thumbs) {
   const title = clip ? `Clipboard · ${e.title}` : e.title;
   const sent = e.direction === "sent";
   const line = h("div", { class: "history-head" }, h("span", { class: "row-title", title }, title), who(e) && h("span", { class: "history-who" }, who(e)));
-  const main = h("div", { class: "row-main" }, line, h("span", { class: "row-sub" }, sub));
+  const main = h("div", { class: "row-main" }, line);
+  if (e.names?.length) main.append(h("span", { class: "history-names", title: e.names.join("\n") }, e.names.join(", ")));
+  main.append(h("span", { class: "row-sub" }, sub));
   // Who didn't get it, and why (the badge alone doesn't say what to do next).
   const missed = (e.devices || []).filter((d) => d.status && d.status !== "done");
   if (e.status !== "done" && missed.length) {

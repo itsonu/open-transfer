@@ -217,7 +217,8 @@ def test_activity_says_who_didnt_get_it_and_why(tmp_path: Path, page) -> None:  
     state.mkdir(parents=True)
     now = time.time()
     group = {"id": "h-1", "at": now, "kind": "transfer", "direction": "sent", "title": "2 files",
-             "files": 2, "size": 10, "status": "partial", "devices": [
+             "files": 2, "size": 10, "status": "partial", "names": ["Sunset.png", "Boarding pass.pdf"],
+             "devices": [
                  {"id": "d-b", "name": "Pixel", "status": "done"},
                  {"id": "d-c", "name": "Galaxy Tab", "status": "declined", "reason": "Declined"},
                  {"id": "d-d", "name": "PC", "status": "failed",
@@ -242,6 +243,10 @@ def test_activity_says_who_didnt_get_it_and_why(tmp_path: Path, page) -> None:  
         page.goto(server.url)
         row = page.locator(".history-row", has_text="2 files")
         expect(row.locator(".history-dir")).to_have_text("Partly sent")
+        expect(row.locator(".history-names")).to_have_text("Sunset.png, Boarding pass.pdf")
+        page.fill("#history-search", "boarding")  # a file inside it finds it
+        expect(page.locator(".history-row")).to_have_count(1)
+        page.fill("#history-search", "")
         why = row.locator(".history-why")
         expect(why).to_contain_text("Galaxy Tab: Declined")
         expect(why).to_contain_text(

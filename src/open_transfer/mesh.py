@@ -3249,6 +3249,7 @@ class Mesh:
             "direction": "sent",
             "title": _title(job.files),
             "files": len(job.files),
+            **_names(job.files),
             "size": total,
             "status": status,
             "devices": devices,
@@ -3266,6 +3267,7 @@ class Mesh:
             "direction": "received",
             "title": _title(files),
             "files": len(files),
+            **_names(files),
             "size": session.total,
             "status": session.state,
             "devices": [
@@ -3533,6 +3535,11 @@ def _all_skipped(data: dict[str, Any]) -> bool:
 
 def _title(files: list[dict[str, Any]]) -> str:
     return str(files[0].get("name", "file")) if len(files) == 1 else f"{len(files)} files"
+
+
+def _names(files: list[dict[str, Any]]) -> dict[str, list[str]]:
+    """What a "3 files" entry held, so History can show it and find it (the first 100)."""
+    return {"names": [str(f.get("name", "file")) for f in files[:100]]} if len(files) > 1 else {}
 
 
 # How well a transfer is protected: the weakest hop it crossed (docs/encryption.md, "Coverage").

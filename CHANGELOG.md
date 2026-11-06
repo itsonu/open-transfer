@@ -49,6 +49,7 @@ All notable changes are documented here. The format follows [Keep a Changelog](h
 - Android: the background service runs as a *connected device* service, so Android 15+ no longer stops it after about 6 hours a day.
 
 ### Fixed
+- **History forgot what was in a multi-file transfer** (it said only “3 files”), so a file sent with others couldn't be found by name. Entries now keep the names (the first 100): Activity lists them and search finds the transfer by any of them.
 - **Reloading or closing the page dropped files you'd chosen but not sent yet** (and sends waiting in the queue) without a word. It now asks first, as it already did while a send was running.
 - **Several texts sent in the same minute all read “note-2026-…-1333.txt”**, so they couldn't be told apart in Transfers, the queue or Activity. A text is now named after its first words (“Gate code 4411.txt”) and an address after its site (“Link example.com.txt”, as Android does).
 - **A declined send, or one that couldn't reach its device, showed “Direct · encrypted, not verified” / “not encrypted”** though nothing had crossed the network; that label now appears only once something was sent.

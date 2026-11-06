@@ -2410,6 +2410,7 @@ body.has-send-bar .toasts {
   color: var(--success);
 }
 
+.history-names,
 .history-why {
   overflow: hidden;
   color: var(--text-2);
