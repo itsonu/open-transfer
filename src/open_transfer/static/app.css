@@ -2410,6 +2410,14 @@ body.has-send-bar .toasts {
   color: var(--success);
 }
 
+.history-why {
+  overflow: hidden;
+  color: var(--text-2);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .history-dir[data-dir="failed"] {
   background: var(--danger-soft);
   color: var(--danger);

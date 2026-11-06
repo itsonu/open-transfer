@@ -198,10 +198,58 @@ def test_the_badge_says_what_happened_not_only_which_way(tmp_path: Path, page) -
         badge = lambda title: page.locator(".history-row", has_text=title).locator(".history-dir")  # noqa: E731
         expect(badge("got.txt")).to_have_text("Received")
         expect(badge("sent.txt")).to_have_text("Sent")
-        expect(badge("never.txt")).to_have_text("No answer")  # not a green "Received"
+        expect(badge("never.txt")).to_have_text("Not received")  # not a green "Received"
         expect(badge("broke.bin")).to_have_text("Failed")
         expect(badge("broke.bin")).to_have_attribute("data-dir", "failed")
         expect(badge("refused.txt")).to_have_text("Declined")
+    finally:
+        for _ in gen:
+            pass
+
+
+def test_activity_says_who_didnt_get_it_and_why(tmp_path: Path, page) -> None:  # type: ignore[no-untyped-def]
+    import json
+    import time
+
+    from tests.e2e.test_ui import _start
+
+    state = tmp_path / "Mac" / ".open-transfer"
+    state.mkdir(parents=True)
+    now = time.time()
+    group = {"id": "h-1", "at": now, "kind": "transfer", "direction": "sent", "title": "2 files",
+             "files": 2, "size": 10, "status": "partial", "devices": [
+                 {"id": "d-b", "name": "Pixel", "status": "done"},
+                 {"id": "d-c", "name": "Galaxy Tab", "status": "declined", "reason": "Declined"},
+                 {"id": "d-d", "name": "PC", "status": "failed",
+                  "reason": "Nothing was sent: the window sending it closed. Choose the files again to send them."},
+             ]}  # fmt: skip
+    whole = {"id": "h-2", "at": now - 5, "kind": "transfer", "direction": "sent", "title": "ok.txt",
+             "files": 1, "size": 10, "status": "done",
+             "devices": [{"id": "d-b", "name": "Pixel", "status": "done"}]}  # fmt: skip
+    late = {"id": "h-3", "at": now - 9, "kind": "transfer", "direction": "received", "title": "late.txt",
+            "files": 1, "size": 10, "status": "expired", "devices": [
+                {"id": "d-m", "name": "Studio Mac", "status": "expired",
+                 "reason": "Studio Mac didn’t start sending."}]}  # fmt: skip
+    (state / "history.jsonl").write_text(
+        "".join(json.dumps(e) + "\n" for e in (late, whole, group))
+    )
+    gen = _start(tmp_path, name="Mac", owner=True)
+    server = next(gen)
+    try:
+        page.goto(server.url)
+        row = page.locator(".history-row", has_text="2 files")
+        expect(row.locator(".history-dir")).to_have_text("Partly sent")
+        why = row.locator(".history-why")
+        expect(why).to_contain_text("Galaxy Tab: Declined")
+        expect(why).to_contain_text(
+            "PC: Nothing was sent: the window sending it closed. Choose the files again"
+        )
+        expect(why).not_to_contain_text("Pixel")  # it got them
+        mine = page.locator(".history-row", has_text="late.txt").locator(".history-why")
+        expect(mine).to_have_text("Studio Mac didn’t start sending.")  # its name once
+        expect(
+            page.locator(".history-row", has_text="ok.txt").locator(".history-why")
+        ).to_have_count(0)
     finally:
         for _ in gen:
             pass
