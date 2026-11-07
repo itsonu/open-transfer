@@ -61,6 +61,42 @@ Then do the rest by hand: everything marked 👤 in the results file, which are 
 on-screen parts below (prompts, the 🔗 badge, the QR camera, drag and drop,
 confirmation dialog, notifications, Wi‑Fi off/on, browsers, Windows ↔ Mac).
 
+## Run on real hardware by automation (2026-11-07)
+
+Real devices on one home Wi‑Fi, driven by a script (no person at the screens). It
+fills in some rows below but **is not a substitute for them**: nobody looked at a
+desktop window, a firewall prompt or the phone while it ran (the phone's screen was
+read back with `uiautomator` and screenshots).
+
+**Devices:** Mac (Python app from this branch, 3f76631) · Windows 11 laptop
+(`open-transfer-windows-x64-cli.exe` from CI 52fcf8e, driven over SSH; firewall
+rules for TCP 5000 / UDP 47823 added by hand) · Android phone (APK from CI 52fcf8e,
+over adb). The second phone was never connected.
+
+| Workflow | Result |
+|---|---|
+| Mac → phone (5 MB); phone → Windows (30 MB); Mac → Windows + phone (group, 150 MB) | ✅ byte for byte; phone memory 238–268 MB during the group send |
+| Phone declines; offer left for 2 min | ✅ both sides *Declined*; phone shows *No answer* |
+| Group with one decline, then **Retry** | ✅ the retry asks only the device that didn't get it |
+| Link/text to the phone | ✅ saved as “Gate code 4411, see.txt” |
+| **Accept** on the Android notification | ✅ transfer starts without opening the app |
+| Windows app killed mid-receive, then Retry | ✅ Mac: *Lost connection to Maya laptop.* within 1 s; retry delivers |
+| Phone app force-stopped mid-receive | ✅ Mac: *Lost connection to Nirakara.* within 0.5 s |
+| Phone app force-stopped mid-send | ✅ Mac names it at once |
+| Mac app stopped (SIGTERM) mid-send to Windows + phone | ❌ → fixed in 3f76631 (it died without telling anyone); now both: *Canceled by the sender* within 1.3 s, Mac history *Canceled* |
+| Pair by code, then send | ✅ encrypted, *verified*, in the phone's history |
+| 2 of 3 photos arrive, then Retry | ✅ only the third is sent again (*Skip* offered) |
+| 1 GB Mac → phone | ✅ 18 MB/s, phone memory 252–278 MB, progress every 3 s |
+| Phone Activity list (screenshots) | ✅ every ending above shown with its reason; received multi-file sends list their names |
+| Windows installer (`/S`) | ✅ installs silently |
+
+**Still for a person:** the Windows **desktop window** and its firewall prompt,
+Windows as the **sender**, the tablet/second phone, real Wi‑Fi off/on (6.1, 11.5),
+hotspots (§8), the share sheet (§9), lock-screen and Doze behaviour, iPhone (§5).
+The phone build predates 3f76631, so it still says “1 file(s) failed” where the next
+build says *Lost connection to …*. A killed app has no history row of its own
+(nothing ran to write it); the other side records it.
+
 ## By hand
 
 Copy the tables into an issue and fill in ✅ / ❌ (+ a note or screenshot for ❌).
