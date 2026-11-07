@@ -68,10 +68,12 @@ fills in some rows below but **is not a substitute for them**: nobody looked at 
 desktop window, a firewall prompt or the phone while it ran (the phone's screen was
 read back with `uiautomator` and screenshots).
 
-**Devices:** Mac (Python app from this branch, 3f76631) · Windows 11 laptop
+**Devices:** Mac (Python app from this branch, 3f76631; 4cc2999 for the Windows-sender runs) · Windows 11 laptop
 (`open-transfer-windows-x64-cli.exe` from CI 52fcf8e, driven over SSH; firewall
 rules for TCP 5000 / UDP 47823 added by hand) · Android phone (APK from CI 52fcf8e,
-over adb). The second phone was never connected.
+over adb) · second phone, a Redmi 6A on Android 9 (32-bit), which can't install the app
+(it needs Android 10 and 64-bit), so it ran the **browser path**: Chrome 138 driven over adb
+and its DevTools socket.
 
 | Workflow | Result |
 |---|---|
@@ -89,10 +91,19 @@ over adb). The second phone was never connected.
 | 1 GB Mac → phone | ✅ 18 MB/s, phone memory 252–278 MB, progress every 3 s |
 | Phone Activity list (screenshots) | ✅ every ending above shown with its reason; received multi-file sends list their names |
 | Windows installer (`/S`) | ✅ installs silently |
+| **Phone 2's browser** opens the Mac's address (5.1 without the camera) | ✅ the page loads in about 10 s the first time; lists the Mac and phone 1; it's shown as *Android phone · Connected through Studio Mac (test)* |
+| Mac → phone 2's browser (3 MB) | ✅ prompt *Studio Mac (test) wants to send you a file*, **Accept** → *Received … Save*; still under **Sent to you** after Chrome reloaded the tab. **Save** not tapped: Chrome would ask Android for storage access |
+| Phone 2's browser → Mac (2 MB; the file given to the page as the picker would, so the Android picker itself wasn't used) | ✅ byte for byte in 4 s, *Via this device · Delivered* |
+| Phone 2's browser → a browser on the Mac (5.3) | ✅ went straight between the browsers (*in this browser — save it* on the receiver). ❌→✅ The sender's Activity didn't list it: fixed, re-run on the phone after the fix and listed |
+| **Windows as sender** (CLI): to phone, to Mac (30 MB each), to both with the phone declining | ✅ byte for byte; group recorded *Partly sent* with “Nirakara: Declined” |
+| **Windows desktop app** (installed build, opened in the logged-in session, screen captured) | ✅ window shows the device and nearby devices; sends to the phone, receives from it (paired: no prompt) and from the Mac (prompt *wants to send you a file … Expires in 1:54*, accepted); Activity lists all three. No firewall prompt (already allowed). ⚠️ On this 1080p screen at 125 % the window (1400×1000 px) opens at (192, 192), so its bottom 172 px sit behind the taskbar; everything is reachable by scrolling |
+| **Android share sheet**: a photo, then text | ✅ Open Transfer is in the sheet; the app opens with the photo ready (“Tap the devices to send to”); tap the Mac, **Send** → arrives byte for byte. Text: **Open Transfer** and **Send to my devices** both listed; via Open Transfer it arrives as “Shared text 2026-11-07 09.23.15.txt” with the text intact |
 
-**Still for a person:** the Windows **desktop window** and its firewall prompt,
-Windows as the **sender**, the tablet/second phone, real Wi‑Fi off/on (6.1, 11.5),
-hotspots (§8), the share sheet (§9), lock-screen and Doze behaviour, iPhone (§5).
+**Still for a person:** answering a Windows firewall prompt on a PC that never allowed the app,
+the tablet, real Wi‑Fi off/on (6.1, 11.5), hotspots (§8), sharing from
+Photos/Files themselves (the sheet was opened with a test share), lock-screen and Doze
+behaviour, iPhone (§5), and on phone 2: the camera scan, **Save** to Downloads and the
+Android file picker.
 The phone build predates 3f76631, so it still says “1 file(s) failed” where the next
 build says *Lost connection to …*. A killed app has no history row of its own
 (nothing ran to write it); the other side records it.
@@ -148,7 +159,7 @@ sides, the file opens correctly afterwards, and it's in **Downloads/Open Transfe
 several photos and a video together, then a PDF from Files: **Open Transfer** is in
 the list each time; the app opens with them ready to send ("N files ready — choose
 who to send to"); tap a device and **Send**; they arrive intact. Sharing *text*
-shows only **Send to my devices** (not Open Transfer twice). Sharing a `.txt` file
+shows **Open Transfer** (choose who gets it) and **Send to my devices** (every device). Sharing a `.txt` file
 from Files sends the file, not the clipboard.
 
 ## 4. One-to-one, one-to-many, everyone
