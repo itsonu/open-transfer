@@ -188,3 +188,25 @@ def test_standalone_app_waits_before_closing_on_error(
     assert cli.main(["--pin", "1", "--no-browser"]) == 2
     assert prompts
     assert "Press Enter" in prompts[0]
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="SIGTERM is POSIX")
+def test_terminating_the_server_shuts_it_down_cleanly(tmp_path: Path) -> None:
+    # `kill`, `systemctl stop` and `docker stop` send SIGTERM: it must quit as Ctrl+C
+    # does, so unfinished transfers are recorded and the other side is told.
+    import signal
+    import subprocess
+
+    server = subprocess.Popen(
+        [sys.executable, "-m", "open_transfer", str(tmp_path), "--port", "0", "--no-browser",
+         "--no-qr", "--no-discovery"],
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+    )  # fmt: skip
+    assert server.stdout is not None
+    for line in server.stdout:
+        if "Press Ctrl+C" in line:
+            break
+    server.send_signal(signal.SIGTERM)
+    out, _ = server.communicate(timeout=20)
+    assert server.returncode == 0
+    assert "Stopped sharing" in out

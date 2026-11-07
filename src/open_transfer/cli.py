@@ -7,6 +7,7 @@ import contextlib
 import logging
 import os
 import secrets
+import signal
 import sys
 import threading
 import webbrowser
@@ -370,21 +371,23 @@ def _run(argv: Sequence[str] | None) -> int:
     if port != config.port and config.port:
         print(style.yellow(f"\n  Port {config.port} is busy, using {port} instead."))
     node.start_mesh()
-
-    _print_banner(
-        config,
-        port,
-        style,
-        show_qr=not (args.no_qr or env_bool("NO_QR")),
-        name=node.mesh.identity.name,
-        discovery=bool(node.mesh.discovery and node.mesh.discovery.working),
-    )
-    if not (args.no_browser or env_bool("NO_BROWSER")):
-        threading.Timer(0.4, webbrowser.open, args=(f"http://localhost:{port}",)).start()
-
-    lock.write_info(port)
+    signal.signal(signal.SIGTERM, signal.default_int_handler)  # kill, docker stop: as Ctrl+C
     with contextlib.suppress(KeyboardInterrupt):  # Ctrl+C is the normal way to stop
-        node.serve_forever()
+        try:
+            _print_banner(
+                config,
+                port,
+                style,
+                show_qr=not (args.no_qr or env_bool("NO_QR")),
+                name=node.mesh.identity.name,
+                discovery=bool(node.mesh.discovery and node.mesh.discovery.working),
+            )
+            if not (args.no_browser or env_bool("NO_BROWSER")):
+                threading.Timer(0.4, webbrowser.open, args=(f"http://localhost:{port}",)).start()
+            lock.write_info(port)
+            node.serve_forever()
+        finally:
+            node.stop()  # also when stopped before it began serving
     lock.release()
     print("\n  " + style.dim("Stopped sharing. Your files are still in ") + str(config.storage_dir))
     return 0

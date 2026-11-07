@@ -1748,7 +1748,7 @@ class Mesh:
                     self._damaged(session)
                     if damaged
                     else str(exc)
-                    if isinstance(exc, StorageError)
+                    if isinstance(exc, StorageError) and not isinstance(exc, IncompleteUpload)
                     else "Interrupted"
                 )
                 self._maybe_finish(session)
@@ -1821,6 +1821,9 @@ class Mesh:
             failed = sum(f.state == FAILED for f in session.files)
             session.state = FAILED if failed == len(session.files) else DONE
             session.reason = f"{failed} file(s) failed" if failed else ""
+            if failed and {f.error for f in session.files if f.state == FAILED} == {"Interrupted"}:
+                sender = session.origin.get("name") or "the sender"
+                session.reason = f"Lost connection to {sender}."  # it quit or dropped off
             session.finished = time.monotonic()
 
     # ----------------------------------------------------------- outgoing

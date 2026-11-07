@@ -56,6 +56,22 @@ def test_a_transfer_that_stops_moving_fails_and_says_who(make_node: NodeFactory)
     assert quiet.reason == "Studio Mac stopped sending."
 
 
+def test_a_transfer_cut_off_midway_says_who_went_away(make_node: NodeFactory) -> None:
+    import io
+
+    import pytest
+
+    from open_transfer.mesh import IncomingFile
+
+    node = make_node("Tab")
+    s = session(node, ACCEPTED, created=time.monotonic())
+    s.files = [IncomingFile("movie.mov", 1000, "video/quicktime")]
+    with pytest.raises(Exception, match="interrupted"):  # the sender quit 400 bytes in
+        node.mesh.receive_file(s.id, 0, io.BytesIO(b"x" * 400), 1000, session=s)
+    assert s.state == FAILED
+    assert s.reason == "Lost connection to Studio Mac."  # not "1 file(s) failed"
+
+
 def test_accepted_but_nothing_sent_says_the_sender_stopped(make_node: NodeFactory) -> None:
     node = make_node("Tab")
     now = time.monotonic()

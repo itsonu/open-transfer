@@ -49,6 +49,8 @@ All notable changes are documented here. The format follows [Keep a Changelog](h
 - Android: the background service runs as a *connected device* service, so Android 15+ no longer stops it after about 6 hours a day.
 
 ### Fixed
+- **Stopping the command-line app with `kill`, `systemctl stop` or `docker stop` (SIGTERM) cut it off mid-transfer.** It now shuts down as Ctrl+C does: unfinished sends are written to Activity (“Open Transfer was closed before it finished”) and their receivers are told at once instead of seeing the transfer break. Found on a Mac, a Windows laptop and an Android phone on the same Wi‑Fi.
+- **A transfer cut off because the sender quit or dropped off said only “1 file(s) failed”** on the receiving side. It now says “Lost connection to *sender*.”, and nothing partial is kept.
 - **History forgot what was in a multi-file transfer** (it said only “3 files”), so a file sent with others couldn't be found by name. Entries now keep the names (the first 100): Activity lists them and search finds the transfer by any of them.
 - **Reloading or closing the page dropped files you'd chosen but not sent yet** (and sends waiting in the queue) without a word. It now asks first, as it already did while a send was running.
 - **Several texts sent in the same minute all read “note-2026-…-1333.txt”**, so they couldn't be told apart in Transfers, the queue or Activity. A text is now named after its first words (“Gate code 4411.txt”) and an address after its site (“Link example.com.txt”, as Android does).

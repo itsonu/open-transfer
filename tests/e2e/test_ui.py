@@ -58,8 +58,12 @@ def _start(
     try:
         yield Server(url, root, proc)
     finally:
-        proc.terminate()
-        proc.wait(timeout=10)
+        proc.terminate()  # it shuts down cleanly and says so: read its output while it does
+        try:  # up to ~10 s with a transfer under way (stuck requests get 5 s)
+            proc.communicate(timeout=30)
+        except subprocess.TimeoutExpired:
+            proc.kill()  # never leave it running into the next test, on the same port
+            proc.communicate()
 
 
 @pytest.fixture
