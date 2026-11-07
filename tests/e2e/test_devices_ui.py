@@ -367,6 +367,9 @@ def test_browsers_send_to_each_other_directly(
             expect(target).to_contain_text("Delivered directly")
         else:
             expect(target).not_to_contain_text("directly")
+        # The sender's activity lists it too, however it went.
+        sent = phone.locator("#history-list .history-row", has_text="photo.heic")
+        expect(sent).to_be_visible(timeout=10_000)
         row = ipad.locator(".file-row", has_text="photo.heic")
         expect(row).to_be_visible(timeout=10_000)
         if webrtc:

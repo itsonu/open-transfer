@@ -1009,7 +1009,8 @@ function finishJob(job, outcome) {
   job.state = "finished";
   job.finishedAt = Date.now();
   const view = serverJob(job.id);
-  const targets = view?.targets || [];
+  // Sent straight to a browser: the app's view may not say "done" yet.
+  const targets = (view?.targets || []).map((t) => effectiveTarget(job, t));
   const declined = targets.filter((t) => t.state === "declined");
   const failed = targets.filter((t) => ["failed", "expired", "canceled"].includes(t.state));
   const done = targets.filter((t) => t.state === "done");
