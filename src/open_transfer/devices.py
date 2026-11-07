@@ -233,8 +233,13 @@ class TrustStore:
         *,
         form: str = "",
         platform: str = "",
-    ) -> TrustedDevice:
-        """Trust ``device_id``; ``at`` dates the key (introductions use the introducer's time)."""
+        newer_only: bool = False,
+    ) -> TrustedDevice | None:
+        """Trust ``device_id``; ``at`` dates the key (introductions use the introducer's time).
+
+        ``newer_only``: keep the key there if its (date, key) is later, so both ends of a
+        pair settle on the same key whatever order pairing and introductions arrive in.
+        """
         device = TrustedDevice(
             device_id,
             clean_name(name),
@@ -244,6 +249,9 @@ class TrustStore:
             clean_platform(platform) if platform else "",
         )
         with self._lock:
+            old = self._devices.get(device_id)
+            if newer_only and old and (old.paired_at, old.key) >= (device.paired_at, device.key):
+                return None
             self._devices[device_id] = device
             self._locked.pop(device_id, None)
             self._save()

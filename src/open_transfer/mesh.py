@@ -973,19 +973,22 @@ class Mesh:
             self._note_pair_failure()
             raise MeshError(403, "wrong_code", "That code isn’t right.") from None
         self._pair_limiter.reset(f"pair:{client}")
+        at = time.time()  # the other side keeps the key under this date too
         self.trust.add(
             device_id,
             clean_name(info.get("name")),
             derive_pair_key(server.key or b"", self.id, device_id),
+            at,
             form=clean_form(info.get("form")),
             platform=clean_platform(info.get("platform")),
+            newer_only=True,
         )
         self._rotate_code()
         self._upsert_peer(info, client)
         self._forget_twins(device_id)
         log.info("Paired with %s", log_safe(clean_name(info.get("name"))))
         self._submit(lambda: self.sync.paired(device_id))
-        return {"m2": m2.hex()}
+        return {"m2": m2.hex(), "at": at}
 
     def pair_with(self, code: str, address: str | None = None) -> Peer:
         """Pair with the app showing ``code`` (at ``address``, or whichever has Add device open)."""
@@ -1053,12 +1056,15 @@ class Mesh:
             raise MeshError(
                 502, "pair_failed", "The other device couldn’t prove it has the code."
             ) from exc
+        at = data.get("at")  # older apps don't send it
         self.trust.add(
             peer.id,
             peer.name,
             derive_pair_key(client.key or b"", peer.id, self.id),
+            at if isinstance(at, (int, float)) and not isinstance(at, bool) else None,
             form=peer.form,
             platform=peer.platform,
+            newer_only=True,
         )
         self._forget_twins(peer.id)
         log.info("Paired with %s", log_safe(peer.name))

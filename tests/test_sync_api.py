@@ -114,6 +114,20 @@ def test_revoking_a_device_reaches_the_whole_network(trio: tuple[Node, Node, Nod
     assert clip.writes == []
 
 
+def test_an_introduction_crossing_a_pairing_by_code_leaves_one_key(
+    trio: tuple[Node, Node, Node],
+) -> None:
+    # The Pixel (showing the code) keeps its key a round trip before Windows does. An
+    # introduction dated in between won on one side only: they never agreed (CI py3.10).
+    mac, win, pixel = trio
+    pair(win, pixel)
+    at = pixel.mesh.trust.get(win.mesh.id).paired_at + 1e-5
+    for dst, other in ((pixel, win), (win, pixel)):
+        intro = mac.mesh.sync._introduction(dst.mesh.id, other.mesh.id, key=b"k" * 32, at=at)
+        dst.mesh.sync.handle(mac.mesh.id, "sync", intro.body)
+    assert win.mesh.trust.get(pixel.mesh.id).key == pixel.mesh.trust.get(win.mesh.id).key
+
+
 def test_unsigned_or_forged_sync_requests_are_refused(trio: tuple[Node, Node, Node]) -> None:
     mac, win, _pixel = trio
     stranger = Client(win.local_url)
