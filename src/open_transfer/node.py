@@ -108,9 +108,14 @@ class Node:
             threading.Thread(target=self._https.serve, name="ot-https", daemon=True).start()
 
     def serve_forever(self) -> None:
+        # Ctrl+C / SIGTERM raise in the main thread wherever it is: inside the server
+        # that can leave a lock held (stopping then waited for ever). So it waits here.
+        self._thread = threading.Thread(target=self._server.serve, name="ot-http", daemon=True)
+        self._thread.start()
         self._serve_https()
         try:
-            self._server.serve()
+            while self._thread.is_alive():
+                self._thread.join(0.5)
         finally:
             self.stop()
 

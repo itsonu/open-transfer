@@ -210,3 +210,24 @@ def test_terminating_the_server_shuts_it_down_cleanly(tmp_path: Path) -> None:
     out, _ = server.communicate(timeout=20)
     assert server.returncode == 0
     assert "Stopped sharing" in out
+
+
+def test_ctrl_c_never_lands_inside_the_web_server(tmp_path: Path) -> None:
+    # Ctrl+C / SIGTERM interrupt the main thread wherever it is. Inside cheroot that
+    # can leave a lock held, and stopping then waits for ever (~1 in 16 e2e stops).
+    import _thread
+    import threading
+
+    from open_transfer.node import Node
+
+    node = Node(Config(storage_dir=tmp_path / "share", port=0, discovery=False))
+    node.bind()
+    serve, ran_on = node._server.serve, []
+    node._server.serve = lambda: (ran_on.append(threading.current_thread()), serve())
+    threading.Timer(0.5, _thread.interrupt_main).start()  # as Ctrl+C does
+    with pytest.raises(KeyboardInterrupt):
+        node.serve_forever()
+    assert ran_on
+    assert ran_on[0] is not threading.main_thread()
+    node._thread.join(5)
+    assert not node._thread.is_alive()  # and it stopped
