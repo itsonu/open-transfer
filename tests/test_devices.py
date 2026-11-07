@@ -61,14 +61,13 @@ def test_signatures_verify_once() -> None:
     assert not checker.verify(key, "garbage", "GET", "/", "d-1", b"")
 
 
-def test_pairing_proofs_bind_code_and_both_ids() -> None:
-    args = ("a" * 32, "b" * 32, "d-" + "1" * 24, "d-" + "2" * 24)
-    assert devices.pair_proof("123456", "b", *args) == devices.pair_proof("123456", "b", *args)
-    assert devices.pair_proof("123456", "b", *args) != devices.pair_proof("123457", "b", *args)
-    assert devices.pair_proof("123456", "a", *args) != devices.pair_proof("123456", "b", *args)
-    assert devices.pair_key("123456", *args) != bytes.fromhex(
-        devices.pair_proof("123456", "b", *args)
-    )
+def test_pair_key_binds_the_session_key_and_both_ids() -> None:
+    a, b = "d-" + "1" * 24, "d-" + "2" * 24
+    key = devices.derive_pair_key(b"k" * 32, a, b)
+    assert len(key) == 32
+    assert key == devices.derive_pair_key(b"k" * 32, a, b)
+    assert key != devices.derive_pair_key(b"j" * 32, a, b)
+    assert key != devices.derive_pair_key(b"k" * 32, b, a)  # who showed the code matters
     assert len(devices.new_pair_code()) == 6
 
 

@@ -91,6 +91,12 @@ jobs:
           $installer = "$env:RUNNER_TEMP\MicrosoftEdgeWebview2Setup.exe"
           Invoke-WebRequest "https://go.microsoft.com/fwlink/p/?LinkId=2124703" -OutFile $installer
           Start-Process $installer -ArgumentList "/silent", "/install" -Wait
+      # The installer (open-transfer-windows-x64-setup.exe) is made with Inno Setup 6.
+      - name: Install Inno Setup
+        if: matrix.desktop && runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          if (-not (Test-Path "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe")) { choco install innosetup -y --no-progress }
       # Builds and smoke-tests the desktop app (macOS: makes and tests the .dmg).
       - name: Build the desktop app
         if: matrix.desktop

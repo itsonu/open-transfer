@@ -54,6 +54,10 @@ def spawn(*args: str) -> bool:
         "stderr": subprocess.DEVNULL,
         "close_fds": True,
     }
+    if is_frozen():
+        # A one-file build unpacks to a temp folder it deletes on exit: the copy must
+        # unpack its own instead of sharing ours (PyInstaller 6.9+).
+        kwargs["env"] = {**os.environ, "PYINSTALLER_RESET_ENVIRONMENT": "1"}
     if sys.platform == "win32":
         kwargs["creationflags"] = (
             subprocess.DETACHED_PROCESS  # type: ignore[attr-defined]

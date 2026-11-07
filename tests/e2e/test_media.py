@@ -64,6 +64,9 @@ def names(pg) -> list[str]:  # type: ignore[no-untyped-def]
 
 
 def test_preview_steps_through_files_and_closes(mac: Server, page) -> None:  # type: ignore[no-untyped-def]
+    page.add_init_script(
+        "Object.defineProperty(navigator, 'pdfViewerEnabled', { get: () => true })"
+    )
     page.goto(mac.url)
     row = page.locator(".file-row", has_text="beach.png")
     expect(row).to_be_visible(timeout=10_000)
@@ -87,6 +90,30 @@ def test_preview_steps_through_files_and_closes(mac: Server, page) -> None:  # t
     expect(page.locator("#preview-count")).to_have_text("5 of 5")
     page.keyboard.press("Escape")
     expect(dialog).to_be_hidden()
+
+
+def test_no_pdf_viewer_means_no_pdf_preview(mac: Server, page) -> None:  # type: ignore[no-untyped-def]
+    """Android's WebView can't show a PDF: framing one hands it to another app."""
+    page.add_init_script(
+        "Object.defineProperty(navigator, 'pdfViewerEnabled', { get: () => false })"
+    )
+    page.goto(mac.url)
+    row = page.locator(".file-row", has_text="contract.pdf")
+    expect(row).to_be_visible(timeout=10_000)
+    row.locator(".row-more").click()
+    expect(page.locator("#file-menu [role=menuitem]", has_text="Save")).to_be_visible()
+    expect(page.locator("#file-menu [role=menuitem]", has_text="Preview")).to_have_count(0)
+    page.keyboard.press("Escape")
+    # Stepping onto it from another file's preview shows Save, not a frame.
+    page.locator(".file-row", has_text="aurora.png").locator(".thumb").click()
+    title = page.locator("#preview-title")
+    for _ in range(5):
+        if title.inner_text() == "contract.pdf":
+            break
+        page.keyboard.press("ArrowRight")
+    expect(title).to_have_text("contract.pdf")
+    expect(page.locator("#preview-dialog .preview-none")).to_be_visible()
+    assert page.locator("#preview-dialog iframe").count() == 0
 
 
 def test_preview_keeps_text_as_text(mac: Server, page) -> None:  # type: ignore[no-untyped-def]
@@ -208,3 +235,71 @@ def test_quick_actions_menu_by_mouse_and_keyboard(mac: Server, browser) -> None:
         assert link.endswith("/files/beach.png"), link
     finally:
         context.close()
+
+
+# ------------------------------------------------------------------- layout
+
+
+def test_compact_drop_zone_keeps_its_text_in_one_column(mac: Server, page) -> None:  # type: ignore[no-untyped-def]
+    """With files listed the drop zone is one row: icon, then title, link, clipboard and hint."""
+    page.set_viewport_size({"width": 1280, "height": 900})
+    page.goto(mac.url)
+    zone = page.locator("#dropzone")
+    expect(zone).to_have_class(re.compile(r"\bis-compact\b"), timeout=10_000)
+    expect(page.locator("#dropzone-clipboard")).to_be_visible()
+    page.evaluate("document.querySelector('#drop-hint').textContent = 'Then choose who gets them.'")
+    icon = page.locator(".drop-icon").bounding_box()
+    lefts = {
+        sel: page.locator(sel).bounding_box()["x"]  # type: ignore[index]
+        for sel in ("#drop-title", ".drop-sub", "#dropzone-clipboard", "#drop-hint")
+    }
+    assert icon is not None
+    for sel, x in lefts.items():
+        assert icon["x"] + icon["width"] <= x <= icon["x"] + icon["width"] + 24, (sel, icon, x)
+    # The clipboard button hugs its label instead of stretching and centring it.
+    glyph = page.locator("#dropzone-clipboard .icon").bounding_box()
+    assert glyph is not None
+    assert glyph["x"] - lefts["#drop-title"] <= 24, (glyph, lefts["#drop-title"])
+
+
+def test_the_android_app_shares_a_received_file_to_other_apps(mac: Server, page) -> None:  # type: ignore[no-untyped-def]
+    # Android's WebView has no navigator.share: the app's bridge opens the system Sharesheet.
+    page.add_init_script(
+        "window.__out = []; window.OpenTransferAndroid = {"
+        " openFile() {}, shareFile(name) { window.__out.push(name); } };"
+    )
+    page.goto(mac.url)
+    row = page.locator(".file-row", has_text="notes.txt")
+    expect(row).to_be_visible(timeout=10_000)
+    row.locator(".row-more").click()
+    page.locator("#file-menu [role=menuitem]", has_text="Share…").click()
+    assert page.evaluate("window.__out") == ["notes.txt"]
+
+
+# ------------------------------------------------------- received text, links
+
+
+def test_received_text_and_links_read_in_the_list(mac: Server, page) -> None:  # type: ignore[no-untyped-def]
+    (mac.root / "Link Trip plan.txt").write_bytes(b"Trip plan\nhttps://example.com/trip?id=42")
+    (mac.root / "sneaky.txt").write_bytes(b"javascript:alert(1)")
+    (mac.root / "long.txt").write_bytes(b"https://example.com/big\n" + b"x" * 8_000)
+    page.goto(mac.url)
+
+    trip = page.locator(".file-row", has_text="Link Trip plan.txt")
+    expect(trip.locator(".row-text")).to_have_text("Trip plan")
+    link = trip.get_by_role("link", name="Open link")
+    expect(link).to_have_attribute("href", "https://example.com/trip?id=42")
+    expect(link).to_have_attribute("target", "_blank")
+    expect(link).to_have_attribute("rel", "noopener noreferrer")
+
+    notes = page.locator(".file-row", has_text="notes.txt")
+    expect(notes.locator(".row-text")).to_have_text("Gate code 4411")  # a note: its first line
+    expect(notes.get_by_role("link", name="Open link")).to_have_count(0)
+
+    sneaky = page.locator(".file-row", has_text="sneaky.txt")
+    expect(sneaky.locator(".row-text")).to_have_text("javascript:alert(1)")  # shown, never a link
+    expect(sneaky.get_by_role("link", name="Open link")).to_have_count(0)
+
+    big = page.locator(".file-row", has_text="long.txt")
+    expect(big).to_be_visible()
+    expect(big.locator(".row-text")).to_have_count(0)  # only short texts are read

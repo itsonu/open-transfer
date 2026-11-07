@@ -4,6 +4,8 @@ import android.Manifest
 import android.annotation.SuppressLint
 import android.app.DownloadManager
 import android.content.ActivityNotFoundException
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
@@ -50,6 +52,7 @@ import java.net.URL
 import java.util.Locale
 import java.util.concurrent.Callable
 import java.util.concurrent.FutureTask
+import java.util.concurrent.TimeUnit
 import kotlin.concurrent.thread
 
 /**
@@ -536,27 +539,47 @@ class MainActivity : ComponentActivity() {
 
     // ------------------------------------------------------------------ bridge
 
-    private fun openOwnFile(name: String?) {
+    /** A received file as a content:// URI other apps can be granted, with its type. */
+    private fun ownFile(name: String?): Pair<Uri, String>? {
         val safe = name?.takeIf { LocalPolicy.isSafeFileName(it) }
         if (safe == null) {
             Log.w(LOG_TAG, "Refusing to open '$name'")
-            return
+            return null
         }
         val file = File(TransferService.storageDir ?: Places.publicStorageDir(), safe)
         if (!file.isFile) {
             toast(R.string.file_missing)
-            return
+            return null
         }
         val uri = try {
             FileProvider.getUriForFile(this, "$packageName.files", file)
         } catch (e: IllegalArgumentException) {
             Log.w(LOG_TAG, "No FileProvider path for $file", e)
             toast(R.string.file_missing)
-            return
+            return null
         }
         val mime = MimeTypeMap.getSingleton()
             .getMimeTypeFromExtension(file.extension.lowercase(Locale.ROOT))
             ?: "application/octet-stream"
+        return uri to mime
+    }
+
+    private fun shareOwnFile(name: String?) {
+        val (uri, mime) = ownFile(name) ?: return
+        val send = Intent(Intent.ACTION_SEND)
+            .setType(mime)
+            .putExtra(Intent.EXTRA_STREAM, uri)
+            .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        send.clipData = ClipData.newRawUri(null, uri) // lets the chooser pass the grant on
+        try {
+            startActivity(Intent.createChooser(send, null))
+        } catch (e: ActivityNotFoundException) {
+            toast(R.string.no_app_for_file)
+        }
+    }
+
+    private fun openOwnFile(name: String?) {
+        val (uri, mime) = ownFile(name) ?: return
         val view = Intent(Intent.ACTION_VIEW)
             .setDataAndType(uri, mime)
             .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
@@ -602,6 +625,17 @@ class MainActivity : ComponentActivity() {
         )
     }
 
+    /** The clipboard's image (a content URI and its type), if one was copied. Main thread. */
+    private fun copiedImage(): Pair<Uri, String>? {
+        val clip = getSystemService(ClipboardManager::class.java)?.primaryClip ?: return null
+        val description = clip.description
+        val mime = (0 until description.mimeTypeCount)
+            .map { description.getMimeType(it) }
+            .firstOrNull { it.startsWith("image/") } ?: return null
+        val uri = (0 until clip.itemCount).firstNotNullOfOrNull { clip.getItemAt(it).uri } ?: return null
+        return uri to mime
+    }
+
     private fun toast(message: Int) {
         Toast.makeText(this, message, Toast.LENGTH_SHORT).show()
     }
@@ -616,6 +650,38 @@ class MainActivity : ComponentActivity() {
         @JavascriptInterface
         fun openFile(name: String?) {
             main.post { openOwnFile(name) }
+        }
+
+        /** The system Sharesheet for a received file (the WebView has no navigator.share). */
+        @JavascriptInterface
+        fun shareFile(name: String?) {
+            main.post { shareOwnFile(name) }
+        }
+
+        /** The clipboard's text, or "": the WebView never lets the page read it (no prompt to ask with). */
+        @JavascriptInterface
+        fun readClipboard(): String {
+            // Read on the main thread, where the focus is.
+            val read = FutureTask(Callable { ClipSync.readIfNew(this@MainActivity, force = true) })
+            main.post(read)
+            return try {
+                read.get(2, TimeUnit.SECONDS) ?: ""
+            } catch (e: Exception) {
+                ""
+            }
+        }
+
+        /** A copied image, served like a share (JSON `{url, mime, size}`), or "": text is [readClipboard]'s. */
+        @JavascriptInterface
+        fun readClipboardImage(): String {
+            val read = FutureTask(Callable { copiedImage() })
+            main.post(read)
+            val (uri, mime) = try {
+                read.get(2, TimeUnit.SECONDS)
+            } catch (e: Exception) {
+                null
+            } ?: return ""
+            return SharedFiles.copiedImage(this@MainActivity, uri, mime)
         }
 
         /** Photos and files shared from other apps since the page last asked (JSON, or ""). */

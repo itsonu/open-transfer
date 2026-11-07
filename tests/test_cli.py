@@ -54,8 +54,16 @@ def test_cli_defaults(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     assert config.storage_dir == (tmp_path / "uploads").resolve()
     assert config.pin is None
     assert config.allow_upload
-    assert config.allow_delete
+    assert not config.allow_delete  # visitors can't delete unless you opt in
     assert config.allow_browse
+
+
+def test_visitors_delete_only_when_allowed(monkeypatch: pytest.MonkeyPatch) -> None:
+    assert parse("--allow-delete").allow_delete
+    assert not parse("--allow-delete", "--no-delete").allow_delete  # the stricter one wins
+    assert not parse("--allow-delete", "--read-only").allow_delete
+    monkeypatch.setenv("OPEN_TRANSFER_ALLOW_DELETE", "1")
+    assert parse().allow_delete
 
 
 def test_cli_flags(tmp_path: Path) -> None:
@@ -110,6 +118,18 @@ def test_find_free_port_skips_busy_port() -> None:
     assert network.find_free_port("127.0.0.1", 0) > 0
 
 
+def test_a_port_held_on_every_address_isnt_free_on_one() -> None:
+    """macOS lets 127.0.0.1:P bind next to a listener on 0.0.0.0:P; the two then share it."""
+    with socket.socket() as busy:
+        if sys.platform != "win32":
+            busy.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)  # as cheroot does
+        busy.bind(("0.0.0.0", 0))
+        busy.listen()
+        port = busy.getsockname()[1]
+        assert not network.port_is_free("127.0.0.1", port)
+        assert network.find_free_port("127.0.0.1", port) != port
+
+
 def test_lan_ips_are_usable() -> None:
     for ip in network.lan_ips():
         assert not ip.startswith("127.")
@@ -120,7 +140,13 @@ def test_banner_shows_addresses_pin_and_qr(
 ) -> None:
     monkeypatch.setattr(network, "lan_ips", lambda: ["192.168.1.24"])
     config = Config(storage_dir=tmp_path, pin="4821")
+    import segno
+
+    printed: list[str] = []
+    real = segno.make
+    monkeypatch.setattr(segno, "make", lambda url, **kw: (printed.append(url), real(url, **kw))[1])
     share = cli._print_banner(config, 5001, cli._Style(False), show_qr=True)
+    assert printed == ["http://192.168.1.24:5001"]  # the QR never holds the PIN
     out = capsys.readouterr().out
     assert share == "http://192.168.1.24:5001"
     assert "http://localhost:5001" in out
@@ -162,3 +188,46 @@ def test_standalone_app_waits_before_closing_on_error(
     assert cli.main(["--pin", "1", "--no-browser"]) == 2
     assert prompts
     assert "Press Enter" in prompts[0]
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="SIGTERM is POSIX")
+def test_terminating_the_server_shuts_it_down_cleanly(tmp_path: Path) -> None:
+    # `kill`, `systemctl stop` and `docker stop` send SIGTERM: it must quit as Ctrl+C
+    # does, so unfinished transfers are recorded and the other side is told.
+    import signal
+    import subprocess
+
+    server = subprocess.Popen(
+        [sys.executable, "-m", "open_transfer", str(tmp_path), "--port", "0", "--no-browser",
+         "--no-qr", "--no-discovery"],
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+    )  # fmt: skip
+    assert server.stdout is not None
+    for line in server.stdout:
+        if "Press Ctrl+C" in line:
+            break
+    server.send_signal(signal.SIGTERM)
+    out, _ = server.communicate(timeout=20)
+    assert server.returncode == 0
+    assert "Stopped sharing" in out
+
+
+def test_ctrl_c_never_lands_inside_the_web_server(tmp_path: Path) -> None:
+    # Ctrl+C / SIGTERM interrupt the main thread wherever it is. Inside cheroot that
+    # can leave a lock held, and stopping then waits for ever (~1 in 16 e2e stops).
+    import _thread
+    import threading
+
+    from open_transfer.node import Node
+
+    node = Node(Config(storage_dir=tmp_path / "share", port=0, discovery=False))
+    node.bind()
+    serve, ran_on = node._server.serve, []
+    node._server.serve = lambda: (ran_on.append(threading.current_thread()), serve())
+    threading.Timer(0.5, _thread.interrupt_main).start()  # as Ctrl+C does
+    with pytest.raises(KeyboardInterrupt):
+        node.serve_forever()
+    assert ran_on
+    assert ran_on[0] is not threading.main_thread()
+    node._thread.join(5)
+    assert not node._thread.is_alive()  # and it stopped

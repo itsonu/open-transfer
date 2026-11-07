@@ -17,7 +17,8 @@ export function previewKind(file) {
   if (IMAGE_MIME.has(mime)) return "image";
   if (VIDEO_MIME.has(mime)) return "video";
   if (mime.startsWith("audio/")) return "audio";
-  if (mime === "application/pdf") return "pdf";
+  // Without a viewer (Android's WebView) a framed PDF is handed to another app.
+  if (mime === "application/pdf") return navigator.pdfViewerEnabled ? "pdf" : null;
   if (mime.startsWith("text/") || mime === "application/json" || mime === "application/xml" || TEXT_EXT.has(ext(file.name))) return "text";
   return null;
 }

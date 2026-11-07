@@ -43,6 +43,23 @@ def test_app_command() -> None:
     ]
 
 
+def test_the_packaged_app_starts_its_background_copy_as_a_fresh_app(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A one-file build unpacks itself to a temp folder it deletes on exit; a copy that
+    shared it kept it busy ("Failed to remove temporary directory") and ran from a
+    half-deleted folder."""
+    started: list[dict[str, Any]] = []
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    monkeypatch.setattr(
+        background.subprocess, "Popen", lambda cmd, **kw: started.append({"cmd": cmd, **kw})
+    )
+    assert background.spawn("--background")
+    env = started[0]["env"]
+    assert env["PYINSTALLER_RESET_ENVIRONMENT"] == "1"
+    assert env["PATH"] == os.environ["PATH"]  # everything else as before
+
+
 def test_macos_login_item(tmp_path: Path) -> None:
     item = background.LoginItem(
         ["/Applications/Open Transfer.app/Contents/MacOS/Open Transfer", "--background"],

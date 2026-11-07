@@ -46,12 +46,14 @@
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
-            <!-- Photos, videos and files from any app's share sheet (SharedFiles.kt).
-                 text/plain is left to ClipboardSendActivity ("Send to my devices"), which
-                 hands a shared .txt file back here. -->
+            <!-- Photos, videos, files, text and links from any app's share sheet
+                 (SharedFiles.kt): staged in the page to choose who gets them.
+                 ClipboardSendActivity ("Send to my devices") also takes text/plain: it
+                 sends to every synced device at once. -->
             <intent-filter>
                 <action android:name="android.intent.action.SEND" />
                 <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="text/plain" />
                 <data android:mimeType="image/*" />
                 <data android:mimeType="video/*" />
                 <data android:mimeType="audio/*" />
@@ -74,6 +76,10 @@
                 <data android:mimeType="*/*" />
             </intent-filter>
         </activity>
+
+        <receiver
+            android:name=".OfferActionReceiver"
+            android:exported="false" />
 
         <service
             android:name=".TransferService"

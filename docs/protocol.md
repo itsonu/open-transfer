@@ -42,19 +42,30 @@ Apps talk to each other directly. A visitor's files travel visitor → its app
 ```
 
 `type` is `announce` | `reply` | `find` | `bye`. The peer's address is the
-datagram's **source IP**, never a field in the packet. `rev` changes when the
+datagram's **source IP**, never a field in the packet. A **bye** counts at once
+only from the address we hold for that device; from any other address we say
+hello to the device there first, and it's gone only if it doesn't answer. `rev` changes when the
 app's visitors or name change, prompting others to fetch its info.
 
-**find** — "whoever is showing this pairing code, answer":
-`{"type": "find", "id": "d-…", "find": "<hint>"}` where
-`hint = sha256("open-transfer-find/1\n" + code)[:16]`. The app showing that
-code sends a `reply` with `"found": "<hint>"`.
+**find** — "whoever has Add device open, answer": `{"type": "find", "id": "d-…"}`.
+Nothing about the code is sent. An app whose Add device screen is open answers
+with a `reply`, and its announcements and `/info` carry `"pairing": true` while
+it stays open.
 
 Multicast is often blocked (guest Wi-Fi, some routers, Docker). So apps also:
 
 * say **hello** over HTTP to every known app every 6 s (keeps presence alive
-  even if multicast only works one way), and
-* can be added by address (`POST /api/devices`, `--peer HOST:PORT`).
+  even if multicast only works one way),
+* can be added by address (`POST /api/devices`, `--peer HOST:PORT`), and
+* **sweep** their private /24 networks with `GET /info` (0.8 s timeout, their
+  own port, 5000 and known devices' ports): when entering a code finds
+  nobody, and when their own addresses change (a hotspot, a new lease) while
+  a paired device isn't here. A paired device found that way moves only on
+  proof (§4).
+
+An app's addresses are those of its interfaces too, not just the route out:
+on a device that *is* the hotspot, the hotspot address is often on neither.
+Mobile-data, VPN and container interfaces are left out.
 
 An app is *nearby* while it was heard from in the last 15 s; unpaired apps are
 forgotten after 2 minutes, paired ones stay listed as "Not nearby".
@@ -68,14 +79,15 @@ between **paired** apps carry a signature (§4).
 | Request | Purpose |
 | ------- | ------- |
 | `GET /info` | `{id, name, form, platform, port, version, accepts, visitors: [{id, name, form, platform}]}` (visitors hidden when a PIN is set and the caller isn't paired) |
-| `POST /hello` body = caller's info | Registers the caller (address = TCP peer address); returns `/info` |
+| `POST /hello` body = caller's info | Registers the caller (address = TCP peer address); returns `/info` plus `you: {reachable}` once it has tried to reach the caller — how a PC learns that others can't connect to it (usually its firewall) |
 | `POST /offers` | Offer files (below) → `201 {id, secret, state, reason}` (`reason` says why, when it is declined straight away) |
 | `GET /offers/<id>` + `X-OT-Secret` | `{state, reason, files: [{state, received}]}` |
 | `PUT /offers/<id>/files/<n>` + `X-OT-Secret`, `Content-Length` | Raw file bytes → `201 {file}` (small files) |
 | `PUT /offers/<id>/files/<n>` + `X-OT-Secret`, `Content-Range` | One 2 MiB piece of a big file → `308 {received, ranges}` until complete, then `201`. Pieces may arrive in any order; the receiver stages them sparsely and publishes atomically |
 | `GET /offers/<id>/files/<n>/status` + `X-OT-Secret` | Staged bytes/ranges for one incoming file (sender resumes the missing pieces) |
 | `DELETE /offers/<id>` + `X-OT-Secret` | Sender cancels |
-| `POST /pair`, `POST /pair/confirm` | Pairing (§3) |
+| `POST /pair/begin`, `POST /pair/prove` | Pairing (§3) |
+| `POST /unpaired` (signed) `{id}` | The sender unpaired this device: it forgets the sender too (here only, not its sync network) and the owner's page says “*X* unpaired this device. Pair again…”. An unsigned or forged one is `403`. A signed offer from an app this one no longer trusts gets `403 peer_unpaired` (“Pair again to send to it”), never a plain or unverified fallback |
 | `POST /clip` (signed) | A clipboard item shared by hand (both sides must allow each other) |
 | `POST /sync` (signed) `{env}` | A [`sync/1` envelope](sync.md#protocol-sync1): clip, introduction, revocation or join, sealed for this device |
 | `POST /sync/forward` (signed) `{to, env}` | Pass a sealed clip on to `to` (one hop) when the sender can't reach it |
@@ -95,11 +107,29 @@ POST /api/p2p/v1/offers
 * `to` is the receiving app's own id (its owner) **or one of its visitors**.
 * Names are sanitised by the receiver; sizes are checked against free space
   and `--max-size` up front (`state: "declined"` with a reason if they don't fit).
+* To an app that advertises `kx` (its per-run X25519 key, in `/info` and
+  hellos) the offer carries
+  `"enc": {"v": 2, "salt": "<64 hex>", "eph": "<a fresh X25519 key>", "kx": "<the receiver's key it used>", "meta": "<sealed names>"}`
+  and the receiver answers `"enc": 2, "eph": "<its fresh X25519 key>", "confirm": "<HMAC>"`:
+  a handshake per transfer, whose session key encrypts every file
+  ([`ot-file/2`](encryption.md#design)). Between **paired** apps the offer is
+  signed and the handshake is keyed by the pair key too (authenticated);
+  between **unpaired** apps it isn't (“encrypted, not verified”). The plain
+  `files` carry placeholder names. The `PUT` body is the file's AES-256-GCM
+  records (`Content-Length` = size + 16 per 64 KiB record); with
+  `Content-Range` the range stays in plaintext positions and the body is
+  those whole records. `/verify` takes `{"mac": …}` instead of the bare
+  checksum. A `kx` from an earlier run is refused (`400`). If the receiver
+  advertised `kx` and the answer lacks `"enc": 2` or a valid `confirm`, the
+  sender refuses and withdraws the offer.
 
 **States:** `pending` → `accepted` → `receiving` → `done`, or `declined`,
 `expired` (no answer in 120 s), `canceled`, `failed`. Offers to an owner from
 a paired app (and with `--auto-accept`) start as `accepted`. With
-`--paired-only`, offers from unpaired apps are refused (`403`).
+`--paired-only`, offers from unpaired apps are refused (`403`). With
+“Encrypted transfers only” (`--encrypted-only` or the owner's switch), an
+offer without a usable `enc` block is refused (`403 encrypted_only`, with
+what to do), and the sender doesn't offer to an app it can't encrypt to.
 
 The sender polls `GET /offers/<id>` until it leaves `pending`, then uploads
 each file with `PUT`. The receiver streams it to a `.part` file and publishes
@@ -123,14 +153,23 @@ messages:
 
 ```
 sender page → its app        POST /api/signal {job, target, kind: "offer", sdp}
-  its app → receiver's app   POST /api/p2p/v1/signal {dir: "to_receiver", session, secret, …}
+  its app → receiver's app   POST /api/p2p/v1/signal {dir: "to_receiver", session, secret, kind, sdp, n, mac}
 receiver page ← its app      GET  /api/signals            (announced by "signals": n in /api/state)
 receiver page → its app      POST /api/signal {session, kind: "answer", sdp}
-  … → sender's app           POST /api/p2p/v1/signal {dir: "to_sender", job, target, secret, …}
+  … → sender's app           POST /api/p2p/v1/signal {dir: "to_sender", job, target, secret, kind, sdp, n, mac}
 ```
 
-* Messages are only accepted for a transfer the receiver **already accepted**,
-  and only from its two ends: app-to-app messages carry the offer's secret.
+* Messages are only accepted for a transfer that is **accepted and still
+  running** on both apps (`409` otherwise), and only from its two ends:
+  app-to-app messages carry the offer's secret.
+* For an **encrypted** transfer (paired, or unpaired with a one-off key) each
+  app-to-app message also carries a counter `n` (1, 2, … per direction) and
+  `mac` = HMAC-SHA256 under `HKDF(transfer key, salt, "open-transfer-signal/1|sender|receiver|target")`
+  of the JSON array `[dir, receiver's session id, sender's job id, target, kind, sdp, n]`.
+  A missing or wrong MAC, or an `n` not above the last one taken, is `403`:
+  the SDP (DTLS fingerprint, ICE candidates) can't be changed, moved to another
+  transfer or receiver, or replayed ([encryption.md](encryption.md#direct-transfers-webrtc)).
+  A plain transfer (an older app) has no MAC, as before.
 * No STUN/TURN servers: on a LAN the devices reach each other directly
   (browsers' mDNS `.local` candidates included).
 * The data channel carries `{"t":"file", i, name, size, mime}`, raw 64 KiB
@@ -146,26 +185,37 @@ receiver page → its app      POST /api/signal {session, kind: "answer", sdp}
 
 ## 3. Pairing
 
-Pairing proves both apps know the same short-lived 6-digit code **without
-sending it**, and leaves them with a shared 32-byte key. A is the app showing
-the code, B the one entering it.
+Pairing runs **SRP-6a** (RFC 5054: 2048-bit group, SHA-256) over the
+short-lived 6-digit code, and leaves both apps with a shared 32-byte key. A is
+the app showing the code, B the one entering it; the SRP identity is
+`"<idA>|<idB>"`.
 
 ```
-B → A  POST /pair          {device: B-info, nonce: nb}
-A → B                       {nonce: na, device: A-info}
-B → A  POST /pair/confirm  {id: B, proof: HMAC(code, "b"|na|nb|A|B)}
-A → B                       {proof: HMAC(code, "a"|na|nb|A|B)}
-key = HMAC(code, "key"|na|nb|A|B)
+B → A  POST /pair/begin  {device: B-info}
+A → B                     {salt, b: B (hex), device: A-info}
+B → A  POST /pair/prove  {id: B, a: A (hex), m1: M1}
+A → B                     {m2: M2}
+key = HMAC-SHA256(K, "open-transfer-pair-key/2|<idA>|<idB>")
 ```
 
-(Each HMAC is SHA-256 over `"open-transfer-pair/1\n<label>\n<na>\n<nb>\n<idA>\n<idB>"`.)
-A rate-limits confirmations (5 per minute per address) and shows a new code
-after 10 wrong guesses, after every successful pairing, and every 10 minutes.
-B verifies A's proof too, so both sides authenticate. Keys are stored in
-`<state>/trusted.json` (mode 0600).
+`K` is SRP's session key; `M1` and `M2` prove each side has it. Someone who
+sees every message can't test a guess offline (not even the right code), and
+someone pretending to be A or B gets one guess per attempt.
 
-The QR code in "Add a device" is `http://<ip>:<port>/?pair=<code>` (+ `&pin=`).
-The Android app scans it and pairs as above; a phone camera simply opens it,
+A accepts the code only while its **Add device** screen is open: the page
+renews a 30-second window while it shows, and opening it shows a fresh code.
+A rate-limits proofs (5 per minute per address) and shows a new code after 10
+wrong guesses, after every successful pairing, and every 10 minutes. Keys are
+stored in `<state>/trusted.json`, sealed with a vault key from the OS keystore
+([encryption.md](encryption.md#keys-at-rest)). An app from before SRP answers
+`/pair/begin` with 404, and B says to update it.
+
+Entering a code without an address: B sends a multicast **find** and asks every
+device it knows for `/info`, then runs SRP with those showing `"pairing": true`
+(devices it isn't paired with first).
+
+The QR code in "Add a device" is `http://<ip>:<port>/?pair=<code>` (+ `&join=<token>` with a PIN set: 10 minutes, never the PIN).
+Every app's **Scan its QR code** (under Add device → Enter a code) reads it with the device's camera and pairs as above: the Android app with its own scanner, the desktop windows and browsers with any camera they have (built-in or USB, switchable), decoding with `BarcodeDetector` or, where there's none, jsQR. The camera is asked for only when a scan starts and let go when it ends (found, Cancel, the sheet closed, the page hidden); entering the code is always there. A phone camera simply opens it,
 which signs that browser in as a **trusted visitor** (its sends to the owner
 are accepted automatically).
 
@@ -182,14 +232,33 @@ Receivers accept signatures within ±120 s and refuse a signature they have
 already seen. A valid signature makes an offer from that app's owner
 auto-accepted; anything else is treated as a stranger (asked first).
 
+### A paired app's new address
+
+Anyone on the Wi-Fi can send an announcement carrying a paired app's id, so
+for a **paired** app the address (and anything else the packet says) changes
+only on proof:
+
+* a `POST /hello` it signed (§4) arriving from the new address, or
+* its answer to a challenge: the app that heard the claim sends a signed
+  `POST /hello` there with `challenge` (random hex) and `to` (the `host:port`
+  it dialled). The answer must carry
+  `proof = hex HMAC-SHA256(key, "open-transfer-move/1|<challenge>|<prover>|<verifier>|<to>")`.
+  An app answers only when `to` is one of its own addresses and ports, so a
+  challenge relayed to the real app proves nothing for the relay's address.
+  At most one challenge per app and address every 30 s.
+
+Apps that aren't paired move as before (there's no key to prove anything
+with). Older apps don't answer challenges; their own signed hellos still move
+them.
+
 ## Security notes and limits
 
-* **Transport is plain HTTP on the LAN.** Pairing authenticates devices and
-  protects against tampering with *who* is sending. Synced clipboard contents
-  are sealed per recipient (see [sync.md](sync.md)); file contents are not
-  encrypted in transit — anyone who can capture traffic on your Wi-Fi could
-  read them. Use networks you trust, a PIN for the web UI, and paired-only mode
-  on shared networks. TLS with pinned per-device certificates is on the roadmap.
+* **Transport is plain HTTP on the LAN; content between paired apps isn't.**
+  Files between paired apps are encrypted end to end
+  ([encryption.md](encryption.md)), and synced clips are sealed per recipient
+  ([sync.md](sync.md)). Transfers with unpaired or older apps, and a browser's
+  own hop to the app it opened, are plain HTTP and are labelled so. Use a PIN
+  for the web UI and paired-only mode on shared networks.
 * Browser → browser goes direct (WebRTC, see above). Browser → app and
   app → browser-on-another-app still pass through the app the browser opened.
 * Big files are resumable end to end: the browser uploads 2 MiB pieces (3 in

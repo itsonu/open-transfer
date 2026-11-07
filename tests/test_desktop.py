@@ -566,3 +566,13 @@ def test_no_window_and_no_browser(
 
 def test_bad_options_exit_with_an_error(tmp_path: Path) -> None:
     assert desktop.main([str(tmp_path), "--pin", "1"]) == 2
+
+
+def test_a_stopped_watcher_answers_nothing_more(tmp_path: Path) -> None:
+    # stop() returned while the thread could still poll once: a later copy's
+    # request was then answered by a watcher that had been stopped.
+    from open_transfer.instance import FocusRequests
+
+    watcher = FocusRequests(tmp_path / "focus", lambda: None, interval=0.5).start()
+    watcher.stop()
+    assert not watcher._thread.is_alive()

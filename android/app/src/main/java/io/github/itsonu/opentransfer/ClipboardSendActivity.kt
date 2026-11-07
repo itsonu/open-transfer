@@ -21,7 +21,8 @@ import kotlin.concurrent.thread
  * - from the **text-selection menu**: the selected text.
  *
  * Private-looking text (passwords, codes, keys) asks first. A short message says where
- * it went, then the activity closes.
+ * it went, then the activity closes. When nothing can go out (clipboard sync off or
+ * paused, nobody to send to), the app opens with the text ready to send to who you pick.
  *
  * A *file* shared as text (a .txt from a file manager) isn't a clip: it's copied in and
  * opened in [MainActivity] to send like any other shared file (see [SharedFiles]).
@@ -114,11 +115,19 @@ class ClipboardSendActivity : Activity() {
             main.post {
                 if (result.optString("reason") == "sensitive" && !confirm) {
                     askFirst(text)
+                } else if (SharePolicy.opensAppInstead(result.optString("reason"))) {
+                    openInApp(text) // nothing went out: choose a device there instead
                 } else {
                     done(describe(app, result))
                 }
             }
         }
+    }
+
+    private fun openInApp(text: String) {
+        SharedFiles.offerText(text)
+        startActivity(Intent(applicationContext, MainActivity::class.java).setAction(MainActivity.ACTION_SHOW_SHARED))
+        finish()
     }
 
     private fun askFirst(text: String) {

@@ -36,7 +36,7 @@ def _start(
     port = find_free_port(host, 18000)
     root = tmp_path / name
     env = {**os.environ, "NO_COLOR": "1", "OPEN_TRANSFER_OWNER_LOOPBACK": "1" if owner else "0"}
-    mode = [] if owner else ["--share-folder"]
+    mode = [] if owner else ["--share-folder", "--allow-delete"]  # the classic suite deletes
     proc = subprocess.Popen(
         [sys.executable, "-m", "open_transfer", str(root), "--host", host,
          "--port", str(port), "--no-browser", "--no-qr", "--no-discovery", "--name", name,
@@ -58,8 +58,12 @@ def _start(
     try:
         yield Server(url, root, proc)
     finally:
-        proc.terminate()
-        proc.wait(timeout=10)
+        proc.terminate()  # it shuts down cleanly and says so: read its output while it does
+        try:  # up to ~10 s with a transfer under way (stuck requests get 5 s)
+            proc.communicate(timeout=30)
+        except subprocess.TimeoutExpired:
+            proc.kill()  # never leave it running into the next test, on the same port
+            proc.communicate()
 
 
 @pytest.fixture

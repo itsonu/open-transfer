@@ -112,7 +112,7 @@ Restores a deleted file within `undo_seconds`: `{"file": {…}}`, or `404`.
 Streams a ZIP of all files, or only those given as `?name=a.txt&name=b.jpg`.
 
 ### `GET /api/qr.svg`
-QR code (SVG) for the share URL; includes the PIN when one is set.
+QR code (SVG) for the share URL. With a PIN set it carries a 10-minute join token (`?join=`), never the PIN.
 
 ### `POST /api/logout`
 Clears the session.
@@ -133,9 +133,15 @@ These power the device grid. "Owner" means a request from the device itself
 | `POST /api/invites` `{}` → `{token, url, expires_in}` · `GET /api/invites` | owner | Mint a single-use guest link (`/?invite=…`): lets one visitor past the PIN as a trusted guest, then expires (10 min default) |
 | `DELETE /api/send/<job>` · `DELETE /api/send/<job>/targets/<id>` | job creator | Cancel everything / one receiver |
 | `POST /api/send/<job>/retry` `{to?: [ids]}` | job creator | Re-offer the job's files to declined/failed/expired targets → `201 {job}` (receiver is asked again) |
+
+In `/api/state`, `incoming[].encrypted` and `outgoing[].targets[].encrypted` say whether the app-to-app hop is encrypted ([`ot-file/2`](encryption.md)): `true`, `false` (an older app: plain HTTP), or `null` when no other app is involved. `authenticated` says whether that encryption is keyed by pairing (`true`) or by a one-off key with an unpaired app (`false`: unreadable to a listener, but the other app wasn't verified).
+
+For the device's owner, `/api/state` also has `keys` (`{"store", "protected", "locked": [names]}`: where pairing keys are kept, whether that's OS-protected, and pairings whose key couldn't be unlocked) and, with `--https`, `https` (`{"port", "fingerprint"}`: the TLS port and the certificate's SHA-256).
 | `POST /api/incoming/<id>/accept` · `/decline` · `DELETE /api/incoming/<id>` | the recipient | Answer or stop an incoming transfer |
 | `GET /api/inbox/files/<name>` · `DELETE …` · `GET /api/inbox/archive` | visitor | Files sent to this browser |
-| `POST /api/pair` `{code, address?}` | owner | Pair with the app showing `code` (found by multicast, or at `address`) |
+| `POST /api/pair` `{code, address?}` | owner | Pair with the app showing `code` (the nearby one with Add device open, or at `address`) |
+| `POST /api/network/allow` | owner | Packaged Windows app only (`501 unsupported` elsewhere): asks Windows, through one admin (UAC) prompt, for an inbound rule for this app on the current network type (its TCP port and discovery UDP 47823) If Windows Firewall has inbound *Block* rules for exactly this .exe (`state.network.blocking_rules`, their names; a cancelled first-run prompt leaves them, and Block beats Allow), the same prompt removes those first — never rules for other programs. → `{result: allowed \| cancelled \| failed}` (`failed` also when Windows refuses the rule). `state.network` = `{public, unreachable_by, reachable_by, can_allow, blocking_rules}` |
+| `POST /api/pair/open` · `POST /api/pair/close` | owner | Add device opened (renew every ≤30 s while it shows) → `{code, expires_in}` · closed. Codes only work while it's open |
 | `POST /api/devices` `{address}` | owner | Add an app by `host:port` |
 | `DELETE /api/pairs/<id>` · `POST /api/pair/new-code` · `GET /api/pair/qr.svg` | owner | Unpair · new code · QR with the code |
 
@@ -155,6 +161,7 @@ These power the device grid. "Owner" means a request from the device itself
 | `GET /api/sync/client/latest` + `Authorization: Bearer <token>` | an iPhone/iPad | `{text, from, message}`: the newest clip from any of your devices, until it expires (`text` is empty when there's nothing new) |
 | `GET /api/app` | owner | `{desktop: false}`, or in the desktop app `{desktop, background, can_start_at_login, start_at_login}` |
 | `PUT /api/app` `{start_at_login}` | owner | Start the background copy at login (desktop app) |
+| `PUT /api/settings` `{encrypted_only}` | owner | “Encrypted transfers only”: refuse app-to-app transfers that can't be encrypted. Saved in `<state>/settings.json`; `--encrypted-only` turns it on regardless. → `{settings}` (also in `/api/state` as `settings.encrypted_only`) |
 | `POST /api/app/quit` | owner | Quit the background copy (sharing and sync stop) |
 
 Sending from a script, end to end:

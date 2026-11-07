@@ -15,6 +15,7 @@ from pathlib import Path
 import pytest
 
 from open_transfer import network
+from tests.e2e.test_clipboard import call
 from tests.e2e.test_ui import Server, sync_api
 
 pytestmark = pytest.mark.e2e
@@ -85,6 +86,10 @@ def test_declining_tells_the_sender(
     second_page.locator("#incoming-decline").click(timeout=10_000)
     expect(page.locator(".toast", has_text="Bravo declined")).to_be_visible(timeout=10_000)
     assert not (bravo.root / "nope.txt").exists()
+    # Nothing crossed the network: no "Direct · encrypted…" on it.
+    target = page.locator(".job-target", has_text="Bravo")
+    expect(target.locator(".job-target-state")).to_have_text("Declined")
+    expect(target.locator(".job-target-path")).to_have_text("")
 
 
 def test_drop_files_onto_a_device(devices: list[Server], page, second_page) -> None:  # type: ignore[no-untyped-def]
@@ -140,9 +145,10 @@ def test_pair_with_a_code(devices: list[Server], page, second_page) -> None:  # 
     alpha, bravo, _ = devices
     second_page.goto(bravo.url)
     second_page.click("#connect-button")
+    # The code shows once Bravo's app has opened its pairing window.
+    expect(second_page.locator("#pair-code")).to_have_text(re.compile(r"^\d{3} \d{3}$"))
+    assert _api(bravo, "/api/state")["pairing"]["open"] is True
     code = second_page.locator("#pair-code").inner_text().replace(" ", "")
-    assert code.isdigit()
-    assert len(code) == 6
 
     page.goto(alpha.url)
     page.click("#connect-button")
@@ -158,6 +164,60 @@ def test_pair_with_a_code(devices: list[Server], page, second_page) -> None:  # 
     expect(second_page.locator("#connect-dialog")).to_be_hidden()
     second_page.click("#connect-button")
     expect(second_page.locator("#pair-code")).not_to_have_text(f"{code[:3]} {code[3:]}")
+    # Closing the sheet closes the window: the code stops working at once.
+    second_page.keyboard.press("Escape")
+    expect(second_page.locator("#connect-dialog")).to_be_hidden()
+    for _ in range(50):
+        if not _api(bravo, "/api/state")["pairing"]["open"]:
+            break
+        second_page.wait_for_timeout(100)
+    assert _api(bravo, "/api/state")["pairing"]["open"] is False
+
+
+def test_pasting_a_code_keeps_all_its_digits(devices: list[Server], page) -> None:  # type: ignore[no-untyped-def]
+    page.goto(devices[0].url)
+    page.click("#connect-button")
+    page.click("[role=tab][data-tab=enter]")
+    field = page.locator("#pair-input")
+    for pasted in ("Code: 332 156", " 332 156", "332-156\n"):
+        field.fill("")
+        field.focus()
+        page.keyboard.insert_text(pasted)  # a paste, as the browser applies it
+        expect(field).to_have_value("332 156")
+
+
+def test_pasting_into_an_open_sheet_doesnt_queue_a_send(devices: list[Server], page) -> None:  # type: ignore[no-untyped-def]
+    page.goto(devices[0].url)
+    page.click("#connect-button")
+    page.click("[role=tab][data-tab=enter]")
+    page.evaluate(
+        """() => {
+          document.activeElement.blur();  // pasted before clicking the code box
+          const data = new DataTransfer();
+          data.setData("text/plain", "332 156");
+          document.querySelector("#connect-dialog").dispatchEvent(
+            new ClipboardEvent("paste", { clipboardData: data, bubbles: true, cancelable: true }));
+        }"""
+    )
+    page.wait_for_timeout(500)
+    expect(page.locator("#send-bar")).to_be_hidden()
+    expect(page.locator("#pair-input")).to_have_value("332 156")  # it went where it was meant to
+
+
+def test_pasting_into_the_show_code_tab_does_nothing(devices: list[Server], page) -> None:  # type: ignore[no-untyped-def]
+    page.goto(devices[0].url)
+    page.click("#connect-button")
+    page.evaluate(
+        """() => {
+          const data = new DataTransfer();
+          data.setData("text/plain", "hello");
+          document.querySelector("#connect-dialog").dispatchEvent(
+            new ClipboardEvent("paste", { clipboardData: data, bubbles: true, cancelable: true }));
+        }"""
+    )
+    page.wait_for_timeout(500)
+    expect(page.locator("#send-bar")).to_be_hidden()
+    expect(page.locator("#pair-input")).to_have_value("")
 
 
 def test_rename_this_device(devices: list[Server], page) -> None:  # type: ignore[no-untyped-def]
@@ -168,6 +228,53 @@ def test_rename_this_device(devices: list[Server], page) -> None:  # type: ignor
     page.locator("#rename-form").get_by_role("button", name="Save").click()
     expect(page.locator("#me-name-text")).to_have_text("Studio iMac")
     assert _api(alpha, "/api/p2p/v1/info")["name"] == "Studio iMac"
+
+
+def test_remove_a_pairing_from_its_tile(devices: list[Server], page, second_page) -> None:  # type: ignore[no-untyped-def]
+    alpha, bravo, _ = devices
+    code = call(bravo, "POST", "/api/pair/open")["code"]
+    call(alpha, "POST", "/api/pair", {"code": code, "address": bravo.url.removeprefix("http://")})
+    page.goto(alpha.url)
+    second_page.goto(bravo.url)
+    bravo_tile = tile(page, "Bravo")
+    expect(bravo_tile).to_have_class(re.compile(r"\bis-paired\b"), timeout=8000)
+
+    bravo_tile.locator(".device-more").click()
+    page.get_by_role("menuitem", name="Remove pairing").click()
+    expect(page.locator("#confirm-title")).to_have_text("Remove the pairing with Bravo?")
+    page.click("#confirm-ok")
+    expect(bravo_tile).not_to_have_class(re.compile(r"\bis-paired\b"), timeout=8000)
+    assert not any(d.get("paired") for d in _api(alpha, "/api/state")["devices"])
+    # Bravo was told, forgot Alpha too, and says how to fix it.
+    expect(second_page.locator("#me-status")).to_contain_text(
+        "Alpha unpaired this device", timeout=8000
+    )
+
+
+def test_cancel_keeps_the_pairing(devices: list[Server], page) -> None:  # type: ignore[no-untyped-def]
+    alpha, bravo, _ = devices
+    code = call(bravo, "POST", "/api/pair/open")["code"]
+    call(alpha, "POST", "/api/pair", {"code": code, "address": bravo.url.removeprefix("http://")})
+    page.goto(alpha.url)
+    bravo_tile = tile(page, "Bravo")
+    expect(bravo_tile).to_have_class(re.compile(r"\bis-paired\b"), timeout=8000)
+    bravo_tile.click(button="right")  # right-click opens the same menu
+    page.get_by_role("menuitem", name="Remove pairing").click()
+    page.locator("#confirm-dialog").get_by_role("button", name="Cancel").click()
+    expect(bravo_tile).to_have_class(re.compile(r"\bis-paired\b"))
+
+
+def test_pair_with_an_unpaired_device_from_its_tile(devices: list[Server], page) -> None:  # type: ignore[no-untyped-def]
+    page.goto(devices[0].url)
+    charlie = tile(page, "Charlie")
+    expect(charlie).to_be_visible(timeout=10_000)
+    charlie.locator(".device-more").click()
+    expect(page.get_by_role("menuitem", name="Remove pairing")).to_have_count(0)
+    page.get_by_role("menuitem", name="Pair…").click()
+    expect(page.locator("#connect-dialog")).to_be_visible()
+    expect(page.locator("#connect-dialog [data-tab=enter]")).to_have_attribute(
+        "aria-selected", "true"
+    )
 
 
 def test_phone_browser_sends_through_the_app(devices: list[Server], browser, second_page) -> None:  # type: ignore[no-untyped-def]
@@ -188,6 +295,7 @@ def test_phone_browser_sends_through_the_app(devices: list[Server], browser, sec
         expect(phone.locator("#me-name-text")).to_have_text("Galaxy phone")
         expect(tile(phone, "Alpha")).to_be_visible()
         expect(tile(phone, "Bravo")).to_be_visible(timeout=10_000)
+        expect(tile(phone, "Bravo").locator(".device-more")).to_be_hidden()  # owner only
         second_page.goto(bravo.url)
         expect(tile(second_page, "Galaxy phone")).to_be_visible(timeout=15_000)
 
@@ -236,6 +344,11 @@ def test_browsers_send_to_each_other_directly(
     try:
         if not webrtc:  # the receiver can't do WebRTC: the sender must fall back to the app
             ipad.add_init_script("delete window.RTCPeerConnection;")
+        signals: list[str] = []  # what the apps carry between the two pages
+        phone.on(
+            "request",
+            lambda r: signals.append(r.post_data or "") if r.url.endswith("/api/signal") else None,
+        )
         phone.goto(url)
         ipad.goto(url)
         expect(tile(phone, "iPad")).to_be_visible(timeout=10_000)
@@ -254,6 +367,9 @@ def test_browsers_send_to_each_other_directly(
             expect(target).to_contain_text("Delivered directly")
         else:
             expect(target).not_to_contain_text("directly")
+        # The sender's activity lists it too, however it went.
+        sent = phone.locator("#history-list .history-row", has_text="photo.heic")
+        expect(sent).to_be_visible(timeout=10_000)
         row = ipad.locator(".file-row", has_text="photo.heic")
         expect(row).to_be_visible(timeout=10_000)
         if webrtc:
@@ -263,8 +379,63 @@ def test_browsers_send_to_each_other_directly(
         assert Path(info.value.path()).read_bytes() == payload
         # Nothing was stored on Alpha's disk either way.
         assert not (alpha.root / "photo.heic").exists()
+        if webrtc:  # the data channel is DTLS (encrypted); the file's name never touches the apps
+            sdp = " ".join(signals)
+            assert "UDP/DTLS/SCTP" in sdp
+            assert "a=fingerprint:sha-256" in sdp
+            assert "photo.heic" not in sdp
         assert phone._errors == []  # type: ignore[attr-defined]
         assert ipad._errors == []  # type: ignore[attr-defined]
     finally:
         ctx_a.close()
         ctx_b.close()
+
+
+def test_send_a_link_and_open_it_on_the_other_device(
+    devices: list[Server], page, second_page
+) -> None:  # type: ignore[no-untyped-def]
+    alpha, bravo, _ = devices
+    page.goto(alpha.url)
+    second_page.goto(bravo.url)
+    tile(page, "Bravo").locator(".device-button").click(timeout=10_000)
+    page.click("#send-text")
+    page.fill("#text-input", "https://example.com/trip?id=42")
+    page.click("#text-submit")
+    expect(page.locator("#send-bar-files")).to_contain_text("Link example.com.txt")
+    page.click("#send-go")
+    second_page.click("#incoming-accept", timeout=10_000)
+    row = second_page.locator("#file-list .file-row", has_text="Link example.com")
+    expect(row.locator(".row-text")).to_have_text("https://example.com/trip?id=42", timeout=10_000)
+    expect(row.get_by_role("link", name="Open link")).to_have_attribute(
+        "href", "https://example.com/trip?id=42"
+    )
+
+
+def test_a_note_keeps_the_note_name(devices: list[Server], page) -> None:  # type: ignore[no-untyped-def]
+    page.goto(devices[0].url)
+    tile(page, "Bravo").locator(".device-button").click(timeout=10_000)
+    page.click("#send-text")
+    page.fill("#text-input", "Gate code 4411, see https://example.com")
+    page.click("#text-submit")
+    # Named after its first words, so several notes don't all read "note-…".
+    expect(page.locator("#send-bar-files")).to_contain_text("Gate code 4411, see.txt")
+
+
+def test_closing_with_files_ready_to_send_asks_first(
+    devices: list[Server], browser, tmp_path: Path
+) -> None:  # type: ignore[no-untyped-def]
+    # Staged files live only in this page: leaving it must not drop them without a word.
+    sample = tmp_path / "ready.txt"
+    sample.write_text("ready")
+    for staged in (True, False):
+        pg = browser.new_context().new_page()
+        pg.goto(devices[0].url)
+        expect(tile(pg, "Bravo")).to_be_visible(timeout=10_000)
+        if staged:
+            pg.set_input_files("#file-input", str(sample))
+            expect(pg.locator("#send-bar-files")).to_contain_text("ready.txt")
+        asked: list[str] = []
+        pg.on("dialog", lambda d, asked=asked: (asked.append(d.type), d.accept()))
+        with pg.expect_event("close"):  # listen first: with nothing to ask, it closes at once
+            pg.close(run_before_unload=True)
+        assert asked == (["beforeunload"] if staged else [])

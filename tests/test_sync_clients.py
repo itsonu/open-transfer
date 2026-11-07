@@ -57,7 +57,7 @@ def network(make_node: NodeFactory) -> tuple[Node, Node]:
     for node in (mac, win):
         status, _ = owner(node)("PUT", "/api/sync/policy", {"enabled": True})
         assert status == 200
-    code = owner(win).state()["pairing"]["code"]
+    code = owner(win)("POST", "/api/pair/open")[1]["code"]
     status, data = owner(mac)(
         "POST", "/api/pair", {"code": code, "address": f"127.0.0.1:{win.port}"}
     )

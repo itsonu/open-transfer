@@ -134,11 +134,20 @@ function row(e, thumbs) {
     thumb.append(img);
   }
   const speed = e.speed >= 1000 ? `${formatBytes(e.speed)}/s` : "";
-  const sub = [formatBytes(e.size), relativeTime(e.at), speed, STATUS[e.status]].filter(Boolean).join(" · ");
+  const sub = [formatBytes(e.size), relativeTime(e.at), speed].filter(Boolean).join(" · ");
   const title = clip ? `Clipboard · ${e.title}` : e.title;
   const sent = e.direction === "sent";
   const line = h("div", { class: "history-head" }, h("span", { class: "row-title", title }, title), who(e) && h("span", { class: "history-who" }, who(e)));
-  const main = h("div", { class: "row-main" }, line, h("span", { class: "row-sub" }, sub));
+  const main = h("div", { class: "row-main" }, line);
+  if (e.names?.length) main.append(h("span", { class: "history-names", title: e.names.join("\n") }, e.names.join(", ")));
+  main.append(h("span", { class: "row-sub" }, sub));
+  // Who didn't get it, and why (the badge alone doesn't say what to do next).
+  const missed = (e.devices || []).filter((d) => d.status && d.status !== "done");
+  if (e.status !== "done" && missed.length) {
+    const say = (d) => d.reason || STATUS[d.status] || d.status;
+    const why = missed.map((d) => (say(d).includes(d.name) ? say(d) : `${d.name}: ${say(d)}`)).join(" · ");
+    main.append(h("span", { class: "history-why", title: why }, why));
+  }
   const graph = e.samples?.length >= 2 ? sparklineSVG(e.samples) : null;
   if (graph) main.append(h("span", { class: "spark-wrap", title: "Speed over time" }, graph));
   return h(
@@ -146,8 +155,17 @@ function row(e, thumbs) {
     { class: "row history-row", dataset: { status: e.status, kind: e.kind } },
     thumb,
     main,
-    h("span", { class: "history-dir", dataset: { dir: sent ? "up" : "down" } }, sent ? "Sent" : "Received"),
+    badge(e, sent),
   );
+}
+
+/** Which way it went when it worked; otherwise what happened (a failure in red). */
+function badge(e, sent) {
+  const ok = (e.status || "done") === "done";
+  const dir = ok ? (sent ? "up" : "down") : e.status === "failed" ? "failed" : "off";
+  // An offer to us that ran out: we may have answered and the sender never started.
+  const missed = !sent && e.status === "expired" ? "Not received" : STATUS[e.status] || e.status;
+  return h("span", { class: "history-dir", dataset: { dir } }, ok ? (sent ? "Sent" : "Received") : missed);
 }
 
 function render(total) {
