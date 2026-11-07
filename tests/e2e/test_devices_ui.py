@@ -433,6 +433,6 @@ def test_closing_with_files_ready_to_send_asks_first(
             expect(pg.locator("#send-bar-files")).to_contain_text("ready.txt")
         asked: list[str] = []
         pg.on("dialog", lambda d, asked=asked: (asked.append(d.type), d.accept()))
-        pg.close(run_before_unload=True)
-        pg.wait_for_event("close")
+        with pg.expect_event("close"):  # listen first: with nothing to ask, it closes at once
+            pg.close(run_before_unload=True)
         assert asked == (["beforeunload"] if staged else [])
