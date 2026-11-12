@@ -1,13 +1,27 @@
-# Offline mesh: devices that share no network (design, V2)
+# Nearby sharing and the device mesh (design, V2)
 
 Status: **design, not built.** Nothing here ships until Phase M0 (below) shows each
 piece works on real hardware.
 
 ## Goal
 
-Paired devices find each other and send files, text, links and clipboard **when they
-are not on the same Wi‑Fi and there is no internet**: on a train, in a field, on two
-different networks. Everything stays local: no relay server, no cloud, no internet.
+Open Transfer works like **Quick Share or AirDrop**: any nearby device shows up and
+can be sent to from the share menu, whether or not it's on the same Wi‑Fi. And your
+own devices form **one connected mesh**, the way Echo devices do: each one reaches
+the others over whatever link it has (the same Wi‑Fi, Bluetooth, a phone's local
+hotspot), and passes things on for a device the sender can't reach itself.
+
+Three ways in, one network:
+
+| Way in | Who | Exists today |
+|---|---|---|
+| Same Wi‑Fi (discovery) | anyone nearby, asked first | ✅ |
+| Pairing code / QR link | your devices: trusted, then introduced to the rest | ✅ |
+| Bluetooth nearby | your devices, or anyone while you're visible to everyone | new (this design) |
+
+Paired devices find each other and send files, text, links and clipboard **even when
+they are not on the same Wi‑Fi and there is no internet**: on a train, in a field, on
+two different networks. Everything stays local: no relay server, no cloud, no internet.
 
 The model is bitchat: devices talk over **Bluetooth LE**, and messages can hop through
 other devices in range. Bluetooth is slow, so for anything bigger than a message the
@@ -88,6 +102,64 @@ every permission themselves; the app never changes system or security settings.
   rate limits, encryption. Tested with an in-memory fake radio.
 - **Link picker**: today's LAN path is always tried first. Only when a paired device
   is unreachable on every LAN address does a send go over Bluetooth.
+
+## Quick Share-style sharing
+
+How Quick Share and AirDrop behave, and what Open Transfer does the same way:
+
+- **Visibility**, one setting on every device (as Quick Share's):
+  **Off** · **Your devices** (default: only paired devices can see it) ·
+  **Everyone for 10 minutes** (anyone nearby; it switches back by itself).
+- **The sender's list** shows everyone it can reach on any link: your devices first,
+  then visible strangers. A tile says how it's reached (*Wi‑Fi*, *Bluetooth*, *via Studio
+  Mac*). Tapping a stranger sends an offer they Accept or Decline, as on Wi‑Fi today;
+  your devices accept automatically.
+- **The fastest link is picked for you:** same Wi‑Fi if there is one; otherwise
+  Bluetooth arranges a local hotspot for big files (below); small items go over
+  Bluetooth directly.
+- **Share from anywhere:**
+
+  | Platform | Entry point | Status / how |
+  |---|---|---|
+  | Android | share sheet (photos, files, text, links) | ✅ exists |
+  | Android | Quick Settings tile: *Visible to everyone for 10 min* | new; next to the existing *Send clipboard* tile |
+  | Mac | **Share → Open Transfer** in Finder and apps | a Share extension needs the signed, notarized app (on hold); a **Services** menu entry (`NSServices` in the app's Info.plist) needs no extension and comes first |
+  | Mac | right-click → Quick Actions | from the same Services entry |
+  | Windows | right-click → **Send to → Open Transfer** | a shortcut in the user's SendTo folder, made by the installer; no packaging needed |
+  | Windows | the system Share window | needs an MSIX package; later |
+  | Browsers | the page's own picker and drop zone | ✅ exists |
+
+- **Not the same as Google's Quick Share or Apple's AirDrop:** those protocols are
+  private and change without notice. Open Transfer talks to Open Transfer only. (An
+  unofficial Quick Share receiver for the Mac exists in the open-source NearDrop; see
+  the open questions.)
+
+## One mesh across every link (Echo-style)
+
+Each app keeps a list of **neighbours on every link**: Wi‑Fi (today's discovery),
+Bluetooth, and a hotspot it hosts or joined. Your devices then work as one network:
+
+- **Reachability in hellos:** every member says which members it can reach directly
+  and over which link (`{device tag, link, quality}`), refreshed every 30 s, sealed for
+  members only. That gives each member a small map of the network.
+- **Routing:** a send to device X goes over the best direct link (Wi‑Fi first). If X
+  isn't directly reachable, it goes **through a member that can reach X**, with the
+  fewest hops, preferring Wi‑Fi hops. Example: the phone is out of the Mac's Bluetooth
+  range and on mobile data; the tablet is on the Mac's Wi‑Fi and near the phone. Mac →
+  (Wi‑Fi) → tablet → (Bluetooth) → phone.
+- **End to end:** a bridge never opens what it forwards. Small items are sync/1
+  envelopes sealed by the source for the destination (sync/1 already forwards this
+  way); files are `ot-file/2` from source to destination, and a bridge only passes the
+  encrypted bytes on.
+- **What can cross a bridge:** small items over any hop. Files only over hops that are
+  all fast (Wi‑Fi or a hotspot); a file never crawls over a Bluetooth hop, it waits for
+  a fast route or a handoff instead.
+- **A home hub:** any always-on member (a desktop at home, a spare phone on a charger)
+  keeps queues for devices that are away and bridges Bluetooth-only devices onto the
+  Wi‑Fi, as an Echo does for nearby gadgets. Nothing special: every member can do it,
+  an always-on one just does it more.
+- **Membership is unchanged:** pairing (code, QR link) and introductions decide who's
+  in; revocation removes a device from every link at once.
 
 ## Bluetooth link
 
@@ -197,8 +269,17 @@ against an in-memory fake radio.
 | M2 | **Send small items over Bluetooth** (one hop): clipboard, text, links, files ≤ 64 KiB | Framing, windowing, sealing, replay, size cap; history and Activity as for LAN sends | Clipboard and a 50 KB file both ways with Wi‑Fi off; a revoked device can't send |
 | M3 | **Hotspot handoff** for big files, Android hosting; Mac and Android joining | Handoff state machine with fakes (timeouts, declined dialog, rejoin) | 1 GB phone → Mac and Mac → phone with no shared Wi‑Fi; the Mac rejoins its Wi‑Fi afterwards |
 | M4 | **Windows** Bluetooth and joining | Same tests on Windows CI with the fake radio | Windows ↔ phone: small items over Bluetooth, 1 GB by handoff |
-| M5 | **Multi-hop** for small items (relay through your own devices) | Flooding, dedupe, TTL, rate limits, store-and-forward on a fake 5-device line | Phone A → tablet → Mac with A out of the Mac's range |
-| M6 | **Unpaired nearby share**, and a **Wi‑Fi QR** so a browser (iPhone) can join the phone's hotspot and use the link | Unpaired handoff asks the receiver first; Wi‑Fi QR format | A stranger's phone receives a photo after accepting; an iPhone joins by the Wi‑Fi QR and downloads |
+| M5 | **One mesh across links:** reachability in hellos, routing through members, bridging Wi‑Fi ↔ Bluetooth, multi-hop for small items | Route choice, dedupe, TTL, rate limits, store-and-forward on a fake 5-device network mixing links | Mac → (Wi‑Fi) → tablet → (Bluetooth) → phone with the phone off the Mac's Wi‑Fi and out of its Bluetooth range |
+| M6 | **Visible to everyone for 10 minutes:** unpaired nearby share over Bluetooth, and a **Wi‑Fi QR** so a browser (iPhone) can join the phone's hotspot and use the link | Unpaired handoff asks the receiver first; visibility switches back after 10 min; Wi‑Fi QR format | A stranger's phone receives a photo after accepting; an iPhone joins by the Wi‑Fi QR and downloads |
+| M7 | **Share from anywhere:** Mac Services menu, Windows *Send to*, Android Quick Settings tile | Installer creates the SendTo shortcut; the Services entry hands files to the app | Right-click a file → Open Transfer → it's staged, on each computer |
+
+### M0 results so far
+
+| Check | Result |
+|---|---|
+| Mac advertises a GATT service (`spikes/m0/mac/otble.swift`) | ✅ Bluetooth on, *advertising OT-M0*, when run as its own app (`otble.app`). Started from a shell instead, macOS stops it (exit 134): Bluetooth permission belongs to the app that launched it. **The Mac app needs `NSBluetoothAlwaysUsageDescription` in its Info.plist.** |
+| Mac ↔ Android, Mac ↔ Windows throughput | not run yet: needs the Android spike app and the devices on hand |
+| Android LocalOnlyHotspot; Mac and Windows joining it | not run yet |
 
 **New dependencies** (each needs your OK before it is added): on macOS
 `pyobjc-framework-CoreBluetooth` and `pyobjc-framework-CoreWLAN`; on Windows the
@@ -212,3 +293,7 @@ against an in-memory fake radio.
    The app will always say so and ask first.
 3. **Relaying for strangers:** keep *Help other people's messages along* off by
    default, as above?
+4. **Talking to Google's Quick Share:** the Mac could also *receive* from any Android
+   phone's built-in Quick Share (as the open-source NearDrop does), with no Open
+   Transfer on the phone. It's an unofficial, reverse-engineered protocol Google can
+   break at any time. Worth a separate experiment, or leave it out?

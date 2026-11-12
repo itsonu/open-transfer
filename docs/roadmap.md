@@ -69,7 +69,7 @@ Status legend: **Done** · **Partial** (some of it existed before this plan) · 
 - **Clipboard from other apps in the background:** being built as the **[Trusted Sync Network](sync.md)** (native agents, no window needed).
 - **Checking the browser → its own app hop:** the checksum covers app to app; the first hop relies on the connection's own checks.
 - **A configurable queue size** (fixed at 2 for now).
-- **Devices that share no network (V2):** Bluetooth LE mesh between paired devices, and a local-only hotspot for big files; no internet. Design only, starting with a hardware spike: [offline-mesh.md](offline-mesh.md).
+- **Nearby sharing and the device mesh (V2):** Quick Share-style visibility and share entry points everywhere, Bluetooth between devices with no shared Wi‑Fi, a local hotspot for big files, and one mesh across every link. Design only, starting with a hardware spike: [offline-mesh.md](offline-mesh.md).
 
 ## Engineering backlog (2026-10-31)
 
