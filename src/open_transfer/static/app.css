@@ -2626,6 +2626,7 @@ body.has-send-bar .toasts {
   }
 
   .send-bar-actions {
+    flex-wrap: wrap; /* the narrowest phones: Send gets its own row */
     width: 100%;
   }
 
@@ -2641,6 +2642,7 @@ body.has-send-bar .toasts {
   #download-all span,
   #send-folder span,
   #send-text span,
+  #send-clipboard span,
   #send-pick span {
     position: absolute;
     width: 1px;
@@ -2652,7 +2654,8 @@ body.has-send-bar .toasts {
 
   #send-pick,
   #send-folder,
-  #send-text {
+  #send-text,
+  #send-clipboard {
     min-height: 40px;
     padding: 0 12px;
   }

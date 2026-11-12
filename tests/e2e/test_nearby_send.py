@@ -199,8 +199,8 @@ def test_quick_send_to_a_favorite_skips_the_send_bar(
 
 @pytest.mark.parametrize(
     ("width", "height", "touch"),
-    [(390, 844, True), (800, 1280, True), (1280, 800, False)],
-    ids=["phone", "tablet", "desktop"],
+    [(360, 740, True), (390, 844, True), (800, 1280, True), (1280, 800, False)],
+    ids=["small-phone", "phone", "tablet", "desktop"],
 )
 def test_device_grid_fits_phones_tablets_and_desktops(
     devices: list[Server], browser, width: int, height: int, touch: bool, tmp_path: Path
@@ -235,6 +235,12 @@ def test_device_grid_fits_phones_tablets_and_desktops(
         bar_top = pg.locator("#send-bar").bounding_box()["y"]
         last = pg.locator("main .view:not([hidden]) > section:not([hidden])").last.bounding_box()
         assert last["y"] + last["height"] <= bar_top + 1, (last, bar_top)
+        # Every send-bar button fits: the bar is fixed, so one past the edge doesn't scroll.
+        for button in pg.locator("#send-bar button:visible").all():
+            box = button.bounding_box()
+            assert box, button
+            assert box["x"] >= 0, box
+            assert box["x"] + box["width"] <= width, box
     finally:
         context.close()
 
