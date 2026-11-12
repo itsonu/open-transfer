@@ -102,8 +102,17 @@ and its DevTools socket.
 **Still for a person:** answering a Windows firewall prompt on a PC that never allowed the app,
 the tablet, real Wi‑Fi off/on (6.1, 11.5), hotspots (§8), sharing from
 Photos/Files themselves (the sheet was opened with a test share), lock-screen and Doze
-behaviour, iPhone (§5), and on phone 2: the camera scan, **Save** to Downloads and the
-Android file picker.
+behaviour, iPhone (§5), and the three Android checks below.
+
+**Android: evidence so far (as of V1 closure, 2026-11-12).** None of these three was done on
+a physical Android device. Each stays open as a post-closure check ([v1.md](v1.md#post-closure-verification)).
+
+| Check | Automated / emulator evidence | Real hardware | Status |
+|---|---|---|---|
+| **Save** a received file to Downloads | Browser: `e2e/test_ui.py` and `e2e/test_devices_ui.py` click **Download** / **Save** and compare the saved bytes, in desktop Chromium (phone-sized window), not Android Chrome. App: `MainActivity.onDownload` hands the file to Android's DownloadManager (`Download/`); the unit test `LocalPolicyTest` checks only that the app's own files are recognised, and the emulator smoke test doesn't save anything | Phone 2 received the file (*Received … Save*) but **Save** wasn't tapped: Chrome would have asked Android for storage access | Physical-device verification outstanding |
+| Android **system file picker** | Every browser test gives files to `#file-input` directly (Playwright), which skips the OS picker. The app's `onShowFileChooser` has no automated test; the emulator smoke test doesn't open it | Phone 2's file was put on `#file-input` by script (a DataTransfer), so the picker never opened | Physical-device verification outstanding |
+| **Camera QR scan** | `e2e/test_scan_ui.py` (8 tests) scans with a fake camera, with and without `BarcodeDetector`. The app's ML Kit scanner (`startQrScan`) has no automated test | Phone 2 opened the Mac's address without the camera (5.1). Elsewhere, a real camera scanned a QR twice in the audit: phone 1's camera opened the Mac's share QR in its browser, and Safari on the Mac scanned the phone's Add device QR (2026-10-27, D2 and C3). Neither used the Android app's own scanner or phone 2 | Physical-device verification outstanding |
+
 The phone build predates 3f76631, so it still says “1 file(s) failed” where the next
 build says *Lost connection to …*. A killed app has no history row of its own
 (nothing ran to write it); the other side records it.
