@@ -49,6 +49,8 @@ All notable changes are documented here. The format follows [Keep a Changelog](h
 - Android: the background service runs as a *connected device* service, so Android 15+ no longer stops it after about 6 hours a day.
 
 ### Fixed
+- **A phone on mobile data offered 192.0.0.4 as its address** (Android's 464XLAT address, which nobody nearby can reach), so pairing by its QR code or address failed with “Nothing answered at 192.0.0.4”. Addresses in 192.0.0.0/24 are never used.
+- **After scanning a QR code, a code typed by hand still went to the scanned address**, kept out of sight in *Not found? Enter its address*. A scan's address is used for that scan only.
 - **Android: the app opened but never started on phones with 16 KB memory pages** (newer phones on Android 16 and later). The cryptography library's native part is built for 4 KB pages and the phone refused to load it. The app now asks Android to load it in its compatibility mode.
 - **On a phone, the Send button ran off the edge of the send bar** wherever the Clipboard button shows (the Android app, and browsers on a secure page). Clipboard is now an icon there like Add files, Folder and Text, and on the narrowest phones Send moves to its own row.
 - **Two devices could end up holding different keys for each other** (clipboard sync and encrypted sends between them then refused) when they paired by code while a third device was introducing them. Each side dated the code's key by its own clock, a moment apart, so an introduction in between won on one side only. Both now keep the key under one date, and every key change keeps the later of the two, so they always agree.

@@ -44,6 +44,15 @@ def test_an_android_phone_sharing_its_hotspot_uses_the_hotspot_address(
     assert network.lan_ips() == ["192.168.43.1"]
 
 
+def test_an_android_phone_never_offers_its_mobile_data_address(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # On IPv6-only mobile data Android routes IPv4 through 464XLAT, whose address is
+    # 192.0.0.4. Android apps get no interface list, so only the address says so.
+    fake_net(monkeypatch, [], primary="192.0.0.4")
+    assert network.lan_ips() == []
+
+
 def test_a_phone_hotspot_with_no_mobile_data_still_has_an_address(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

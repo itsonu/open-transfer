@@ -1925,8 +1925,7 @@ function handleScan(text) {
   }
   setTab("enter");
   $("#pair-input").value = formatCode(code);
-  $("#pair-address").value = url.host;
-  pair(code, url.host);
+  pair(code, url.host); // not kept in the address field: a code typed later finds its own device
 }
 
 let scanner = null;

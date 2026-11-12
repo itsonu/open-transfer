@@ -89,6 +89,24 @@ def test_scan_pairs_without_barcode_detector(devices: list[Server], page) -> Non
     assert _camera_released(page)
 
 
+def test_a_typed_code_isnt_sent_to_a_scanned_address(devices: list[Server], page) -> None:  # type: ignore[no-untyped-def]
+    # A scanned QR code's address (here one nothing answers at) was kept in the hidden
+    # "Enter its address" field, and every code typed later went there too.
+    _, bravo, charlie = devices
+    code = _open(bravo, "/api/pair/open")["code"]
+    qr = _qr_png(f"http://127.0.0.1:9/?pair={code}")
+    sent: list[dict] = []  # type: ignore[type-arg]
+    page.route(
+        "**/api/pair", lambda route: (sent.append(route.request.post_data_json), route.continue_())
+    )
+    _scan_sheet(page, charlie, f"delete window.BarcodeDetector; window.__qr = {json.dumps(qr)};")
+    page.click("#scan-button")
+    expect(page.locator("#pair-error")).not_to_be_empty(timeout=10000)
+    page.click("#pair-submit")
+    page.wait_for_function("() => !document.querySelector('#pair-submit').disabled")
+    assert [body.get("address") for body in sent] == ["127.0.0.1:9", None]
+
+
 def test_closing_the_sheet_while_the_camera_starts_releases_it(devices: list[Server], page) -> None:  # type: ignore[no-untyped-def]
     _scan_sheet(page, devices[0], "window.__cameraDelay = 800;")  # e.g. the permission prompt
     page.click("#scan-button")

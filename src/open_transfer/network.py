@@ -14,13 +14,21 @@ from collections.abc import Callable
 from contextlib import closing
 from typing import Any
 
+#: Never on a LAN: 192.0.0.4 is Android's 464XLAT (mobile data), 192.0.0.2 DS-Lite.
+_PROTOCOL_ASSIGNMENTS = ipaddress.ip_network("192.0.0.0/24")
+
 
 def _is_usable(ip: str) -> bool:
     try:
         addr = ipaddress.ip_address(ip)
     except ValueError:
         return False
-    return addr.version == 4 and not (addr.is_loopback or addr.is_link_local or addr.is_unspecified)
+    return addr.version == 4 and not (
+        addr.is_loopback
+        or addr.is_link_local
+        or addr.is_unspecified
+        or addr in _PROTOCOL_ASSIGNMENTS
+    )
 
 
 def primary_ip() -> str | None:
