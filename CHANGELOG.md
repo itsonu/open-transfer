@@ -49,6 +49,7 @@ All notable changes are documented here. The format follows [Keep a Changelog](h
 - Android: the background service runs as a *connected device* service, so Android 15+ no longer stops it after about 6 hours a day.
 
 ### Fixed
+- **Android: the app opened but never started on phones with 16 KB memory pages** (newer phones on Android 16 and later). The cryptography library's native part is built for 4 KB pages and the phone refused to load it. The app now asks Android to load it in its compatibility mode.
 - **On a phone, the Send button ran off the edge of the send bar** wherever the Clipboard button shows (the Android app, and browsers on a secure page). Clipboard is now an icon there like Add files, Folder and Text, and on the narrowest phones Send moves to its own row.
 - **Two devices could end up holding different keys for each other** (clipboard sync and encrypted sends between them then refused) when they paired by code while a third device was introducing them. Each side dated the code's key by its own clock, a moment apart, so an introduction in between won on one side only. Both now keep the key under one date, and every key change keeps the later of the two, so they always agree.
 - **A file sent straight from one browser to another wasn't in the sender's Activity**, and no “Sent to …” appeared. The page decided the send had finished before the app had heard so, then counted nobody as done. Found with an Android 9 phone's Chrome sending to a browser on a Mac.
