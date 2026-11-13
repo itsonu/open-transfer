@@ -4,6 +4,7 @@ import android.content.ContentResolver
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
+import android.provider.MediaStore
 import android.provider.OpenableColumns
 import android.util.Log
 import android.webkit.MimeTypeMap
@@ -87,7 +88,7 @@ object SharedFiles {
                 val item = describe(resolver, uri, intent.type, index)
                 val copy = File(dir, SharePolicy.newToken())
                 try {
-                    val stream = resolver.openInputStream(uri) ?: return@mapIndexedNotNull null
+                    val stream = open(resolver, uri) ?: return@mapIndexedNotNull null
                     var total = 0L
                     stream.use { input ->
                         copy.outputStream().use { output ->
@@ -180,7 +181,7 @@ object SharedFiles {
         val (token, index) = SharePolicy.parse(path) ?: return missing()
         val item = synchronized(lock) { served[token]?.getOrNull(index) } ?: return missing()
         val stream = try {
-            resolver.openInputStream(item.uri)
+            open(resolver, item.uri)
         } catch (e: Exception) {
             Log.w(LOG_TAG, "Couldn't open a shared file", e)
             null
@@ -194,6 +195,22 @@ object SharedFiles {
         if (range == null) return WebResourceResponse(item.mime, null, 200, "OK", headers, stream)
         headers["Content-Range"] = "bytes ${range.first}-${range.last}/${item.size}"
         return WebResourceResponse(item.mime, null, 206, "Partial Content", headers, Limited(stream, range.last - range.first + 1))
+    }
+
+    /**
+     * The file as it was taken: a photo or video from the media store comes with its
+     * location blanked unless it's asked for whole (which needs ACCESS_MEDIA_LOCATION).
+     * Without that permission it's sent as Android hands it over.
+     */
+    private fun open(resolver: ContentResolver, uri: Uri): InputStream? {
+        if (uri.authority == MediaStore.AUTHORITY) {
+            try {
+                return resolver.openInputStream(MediaStore.setRequireOriginal(uri))
+            } catch (e: Exception) {
+                // Not allowed: as it comes.
+            }
+        }
+        return resolver.openInputStream(uri)
     }
 
     /** At most [left] bytes of [input] (skips, done by WebView, don't count). */

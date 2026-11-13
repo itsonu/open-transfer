@@ -17,6 +17,9 @@
          keep arriving. (CHANGE_WIFI_MULTICAST_STATE above is its prerequisite.) -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <!-- Photos and videos you send keep where they were taken: without this Android
+         blanks the location in each copy it hands the app. -->
+    <uses-permission android:name="android.permission.ACCESS_MEDIA_LOCATION" />
 
     <!-- Android 10 only: received files go to Download/Open Transfer. Android 11+ lets
          apps create their own files there without any permission. -->

@@ -104,6 +104,12 @@ class MainActivity : ComponentActivity() {
             startService()
         }
 
+    private var afterMediaLocation: (() -> Unit)? = null
+    private val askMediaLocation =
+        registerForActivityResult(ActivityResultContracts.RequestPermission()) {
+            afterMediaLocation?.also { afterMediaLocation = null }?.invoke()
+        }
+
     private val pickFiles =
         registerForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris ->
             val callback = fileCallback
@@ -218,10 +224,32 @@ class MainActivity : ComponentActivity() {
         }
         if (action != Intent.ACTION_SEND && action != Intent.ACTION_SEND_MULTIPLE) return
         val app = applicationContext
-        thread(name = "ot-share", isDaemon = true) {
-            val kept = SharedFiles.receive(app, intent)
-            main.post { if (kept == 0) toast(R.string.share_nothing) else sharedArrived() }
+        withMediaLocation {
+            thread(name = "ot-share", isDaemon = true) {
+                val kept = SharedFiles.receive(app, intent)
+                main.post { if (kept == 0) toast(R.string.share_nothing) else sharedArrived() }
+            }
         }
+    }
+
+    /**
+     * Photos and videos keep where they were taken only with ACCESS_MEDIA_LOCATION
+     * (Android blanks it in each copy otherwise). Asked once, the first time files are
+     * sent, then [then] runs whatever the answer.
+     */
+    private fun withMediaLocation(then: () -> Unit) {
+        val prefs = getPreferences(MODE_PRIVATE)
+        val permission = Manifest.permission.ACCESS_MEDIA_LOCATION
+        if (prefs.getBoolean(KEY_ASKED_MEDIA_LOCATION, false) ||
+            ContextCompat.checkSelfPermission(this, permission) == PackageManager.PERMISSION_GRANTED
+        ) {
+            return then()
+        }
+        prefs.edit().putBoolean(KEY_ASKED_MEDIA_LOCATION, true).apply()
+        // ponytail: [then] is lost if the activity is re-created while Android asks
+        // (a rotation): pick or share again. Persist the pending share if that bites.
+        afterMediaLocation = then
+        askMediaLocation.launch(permission)
     }
 
     /** Tell the page, if it's up; otherwise it asks for them as soon as it loads. */
@@ -472,12 +500,14 @@ class MainActivity : ComponentActivity() {
             fileCallback?.onReceiveValue(null)
             fileCallback = filePathCallback
             allowMultiple = fileChooserParams?.mode == WebChromeClient.FileChooserParams.MODE_OPEN_MULTIPLE
-            try {
-                pickFiles.launch(mimeTypes(fileChooserParams?.acceptTypes))
-            } catch (e: ActivityNotFoundException) {
-                fileCallback = null
-                filePathCallback.onReceiveValue(null)
-                toast(R.string.no_file_picker)
+            withMediaLocation {
+                try {
+                    pickFiles.launch(mimeTypes(fileChooserParams?.acceptTypes))
+                } catch (e: ActivityNotFoundException) {
+                    fileCallback = null
+                    filePathCallback.onReceiveValue(null)
+                    toast(R.string.no_file_picker)
+                }
             }
             return true
         }
@@ -703,5 +733,6 @@ class MainActivity : ComponentActivity() {
         const val ACTION_SHOW_SHARED = "io.github.itsonu.opentransfer.SHOW_SHARED"
         private const val LOG_TAG = "OpenTransfer"
         private const val KEY_ASKED_PERMISSIONS = "asked_permissions"
+        private const val KEY_ASKED_MEDIA_LOCATION = "asked_media_location"
     }
 }
