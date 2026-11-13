@@ -392,7 +392,11 @@ fails re-plans the phases before code is written.
 | Mac hosting a hotspot from an app | ❌ **verified: no public API** (macOS 27 SDK `CWInterface.h`: only deprecated ad-hoc IBSS) |
 | Mac joining by network name without Location permission | ❌ **verified:** a CoreWLAN scan found 4 networks, 0 with names; current network name unreadable. `networksetup` path still to check |
 | Android hosting / joining APIs | ✅ **verified in the SDK** (API 26+ hosting, API 29+ joining with Android's dialog; API 36 adds configured hosting; normal Mobile hotspot not startable by apps) |
-| The rest of the matrix (S1, S2, S4, X1, X2), Bluetooth throughput | not run: needs the phone, tablet and Windows laptop on hand |
+| **Phone P capabilities** (Nothing A015 / CMF Phone 1, Android 16, 2026-11-13) | Host while on Wi‑Fi (STA+AP): ✅ · join while staying on Wi‑Fi (STA+STA local-only): ❌, so **joining drops its Wi‑Fi** · 5 GHz ✅ · Wi‑Fi Direct ✅. The app's Java interface list shows **ap0 10.18.116.240** (its Mobile hotspot) and **v4-ccmni2 192.0.0.4** (464XLAT): Android hands the app its real addresses, which Open Transfer's Python side couldn't list (the 192.0.0.4 bug) |
+| **X2** P's Mobile hotspot on, app asks for LocalOnlyHotspot | ✅ as the SDK says: `onFailed(ERROR_INCOMPATIBLE_MODE)`. The connection manager uses the hotspot that's already on |
+| **S1 by hand** P hosts (its Mobile hotspot, 5G upstream) → M joins from the Wi‑Fi menu | ✅ M 10.18.116.97 · **X1 ✅ M's default gateway = P (10.18.116.240)** · M → P **1 GB in 133 s = 7.7 MB/s** · P → M 100 MB = **9.3 MB/s** (TCP, both ends agree) |
+| **Bluetooth P ↔ M** (`otble` ↔ spike app, 256 KiB each way) | M advertises, P connects: P → M **10.9 KB/s**; M → P link dropped by the Mac after starting (status 19, not chased). P advertises, M connects: M → P **16.4 KB/s**, P → M **22.4 KB/s**. MTU 517 negotiated, but **Android refuses attribute values over 512 bytes** (`IllegalArgumentException`; the first spike stalled on it). Bluetooth is **~400–800× slower than the hotspot**: small items and arranging links only, as designed |
+| Still to run | S1 app-driven (P's LocalOnlyHotspot; P's Mobile hotspot off; **no internet for M while joined**), S2 (Windows laptop), S4 (tablet), M joining by `networksetup` without Location |
 
 **New dependencies** (each needs your OK before it is added): on macOS
 `pyobjc-framework-CoreBluetooth` and `pyobjc-framework-CoreWLAN`; on Windows the

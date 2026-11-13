@@ -83,7 +83,8 @@ class MainActivity : Activity() {
 
     override fun onCreate(state: Bundle?) {
         super.onCreate(state)
-        val col = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(24, 48, 24, 24) }
+        // Android 15+ draws edge to edge: keep the buttons clear of the title and nav bars.
+        val col = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(24, 360, 24, 240) }
         fun field(hint: String, value: String = "") =
             EditText(this).apply { this.hint = hint; setText(value); inputType = InputType.TYPE_CLASS_TEXT }.also(col::addView)
         fun button(label: String, action: () -> Unit) =
@@ -347,7 +348,7 @@ class MainActivity : Activity() {
     /** One notification at a time: Android calls onNotificationSent when it may send the next. */
     private fun pump(device: BluetoothDevice, tx: BluetoothGattCharacteristic) {
         if (toSend <= 0) return
-        val n = minOf(mtu - 3, toSend)
+        val n = minOf(mtu - 3, 512, toSend)
         tx.value = ByteArray(n) { DOT }
         if (server?.notifyCharacteristicChanged(device, tx, false) == true) toSend -= n
         if (toSend <= 0) say("sent all")
@@ -398,12 +399,24 @@ class MainActivity : Activity() {
                 g.writeCharacteristic(rx)
             }
             override fun onCharacteristicWrite(g: BluetoothGatt, c: BluetoothGattCharacteristic, status: Int) {
-                if (phase != 1 || left <= 0) return
-                if (c.writeType == BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT) t0 = System.nanoTime()  // header landed
-                val n = minOf(mtuNow - 3, left)
-                c.writeType = BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE
-                c.value = ByteArray(n) { DOT }
-                if (g.writeCharacteristic(c)) left -= n
+                if (phase != 1 || left != BLE_BYTES) return
+                t0 = System.nanoTime()  // the "S" header landed: stream the data, retrying while the stack is busy
+                thread(name = "ble-upload", isDaemon = true) {
+                    val chunk = ByteArray(minOf(mtuNow - 3, 512)) { DOT }  // Android: attributes max 512 bytes
+                    var busy = 0
+                    while (left > 0 && phase == 1) {
+                        val n = minOf(chunk.size, left)
+                        val ok = if (Build.VERSION.SDK_INT >= 33) {
+                            g.writeCharacteristic(c, chunk.copyOf(n), BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE) == 0
+                        } else {
+                            c.writeType = BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE
+                            c.value = chunk.copyOf(n)
+                            g.writeCharacteristic(c)
+                        }
+                        if (ok) left -= n else { busy++; Thread.sleep(2) }
+                    }
+                    say("upload queued (stack busy $busy times)")
+                }
             }
             override fun onCharacteristicChanged(g: BluetoothGatt, c: BluetoothGattCharacteristic) {
                 val v = c.value ?: return
