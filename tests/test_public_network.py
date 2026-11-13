@@ -53,7 +53,7 @@ def test_the_owner_is_told(make_node: NodeFactory, monkeypatch: pytest.MonkeyPat
     monkeypatch.setattr(mesh_module.network, "public_networks", lambda: ["Home-5G"])
     node = make_node("Sonu-PC", device_platform="windows")
     node.mesh.check_network()
-    assert owner(node).state()["network"] == {"public": ["Home-5G"]}
+    assert owner(node).state()["network"]["public"] == ["Home-5G"]
     monkeypatch.setattr(mesh_module.network, "public_networks", lambda: [])
     node.mesh.check_network()
-    wait_for(lambda: owner(node).state()["network"] == {"public": []})
+    wait_for(lambda: owner(node).state()["network"]["public"] == [])

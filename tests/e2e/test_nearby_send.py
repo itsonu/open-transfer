@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import re
+import time
 from pathlib import Path
 
 import pytest
@@ -199,8 +200,8 @@ def test_quick_send_to_a_favorite_skips_the_send_bar(
 
 @pytest.mark.parametrize(
     ("width", "height", "touch"),
-    [(390, 844, True), (800, 1280, True), (1280, 800, False)],
-    ids=["phone", "tablet", "desktop"],
+    [(360, 740, True), (390, 844, True), (800, 1280, True), (1280, 800, False)],
+    ids=["small-phone", "phone", "tablet", "desktop"],
 )
 def test_device_grid_fits_phones_tablets_and_desktops(
     devices: list[Server], browser, width: int, height: int, touch: bool, tmp_path: Path
@@ -235,6 +236,12 @@ def test_device_grid_fits_phones_tablets_and_desktops(
         bar_top = pg.locator("#send-bar").bounding_box()["y"]
         last = pg.locator("main .view:not([hidden]) > section:not([hidden])").last.bounding_box()
         assert last["y"] + last["height"] <= bar_top + 1, (last, bar_top)
+        # Every send-bar button fits: the bar is fixed, so one past the edge doesn't scroll.
+        for button in pg.locator("#send-bar button:visible").all():
+            box = button.bounding_box()
+            assert box, button
+            assert box["x"] >= 0, box
+            assert box["x"] + box["width"] <= width, box
     finally:
         context.close()
 
@@ -249,3 +256,64 @@ def test_device_controls_have_names(devices: list[Server], page) -> None:  # typ
             .map((b) => b.outerHTML.slice(0, 80))"""
     )
     assert unnamed == []
+
+
+def test_progress_is_what_the_device_has_received(
+    devices: list[Server], page, second_page, tmp_path: Path
+) -> None:  # type: ignore[no-untyped-def]
+    """The app takes the bytes far faster than slow Wi-Fi delivers them (an Android
+    phone's own engine at 84 MB/s, its hotspot at 9): the headline counts delivery."""
+    _alpha, bravo, _charlie = devices
+
+    def slow_wifi(route) -> None:  # type: ignore[no-untyped-def]
+        response = route.fetch()
+        if response.status != 200:
+            route.fulfill(response=response)
+            return
+        body = response.json()
+        for job in body["outgoing"]:
+            for target in job["targets"]:
+                if target["state"] in ("sending", "done"):
+                    target.update(state="sending", sent=1000)
+        route.fulfill(response=response, json=body)
+
+    page.route("**/api/state", slow_wifi)
+    page.goto(devices[0].url)
+    second_page.goto(bravo.url)
+    sample = tmp_path / "video.mp4"
+    sample.write_bytes(b"v" * 300_000)
+    tile(page, "Bravo").locator(".device-button").click()
+    page.set_input_files("#file-input", str(sample))
+    page.click("#send-go")
+    second_page.locator("#incoming-accept").click(timeout=10_000)
+    expect(page.locator(".job .row-sub")).to_contain_text("1.0 KB of 300 KB", timeout=10_000)
+    page.unroute_all(behavior="ignoreErrors")  # polls still in flight when the page closes
+
+
+def test_a_long_hand_off_doesnt_stop_the_send(devices: list[Server], page) -> None:  # type: ignore[no-untyped-def]
+    """The piece that completes a file is answered only once this app has passed the
+    whole file on (593 MB over a phone hotspot: 66 s). That wait isn't a stall."""
+    total = 5_000_000
+    got = {"bytes": 0}
+
+    def app(route) -> None:  # type: ignore[no-untyped-def]
+        got["bytes"] += len(route.request.post_data_buffer or b"")
+        if got["bytes"] < total:
+            route.fulfill(status=308, json={"received": got["bytes"], "done": False})
+            return
+        time.sleep(1.5)  # handing the file on, three times the page's patience below
+        route.fulfill(status=201, json={"received": total, "done": True})
+
+    page.goto(devices[0].url)
+    page.route("**/relay-test/**", app)
+    data = page.evaluate(
+        """async (total) => {
+            const m = await import('/static/lib.js');
+            const file = new Blob([new Uint8Array(total)]);
+            const { data } = await m.uploadParallel('/relay-test/0', { file, uploadId: 'u1', timeout: 500 });
+            return data;
+        }""",
+        total,
+    )
+    assert data == {"received": total, "done": True}
+    assert got["bytes"] == total  # and nothing was sent twice

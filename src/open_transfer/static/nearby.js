@@ -3,9 +3,9 @@
 // and renaming this device.
 
 import { DIRECT_MAX_BYTES, directSupported, handleSignals, sendDirect } from "./direct.js";
-import { $, ApiError, addHistory, api, chunkLimits, copyText, formatBytes, formatDuration, guessKind, h, icon, looksSensitive, newUploadId, plural, pushSample, SENSITIVE_REASONS, shouldChunk, sparklineSVG, state, toast, uploadParallel } from "./lib.js";
+import { $, ApiError, addHistory, api, copyText, deliveredBytes, formatBytes, formatDuration, guessKind, h, icon, looksSensitive, newUploadId, plural, pushSample, SENSITIVE_REASONS, shouldChunk, sparklineSVG, state, toast, uploadParallel } from "./lib.js";
 import { saveThumb } from "./activity.js";
-import { isImage, makeThumb } from "./media.js";
+import { isImage, makeThumb, openMenu } from "./media.js";
 import { notify } from "./notify.js";
 import { collectDropped, zipFiles, zipName } from "./zip.js";
 
@@ -24,6 +24,7 @@ export const mesh = {
   promptId: null,
   seen: new Map(), // incoming id -> last state
   paired: null, // ids of paired devices (to notice new pairings)
+  pairTimer: null, // keeps Add device's pairing window open while the sheet shows
   directFiles: [], // files received straight from another browser (kept in memory)
   tiles: new Map(), // device id -> { el, sig }
   incomingRows: new Map(),
@@ -219,16 +220,46 @@ function renderMe() {
   $("#me-name-text").textContent = me.name;
   $("#me-icon").replaceChildren(icon(deviceIcon({ ...me, kind: me.kind === "owner" ? "app" : "browser" })));
   const status = $("#me-status");
-  const blocked = mesh.data.network?.public || [];
-  if (me.kind === "owner" && blocked.length) {
+  $("#me-allow").hidden = true;
+  const network = mesh.data.network || {};
+  const cantReach = network.unreachable_by || [];
+  // Only a guess: a device that does reach us proves this PC's firewall lets it in.
+  const blocked = network.reachable_by ? [] : network.public || [];
+  const locked = mesh.data.keys?.locked || [];
+  const dropped = mesh.data.keys?.unpaired_by || [];
+  if (me.kind === "owner" && dropped.length) {
+    status.textContent = `${dropped.join(", ")} unpaired this device. Pair again to send to ${dropped.length > 1 ? "them" : "it"}.`;
+    status.dataset.tone = "warn";
+  } else if (me.kind === "owner" && locked.length) {
+    // Their keys are kept, sealed, until the system keystore gives the vault key back.
+    status.textContent = `Couldn’t unlock the pairing with ${locked.join(", ")} (the system keychain didn’t give its key back). Pair again to send to ${locked.length > 1 ? "them" : "it"}.`;
+    status.dataset.tone = "warn";
+  } else if (me.kind === "owner" && cantReach.length) {
+    // Told by the devices themselves (they hear us, but can't connect).
+    const kind = network.public?.length ? "Public" : "Private";
+    const blocks = network.blocking_rules || [];
+    // Block beats Allow: name the rule (left by a cancelled Windows prompt) and say the button removes it.
+    const fix = blocks.length
+      ? ` A Windows Firewall rule (“${blocks[0]}”) blocks Open Transfer.`
+      : me.platform === "windows"
+        ? ` In Windows Security → Firewall, allow Open Transfer on ${kind} networks.`
+        : "";
+    status.textContent = `${cantReach.join(", ")} can’t reach this device — usually its firewall.${fix}`;
+    status.dataset.tone = "warn";
+    $("#me-allow").hidden = !network.can_allow;
+    $("#me-allow").textContent = blocks.length ? "Remove the block and allow" : "Allow on this network";
+  } else if (me.kind === "owner" && blocked.length) {
     // Windows Firewall keeps everyone out on a "Public" network, whatever the app allows.
-    status.textContent = `Other devices can’t reach this PC: Windows treats “${blocked[0]}” as a Public network. Set it to Private in Settings → Network & internet → Wi-Fi.`;
+    status.textContent = `Other devices may not reach this PC: Windows treats “${blocked[0]}” as a Public network. Set it to Private, and allow Open Transfer on Private networks.`;
     status.dataset.tone = "warn";
   } else if (me.kind === "owner") {
     status.textContent = discovery ? "Visible to nearby devices" : "Not discoverable — add devices by code or address";
     status.dataset.tone = discovery ? "ok" : "warn";
   } else {
-    status.textContent = me.paired ? `Paired with ${host.name}` : `Connected through ${host.name}`;
+    // This page's own hop to its app: TLS with --https, else plain HTTP (unless on this machine).
+    const local = ["127.0.0.1", "localhost", "[::1]"].includes(location.hostname);
+    const hop = location.protocol === "https:" ? " · encrypted (HTTPS)" : local ? "" : " · not encrypted";
+    status.textContent = (me.paired ? `Paired with ${host.name}` : `Connected through ${host.name}`) + hop;
     status.dataset.tone = "ok";
   }
 }
@@ -360,9 +391,16 @@ function buildTile(d) {
     h("span", { class: "device-signal", role: "img", hidden: true }),
     h("button", { class: "icon-btn device-fav", type: "button", "aria-pressed": "false", onclick: () => toggleFavorite(el._device) }, icon("star")),
     h("button", { class: "icon-btn device-quick", type: "button", hidden: true, onclick: () => quickSend(el.dataset.id) }, icon("send")),
+    h("button", { class: "icon-btn device-more", type: "button", hidden: true, "aria-haspopup": "menu", "aria-expanded": "false", title: "More", onclick: (event) => openDeviceMenu(el, event.currentTarget) }, icon("more")),
   );
   const button = el.querySelector(".device-button");
   button.addEventListener("click", () => toggle(el.dataset.id));
+  el.addEventListener("contextmenu", (event) => {
+    const more = el.querySelector(".device-more");
+    if (more.hidden) return;
+    event.preventDefault();
+    openDeviceMenu(el, { x: event.clientX, y: event.clientY }, more);
+  });
   // Drop files straight onto a device to send them to it — the AirDrop gesture.
   // Onto a selected device: to every selected device.
   el.addEventListener("dragover", (event) => {
@@ -392,6 +430,31 @@ function buildTile(d) {
     sendDropped(event, dropRecipients(el.dataset.id));
   });
   return el;
+}
+
+/** The owner's actions for a device: remove its pairing, or pair with it. */
+function openDeviceMenu(el, at, opener = at) {
+  const d = el._device;
+  const items = d.paired
+    ? [{ label: "Remove pairing", icon: "x", danger: true, run: () => removePairing(d) }]
+    : [{ label: "Pair…", icon: "link", run: () => openAddDevice({ tab: "enter" }) }];
+  openMenu(items, { at, opener, label: `Actions for ${d.name}` });
+}
+
+async function removePairing(d) {
+  const ok = await confirmDialog({
+    title: `Remove the pairing with ${d.name}?`,
+    text: `${d.name} is told and forgets this device too. Sending will ask to accept again, and transfers aren’t verified until you pair again. History stays.`,
+    confirm: "Remove",
+  });
+  if (!ok) return;
+  try {
+    await api(`/api/pairs/${encodeURIComponent(d.id)}`, { method: "DELETE" });
+    toast(`Removed the pairing with ${d.name}`, { icon: "check" });
+  } catch (err) {
+    toast(err.message, { tone: "error", icon: "alert" });
+  }
+  ctx.requestPoll();
 }
 
 const hasFiles = (event) => [...(event.dataTransfer?.types || [])].includes("Files");
@@ -447,6 +510,10 @@ function updateTile(el, d) {
   quick.hidden = !(favorite && d.online);
   quick.setAttribute("aria-label", `Quick send to ${d.name}`);
   quick.title = `Send files to ${d.name}`;
+  const more = el.querySelector(".device-more");
+  more.hidden = !(state.info.owner && d.kind === "app");
+  el.classList.toggle("has-menu", !more.hidden);
+  more.setAttribute("aria-label", `More for ${d.name}`);
   const together = selected ? [...mesh.selected].filter((id) => onlineDevices().some((o) => o.id === id)).length : 0;
   const hint = together > 1 ? `Drop to send to ${together}` : "Drop to send";
   const hintEl = el.querySelector(".device-drop-hint");
@@ -457,9 +524,9 @@ function updateTile(el, d) {
   button.setAttribute("aria-label", `${d.name}, ${status.text}${d.paired ? ", paired" : ""}${selected ? ", selected" : ""}`);
   const signal = el.querySelector(".device-signal");
   const rtt = d.kind === "app" && d.online && Number.isFinite(d.rtt) ? d.rtt : null;
-  signal.hidden = rtt === null;
+  const level = rtt === null ? null : rtt < 40 ? "good" : rtt < 150 ? "fair" : "slow";
+  signal.hidden = level !== "slow"; // a normal connection (a phone on Wi-Fi is often "fair") needs no warning
   if (rtt !== null) {
-    const level = rtt < 40 ? "good" : rtt < 150 ? "fair" : "slow";
     signal.dataset.level = level;
     signal.setAttribute("aria-label", `Connection: ${level} (${rtt} ms)`);
     signal.title = `Connection: ${level} · ${rtt} ms round trip`;
@@ -548,11 +615,26 @@ export function stageFiles(files) {
   toast(count ? `${plural(mesh.staged.length, "file")} ready — choose who to send to` : "Files ready — waiting for a device to appear", { icon: "send" });
 }
 
+/** A name from what the text says: "Link example.com" for an address, else its first words. */
+function textName(text) {
+  const words = text.trim();
+  if (/^https?:\/\/\S+$/i.test(words)) {
+    try {
+      return `Link ${new URL(words).hostname.replace(/^www\./, "")}`;
+    } catch {
+      /* not a usable address: name it by its words */
+    }
+  }
+  const first = words.split("\n")[0].replace(/https?:\/\/\S+/gi, "").replace(/[\\/:*?"<>|]+/g, " ").replace(/\s+/g, " ").trim();
+  const short = first.length > 32 ? first.slice(0, 32).replace(/\s+\S*$/, "") : first;
+  return short.replace(/[\s.,;:!-]+$/, "");
+}
+
 export function stageText(text, filename = "") {
   const clean = String(text || "").replace(/\r\n/g, "\n");
   if (!clean.trim()) return null;
   if (clean.length > 200000) throw new Error("That text is too long (200,000 characters max).");
-  let name = String(filename || "").trim() || `note-${new Date().toISOString().slice(0, 16).replace("T", "-").replace(":", "")}.txt`;
+  let name = String(filename || "").trim() || `${textName(clean) || `note-${new Date().toISOString().slice(0, 16).replace("T", "-").replace(":", "")}`}.txt`;
   if (!name.toLowerCase().endsWith(".txt")) name += ".txt";
   const file = new File([clean], name, { type: "text/plain" });
   stageFiles([file]);
@@ -704,7 +786,7 @@ function renderStagedThumbs(files) {
   box.dataset.sig = sig;
   box.replaceChildren(
     ...images.map((file) => {
-      if (!mesh.stagedUrls.has(file)) mesh.stagedUrls.set(file, URL.createObjectURL(file));
+      if (!mesh.stagedUrls.has(file)) mesh.stagedUrls.set(file, file.url || URL.createObjectURL(file)); // a big share: its own URL
       return h("img", { src: mesh.stagedUrls.get(file), alt: "" });
     }),
   );
@@ -775,7 +857,7 @@ async function startSend(ids, files, { queued = false } = {}) {
   mesh.jobs.set(job.id, job);
   const picture = files.find((f) => isImage(f) && f.size <= 25_000_000);
   if (picture) {
-    makeThumb(picture).then((thumb) => {
+    makeThumb(picture.url || picture).then((thumb) => {
       job.thumb = thumb;
       scheduleJobRender();
     });
@@ -927,7 +1009,8 @@ function finishJob(job, outcome) {
   job.state = "finished";
   job.finishedAt = Date.now();
   const view = serverJob(job.id);
-  const targets = view?.targets || [];
+  // Sent straight to a browser: the app's view may not say "done" yet.
+  const targets = (view?.targets || []).map((t) => effectiveTarget(job, t));
   const declined = targets.filter((t) => t.state === "declined");
   const failed = targets.filter((t) => ["failed", "expired", "canceled"].includes(t.state));
   const done = targets.filter((t) => t.state === "done");
@@ -936,7 +1019,16 @@ function finishJob(job, outcome) {
     notify(failed.length ? `Couldn’t send to ${who}` : `${who} declined`, { body: (failed[0] || declined[0]).reason || "", tag: `job-${job.id}` });
   }
   if (outcome === "nobody") {
-    if (declined.length === targets.length && targets.length) {
+    const unpaired = targets.find((t) => t.code === "peer_unpaired");
+    if (unpaired) {
+      // It unpaired this device: the fix is pairing again, so offer it.
+      toast(unpaired.reason || `${unpaired.name} isn’t paired with this device any more`, {
+        tone: "error",
+        icon: "alert",
+        action: { label: "Pair again", run: () => openAddDevice({ tab: "enter" }) },
+        duration: 8000,
+      });
+    } else if (declined.length === targets.length && targets.length) {
       toast(targets.length === 1 ? `${targets[0].name} declined — you can ask again` : "Everyone declined — you can ask again", {
         tone: "error",
         icon: "x",
@@ -998,8 +1090,6 @@ function uploadNext(job) {
   const xhr = new XMLHttpRequest();
   job.xhr = xhr;
   job.startedAt = job.startedAt || performance.now();
-  job.lastAt = performance.now();
-  job.lastLoaded = 0;
   job.fileLoaded = 0;
   xhr.open("PUT", `/api/send/${encodeURIComponent(job.id)}/files/${job.index}`);
   xhr.responseType = "json";
@@ -1008,14 +1098,6 @@ function uploadNext(job) {
   xhr.setRequestHeader("Content-Type", "application/octet-stream");
   xhr.upload.addEventListener("progress", (event) => {
     if (!event.lengthComputable) return;
-    const now = performance.now();
-    const dt = (now - job.lastAt) / 1000;
-    if (dt >= 0.3) {
-      const instant = (event.loaded - job.lastLoaded) / dt;
-      job.speed = job.speed ? job.speed * 0.7 + instant * 0.3 : instant;
-      job.lastAt = now;
-      job.lastLoaded = event.loaded;
-    }
     job.fileLoaded = event.loaded;
     scheduleJobRender();
   });
@@ -1057,34 +1139,19 @@ async function uploadNextChunked(job) {
   // so resuming reuses the staged bytes instead of starting over.
   const file = job.files[job.index];
   const total = file.size;
-  const { size: chunkSize } = chunkLimits();
-  const chunks = Math.max(1, Math.ceil(total / chunkSize));
   job.chunkIds = job.chunkIds || {};
   const uploadId = (job.chunkIds[job.index] ||= newUploadId());
   const url = `/api/send/${encodeURIComponent(job.id)}/files/${job.index}`;
   const statusUrl = `${url}/status?upload_id=${encodeURIComponent(uploadId)}`;
   job.abortChunk = new AbortController();
-  job.samples = job.samples || [];
   job.startedAt = job.startedAt || performance.now();
-  let lastAt = performance.now();
-  let lastSent = 0;
   try {
     await uploadParallel(
       url,
       {
         file, total, uploadId, statusUrl, signal: job.abortChunk.signal, concurrency: 3,
         onProgress: (sent) => {
-          const now = performance.now();
-          const dt = (now - lastAt) / 1000;
-          if (dt >= 0.4 && sent > lastSent) {
-            const instant = (sent - lastSent) / dt;
-            job.speed = job.speed ? job.speed * 0.6 + instant * 0.4 : instant;
-            pushSample(job.samples, job.speed);
-            lastAt = now;
-            lastSent = sent;
-          }
           job.fileLoaded = sent;
-          job.chunkNote = total > chunkSize ? `${Math.min(chunks, Math.ceil(sent / chunkSize) + 1)}/${chunks} chunks · 3 parallel` : "";
           scheduleJobRender();
         },
       },
@@ -1221,6 +1288,21 @@ const PATH_HINT = {
   local: "To a browser connected to this device",
 };
 
+// The weakest hop a transfer crossed, as the app worked it out (mesh.SECURITY;
+// docs/encryption.md, "Coverage"). "local" never left this device: nothing to say.
+const SECURITY_LABEL = {
+  verified: " · encrypted",
+  unverified: " · encrypted, not verified",
+  transport: " · encrypted in transit",
+  plain: " · not encrypted",
+};
+const SECURITY_HINT = {
+  verified: "Encrypted and authenticated: only that device can read it.",
+  unverified: "Encrypted, so others on the network can’t read it, but nobody vouched for the other end. Pair the devices to be sure it’s really them.",
+  transport: "Encrypted on each hop (HTTPS, or WebRTC between browsers). The app in between can read it, and a browser trusts its app only as far as the certificate it accepted.",
+  plain: "Not encrypted: someone on the same network could read it. Pair the apps, update older ones, or start the app with --https for browsers.",
+};
+
 function pathLabel(path, target) {
   if (path === "via") return `Via ${target.via_name || "its app"}`;
   if (path === "local") return "Via this device";
@@ -1239,6 +1321,21 @@ const TARGET_TEXT = {
   failed: "Failed",
 };
 
+/** Speed from what the devices have received (updated each poll), not from the hand-over to this app. */
+function measureSpeed(job, done) {
+  const now = performance.now();
+  if (job.doneAt === undefined || done < job.doneBytes) {
+    Object.assign(job, { doneAt: now, doneBytes: done });
+    return;
+  }
+  const dt = (now - job.doneAt) / 1000;
+  if (dt < 0.4 || done === job.doneBytes) return;
+  const instant = (done - job.doneBytes) / dt;
+  job.speed = job.speed ? job.speed * 0.6 + instant * 0.4 : instant;
+  job.samples = pushSample(job.samples || [], job.speed);
+  Object.assign(job, { doneAt: now, doneBytes: done });
+}
+
 function renderJobs() {
   const list = $("#job-list");
   const keep = new Set();
@@ -1254,12 +1351,14 @@ function renderJobs() {
     const total = view.total || 1;
     const title = job.files.length === 1 ? job.files[0].name : plural(job.files.length, "file");
     const own = Math.min(total, job.uploaded + (job.fileLoaded || 0));
+    const done = deliveredBytes(own, view.targets.map((t) => effectiveTarget(job, t)));
+    measureSpeed(job, done);
     let headline;
-    if (job.paused) headline = job.chunkNote || `Paused · ${formatBytes(own)} of ${formatBytes(view.total)}`;
+    if (job.paused) headline = job.chunkNote || `Paused · ${formatBytes(done)} of ${formatBytes(view.total)}`;
     else if (job.state === "waiting") headline = `${formatBytes(view.total)} · waiting for ${plural(view.targets.filter((t) => t.state === "waiting" || t.state === "offering").length, "answer")}`;
-    else if (job.state === "running" && job.relayRunning) {
-      const eta = job.speed > 0 ? formatDuration((total - own) / job.speed) : "";
-      headline = [`${formatBytes(own)} of ${formatBytes(view.total)}`, job.speed > 0 && `${formatBytes(job.speed)}/s`, eta, job.chunkNote].filter(Boolean).join(" · ");
+    else if (job.state === "running" && (job.relayRunning || done < own)) {
+      const eta = job.speed > 0 ? formatDuration((total - done) / job.speed) : "";
+      headline = [`${formatBytes(done)} of ${formatBytes(view.total)}`, job.speed > 0 && `${formatBytes(job.speed)}/s`, eta].filter(Boolean).join(" · ");
     } else if (job.state === "running") headline = `${formatBytes(view.total)} · sending directly`;
     else headline = formatBytes(view.total);
     const anyWaiting = view.targets.some((t) => t.state === "waiting" || t.state === "offering");
@@ -1319,7 +1418,12 @@ function renderJobs() {
             { class: "job-target", dataset: { state: t.state, path } },
             h("span", { class: "mini-avatar", "aria-hidden": "true" }, icon(deviceIcon(t))),
             h("span", { class: "job-target-name" }, t.name),
-            h("span", { class: "job-target-path", title: PATH_HINT[path] }, pathLabel(path, original)),
+            h(
+              "span",
+              { class: "job-target-path", title: [PATH_HINT[path], SECURITY_HINT[original.security]].filter(Boolean).join(". ") },
+              // Declined, or failed before a byte went out: nothing crossed the network to label.
+              FINAL.has(original.state) && original.state !== "done" && !original.sent ? "" : pathLabel(path, original) + (SECURITY_LABEL[original.security] || ""),
+            ),
             h("span", { class: "job-target-state" }, text),
             canRetryTarget &&
               h(
@@ -1381,7 +1485,8 @@ function renderJobs() {
 
 window.addEventListener("beforeunload", (event) => {
   const unsaved = mesh.directFiles.some((f) => !f.saved);
-  if ([...mesh.jobs.values()].some(jobActive) || unsaved) {
+  // Files staged or queued exist only in this page: leaving would drop them unsent.
+  if ([...mesh.jobs.values()].some(jobActive) || unsaved || mesh.staged.length || mesh.queue.length) {
     event.preventDefault();
     event.returnValue = "";
   }
@@ -1485,7 +1590,8 @@ function fillPrompt(s) {
   $("#incoming-title").textContent = `${from.name} wants to send you ${s.files.length === 1 ? "a file" : `${s.files.length} files`}`;
   const host = mesh.data.host;
   const via = from.via_name && from.via_name !== host.name ? ` · via ${from.via_name}` : "";
-  $("#incoming-sub").textContent = `${formatBytes(s.total)}${via}${s.paired ? " · paired" : ""}`;
+  const seal = SECURITY_LABEL[s.security] || "";
+  $("#incoming-sub").textContent = `${formatBytes(s.total)}${via}${s.paired ? " · paired" : ""}${seal}`;
   const shown = s.files.slice(0, 5);
   $("#incoming-files").replaceChildren(
     ...shown.map((f) =>
@@ -1507,7 +1613,8 @@ function fillPrompt(s) {
     $("#incoming-dupes-text").textContent = `${one ? "1 of these files is" : `${dupes} of these files are`} already here (same name and size).`;
     $("#dupes-skip").textContent = one ? "Skip it" : "Skip them";
     $("#dupes-replace").textContent = one ? "Replace it" : "Replace them";
-    for (const radio of document.querySelectorAll("input[name=dupes]")) radio.checked = radio.value === "rename";
+    // Asked again after a failure: what already arrived needn't come twice.
+    for (const radio of document.querySelectorAll("input[name=dupes]")) radio.checked = radio.value === (s.retry ? "skip" : "rename");
   }
   $("#incoming-accept").disabled = false;
   $("#incoming-decline").disabled = false;
@@ -1638,6 +1745,23 @@ export async function confirmSensitive(text, { action = "Send" } = {}) {
   });
 }
 
+/** One narrow firewall rule for this app, after Windows asks the owner (UAC). */
+async function allowOnThisNetwork() {
+  const button = $("#me-allow");
+  button.disabled = true;
+  try {
+    const { data } = await api("/api/network/allow", { method: "POST" });
+    if (data.result === "allowed") toast("Allowed — other devices can reach this PC now", { tone: "success", icon: "check" });
+    else if (data.result === "failed" && mesh.data?.network?.blocking_rules?.length) toast("Couldn’t remove the blocking rule — Windows Security → Firewall can", { tone: "error", icon: "alert" });
+    else if (data.result === "cancelled") toast("Nothing changed — Windows asked and the answer was No", { icon: "alert" });
+    else toast("Couldn’t change the firewall rule", { tone: "error", icon: "alert" });
+  } catch (err) {
+    toast(err.message, { tone: "error", icon: "alert" });
+  } finally {
+    button.disabled = false;
+  }
+}
+
 function setupRename() {
   const dialog = $("#rename-dialog");
   const input = $("#rename-input");
@@ -1683,13 +1807,37 @@ function formatCode(code) {
 function fillPairing() {
   const pairing = mesh.data?.pairing;
   if (!pairing) return;
-  $("#pair-code").textContent = formatCode(pairing.code);
-  $("#pair-code").setAttribute("aria-label", `Pairing code ${pairing.code.split("").join(" ")}`);
+  // Until the app says the window is open, the code it has isn't the one that will work.
+  $("#pair-code").textContent = pairing.open ? formatCode(pairing.code) : "––– –––";
+  $("#pair-code").setAttribute("aria-label", pairing.open ? `Pairing code ${pairing.code.split("").join(" ")}` : "Getting a pairing code");
   const qr = $("#qr-image");
-  const src = `/api/pair/qr.svg?c=${encodeURIComponent(pairing.code)}`;
-  if (qr.getAttribute("src") !== src) qr.src = src;
+  const src = pairing.open ? `/api/pair/qr.svg?c=${encodeURIComponent(pairing.code)}` : "";
+  if (!src) qr.removeAttribute("src");
+  else if (qr.getAttribute("src") !== src) qr.src = src;
   const minutes = Math.max(1, Math.round(pairing.expires_in / 60));
   $("#pair-expiry-text").textContent = `Changes in ${minutes} min`;
+}
+
+// A code only works while Add device is open on its device: tell the app when
+// the sheet opens, renew it while it stays open, and say when it closes.
+function holdPairingOpen() {
+  const renew = () =>
+    api("/api/pair/open", { method: "POST" })
+      .then(({ data }) => {
+        if (mesh.data) mesh.data.pairing = { ...data, open: true };
+        fillPairing();
+      })
+      .catch(() => {});
+  clearInterval(mesh.pairTimer);
+  renew();
+  mesh.pairTimer = setInterval(() => ($("#connect-dialog").open ? renew() : releasePairing()), 20000);
+}
+
+function releasePairing() {
+  if (!mesh.pairTimer) return;
+  clearInterval(mesh.pairTimer);
+  mesh.pairTimer = null;
+  api("/api/pair/close", { method: "POST" }).catch(() => {});
 }
 
 export function openAddDevice({ tab = "show" } = {}) {
@@ -1703,10 +1851,17 @@ export function openAddDevice({ tab = "show" } = {}) {
     : "Scan with another phone’s camera, or open the link on any device on the same Wi-Fi.";
   const info = state.info;
   $("#share-url").textContent = info.share_url;
-  if (owner) fillPairing();
-  else $("#qr-image").src = `/api/qr.svg?v=${encodeURIComponent(info.share_url)}`;
+  if (owner) {
+    fillPairing();
+    holdPairingOpen();
+  } else $("#qr-image").src = `/api/qr.svg?v=${encodeURIComponent(info.share_url)}`;
   $("#pin-note").hidden = !info.pin;
   $("#pin-note-value").textContent = info.pin || "";
+  const tls = owner ? mesh.data?.https : null; // --https: the self-signed certificate to compare
+  $("#tls-note").hidden = !tls;
+  $("#tls-note-value").textContent = tls ? tls.fingerprint : "";
+  $("#enc-only-row").hidden = !owner;
+  $("#enc-only").checked = Boolean(mesh.data?.settings?.encrypted_only);
   $("#share-url-button").hidden = !navigator.share;
   const others = (info.urls || []).filter((u) => u !== info.share_url);
   $("#other-urls").hidden = others.length === 0;
@@ -1719,7 +1874,7 @@ export function openAddDevice({ tab = "show" } = {}) {
 
 function canScan() {
   if (nativeApp()?.scanQr) return true;
-  return "BarcodeDetector" in window && Boolean(navigator.mediaDevices?.getUserMedia) && window.isSecureContext;
+  return Boolean(navigator.mediaDevices?.getUserMedia) && window.isSecureContext;
 }
 
 async function pair(code, address) {
@@ -1762,11 +1917,41 @@ function handleScan(text) {
   }
   setTab("enter");
   $("#pair-input").value = formatCode(code);
-  $("#pair-address").value = url.host;
-  pair(code, url.host);
+  pair(code, url.host); // not kept in the address field: a code typed later finds its own device
 }
 
 let scanner = null;
+
+const CAMERA_PROBLEMS = {
+  NotAllowedError: "Camera access is off. Allow it in your browser or system settings, or enter the code instead.",
+  SecurityError: "Camera access is off. Allow it in your browser or system settings, or enter the code instead.",
+  NotFoundError: "No camera found. Enter the code shown on the other device.",
+  OverconstrainedError: "No camera found. Enter the code shown on the other device.",
+  NotReadableError: "The camera is in use by another app. Close it, or enter the code instead.",
+};
+
+/** A QR reader for video frames: the browser's own, or jsQR where there's none (Safari, Firefox, desktop windows). */
+async function qrReader() {
+  if ("BarcodeDetector" in window && (await window.BarcodeDetector.getSupportedFormats()).includes("qr_code")) {
+    const detector = new window.BarcodeDetector({ formats: ["qr_code"] });
+    return async (video) => (await detector.detect(video))[0]?.rawValue;
+  }
+  if (!window.jsQR) {
+    await new Promise((resolve, reject) => {
+      document.head.append(h("script", { src: "/static/vendor/jsQR.js", onload: resolve, onerror: reject }));
+    });
+  }
+  const canvas = document.createElement("canvas");
+  const g = canvas.getContext("2d", { willReadFrequently: true });
+  return async (video) => {
+    const scale = Math.min(1, 640 / Math.max(video.videoWidth, video.videoHeight));
+    canvas.width = Math.round(video.videoWidth * scale);
+    canvas.height = Math.round(video.videoHeight * scale);
+    if (!canvas.width) return undefined;
+    g.drawImage(video, 0, 0, canvas.width, canvas.height);
+    return window.jsQR(g.getImageData(0, 0, canvas.width, canvas.height).data, canvas.width, canvas.height)?.data;
+  };
+}
 
 async function startScan() {
   const app = nativeApp();
@@ -1774,45 +1959,75 @@ async function startScan() {
     app.scanQr();
     return;
   }
+  if (scanner) return; // already starting or scanning
+  const mine = { stream: null, stopped: false, cameras: [], camera: null };
+  scanner = mine;
+  $("#pair-error").textContent = "";
   try {
-    const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" } });
-    const video = $("#scan-video");
-    video.srcObject = stream;
+    const read = await qrReader();
+    await openCamera(mine, { facingMode: "environment" });
+    if (mine.stopped) return;
     $("#scan-view").hidden = false;
-    await video.play();
-    const detector = new window.BarcodeDetector({ formats: ["qr_code"] });
-    scanner = { stream, stopped: false };
+    mine.cameras = (await navigator.mediaDevices.enumerateDevices()).filter((d) => d.kind === "videoinput");
+    $("#scan-switch").hidden = mine.stopped || mine.cameras.length < 2;
+    const video = $("#scan-video");
     const tick = async () => {
-      if (!scanner || scanner.stopped) return;
+      if (mine.stopped) return;
       try {
-        const codes = await detector.detect(video);
-        if (codes.length) {
-          handleScan(codes[0].rawValue);
+        const text = await read(video);
+        if (text) {
+          handleScan(text);
           return;
         }
       } catch {
         /* frame not ready */
       }
-      requestAnimationFrame(tick);
+      setTimeout(tick, 100);
     };
     tick();
-  } catch {
-    $("#pair-error").textContent = "Couldn’t open the camera. Enter the code instead.";
+  } catch (err) {
+    if (mine.stopped) return;
+    stopScanner();
+    $("#pair-error").textContent = CAMERA_PROBLEMS[err?.name] || "Couldn’t open the camera. Enter the code instead.";
+    $("#pair-input").focus();
   }
+}
+
+/** Point the scanner at a camera, letting go of the one it had. */
+async function openCamera(mine, video) {
+  const stream = await navigator.mediaDevices.getUserMedia({ video });
+  if (mine.stopped) {
+    for (const track of stream.getTracks()) track.stop(); // closed while the camera was starting
+    return;
+  }
+  for (const track of mine.stream?.getTracks() || []) track.stop();
+  mine.stream = stream;
+  mine.camera = stream.getVideoTracks()[0]?.getSettings().deviceId ?? video.deviceId?.exact;
+  const el = $("#scan-video");
+  el.srcObject = stream;
+  await el.play();
+}
+
+function switchCamera() {
+  const mine = scanner;
+  if (!mine?.stream || mine.cameras.length < 2) return;
+  const at = Math.max(0, mine.cameras.findIndex((d) => d.deviceId === mine.camera)); // unknown: the default, listed first
+  const next = mine.cameras[(at + 1) % mine.cameras.length];
+  openCamera(mine, { deviceId: { exact: next.deviceId } }).catch((err) => {
+    if (mine.stopped) return;
+    $("#pair-error").textContent = CAMERA_PROBLEMS[err?.name] || "Couldn’t switch cameras.";
+  });
 }
 
 function stopScanner() {
   if (!scanner) return;
   scanner.stopped = true;
-  try {
-    for (const track of scanner.stream.getTracks()) track.stop();
-  } catch {
-    /* camera already stopped */
-  }
+  for (const track of scanner.stream?.getTracks() || []) track.stop();
   const video = $("#scan-video");
   if (video) video.srcObject = null;
   scanner = null;
   $("#scan-view").hidden = true;
+  $("#scan-switch").hidden = true;
 }
 
 function setupConnectSheet() {
@@ -1821,7 +2036,10 @@ function setupConnectSheet() {
   dialog.addEventListener("click", (event) => {
     if (event.target === dialog) dialog.close();
   });
-  dialog.addEventListener("close", stopScanner);
+  dialog.addEventListener("close", () => {
+    stopScanner();
+    releasePairing();
+  });
   for (const tab of document.querySelectorAll("#connect-dialog [role=tab]")) {
     tab.addEventListener("click", () => setTab(tab.dataset.tab));
     tab.addEventListener("keydown", (event) => {
@@ -1857,7 +2075,20 @@ function setupConnectSheet() {
   });
   $("#scan-button").addEventListener("click", startScan);
   $("#scan-cancel").addEventListener("click", stopScanner);
+  $("#scan-switch").addEventListener("click", switchCamera);
+  document.addEventListener("visibilitychange", () => document.hidden && stopScanner());
   window.addEventListener("ot-native-scan", (event) => handleScan(event.detail));
+  $("#enc-only").addEventListener("change", async (event) => {
+    const box = event.target;
+    try {
+      await api("/api/settings", { method: "PUT", json: { encrypted_only: box.checked } });
+      mesh.etag = null;
+      ctx.requestPoll();
+    } catch (err) {
+      box.checked = !box.checked;
+      toast(err.message || "Couldn’t change that setting", { tone: "error", icon: "alert" });
+    }
+  });
   $("#copy-url").addEventListener("click", async () => {
     const button = $("#copy-url");
     const ok = await copyText(state.info.share_url);
@@ -1943,6 +2174,7 @@ export function initNearby(context) {
   setupConnectSheet();
   setupRename();
   setupTextDialog();
+  $("#me-allow").addEventListener("click", allowOnThisNetwork);
   $("#select-all").addEventListener("click", () => {
     const online = onlineDevices();
     const allSelected = online.every((d) => mesh.selected.has(d.id));

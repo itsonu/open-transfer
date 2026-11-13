@@ -130,3 +130,161 @@ def test_browsers_without_the_bridge_are_unaffected(page, devices: list[Server])
     expect(tile(page, "Bravo")).to_be_visible(timeout=10_000)
     page.evaluate("window.dispatchEvent(new Event('ot-native-share'))")
     expect(page.locator("#send-bar")).to_be_hidden()
+
+
+# ------------------------------------------------------- text, links, both
+
+
+def share_text(page, text: str, *files: dict) -> None:  # type: ignore[no-untyped-def,type-arg]
+    """A share with text (EXTRA_TEXT / EXTRA_SUBJECT / ClipData text, combined by the app)."""
+    page.evaluate(
+        "([text, files]) => { window.__shares.push({ files, text });"
+        " window.dispatchEvent(new Event('ot-native-share')); }",
+        [text, list(files)],
+    )
+
+
+def test_shared_text_is_ready_to_send_to_who_you_choose(
+    phone, second_page, devices: list[Server]
+) -> None:  # type: ignore[no-untyped-def]
+    _alpha, bravo, charlie = devices
+    second_page.goto(bravo.url)
+    share_text(phone, "Meet at the north entrance at 5")
+    expect(phone.locator("#send-bar-files")).to_contain_text("Shared text")
+    tile(phone, "Bravo").locator(".device-button").click()
+    phone.click("#send-go")
+    second_page.locator("#incoming-accept").click(timeout=10_000)
+    expect(phone.locator(".job-target", has_text="Bravo")).to_contain_text(
+        "Delivered", timeout=10_000
+    )
+    [got] = list(bravo.root.glob("Shared text*.txt"))
+    assert got.read_text() == "Meet at the north entrance at 5"
+    assert not list(charlie.root.glob("*.txt"))  # only who was chosen
+
+
+def test_a_shared_link_is_sent_as_a_link(phone) -> None:  # type: ignore[no-untyped-def]
+    share_text(phone, "Open Transfer docs\nhttps://example.com/docs")
+    expect(phone.locator("#send-bar-files")).to_contain_text("Link")
+
+
+def test_text_shared_with_files_keeps_both(phone) -> None:  # type: ignore[no-untyped-def]
+    share_text(phone, "Photos from Saturday", PHOTO_ITEM, PDF_ITEM)
+    expect(phone.locator("#send-bar-files")).to_contain_text("3 files")
+
+
+def test_private_looking_shared_text_asks_first(phone) -> None:  # type: ignore[no-untyped-def]
+    share_text(phone, "password: hunter2-correct-horse")
+    expect(phone.locator("#confirm-dialog")).to_be_visible()
+
+
+def test_a_mixed_share_keeps_what_it_can_and_says_what_it_cant(phone) -> None:  # type: ignore[no-untyped-def]
+    """Phase L: a photo, a file whose grant expired (404), a link and its title, in one share."""
+    gone = {"url": "/__shared/t0k3n/2", "name": "gone.pdf", "mime": "application/pdf"}
+    share_text(phone, "Holiday album\nhttps://example.com/album", PHOTO_ITEM, gone)
+    expect(phone.locator(".toast", has_text="Couldn’t read 1 shared file")).to_be_visible()
+    expect(phone.locator("#send-bar-files")).to_contain_text("2 files")  # the photo and the link
+
+
+# ------------------------------------------------------- big shares
+
+VIDEO = bytes(range(256)) * 24_000  # 6.1 MB: over the 4 MiB line where sending goes in pieces
+
+
+def test_a_big_shared_file_is_listed_at_once_and_read_as_it_is_sent(
+    page, second_page, devices: list[Server]
+) -> None:  # type: ignore[no-untyped-def]
+    """20 videos (3.1 GB) were copied into the page before any of them showed up.
+    Now the app serves byte ranges and the page reads a big file only as it sends."""
+    _alpha, bravo, _charlie = devices
+    asked: list[str] = []
+
+    def app(route) -> None:  # type: ignore[no-untyped-def]
+        wanted = route.request.headers.get("range", "")
+        asked.append(wanted)
+        start, _, end = wanted.removeprefix("bytes=").partition("-")
+        if not wanted:
+            route.fulfill(status=200, body=VIDEO, content_type="video/mp4")
+            return
+        last = min(int(end), len(VIDEO) - 1)
+        route.fulfill(
+            status=206,
+            body=VIDEO[int(start) : last + 1],
+            headers={"Content-Range": f"bytes {start}-{last}/{len(VIDEO)}"},
+            content_type="video/mp4",
+        )
+
+    page.add_init_script(FAKE_BRIDGE)
+    page.route("**/__shared/**", app)
+    page.goto(devices[0].url)
+    second_page.goto(bravo.url)
+    expect(tile(page, "Bravo")).to_be_visible(timeout=10_000)
+    item = {
+        "url": "/__shared/t0k3n/0",
+        "name": "VID_2041.mp4",
+        "mime": "video/mp4",
+        "size": len(VIDEO),
+    }
+    share(page, item)
+    expect(page.locator("#send-bar-files")).to_contain_text("VID_2041.mp4")
+    assert asked == ["bytes=0-0"]  # only checked it can be read: nothing copied yet
+
+    tile(page, "Bravo").locator(".device-button").click()
+    page.click("#send-go")
+    second_page.locator("#incoming-accept").click(timeout=10_000)
+    expect(page.locator(".job-target", has_text="Bravo")).to_contain_text(
+        "Delivered", timeout=15_000
+    )
+    assert (bravo.root / "VID_2041.mp4").read_bytes() == VIDEO
+    assert all(asked), asked  # every read was a range, never the whole file
+
+
+# ------------------------------------------- where photos were taken
+
+PLACE_BRIDGE = """
+window.__place = false;
+window.__asked = 0;
+window.__settings = 0;
+window.OpenTransferAndroid = {
+  mediaLocation() { return window.__place; },
+  askMediaLocation() { window.__asked += 1; },
+  openAppSettings() { window.__settings += 1; },
+};
+"""
+KEEP_PLACE = "Keep where photos and videos were taken"
+
+
+def android_answers(page, allowed: bool) -> None:  # type: ignore[no-untyped-def]
+    page.evaluate(
+        "(a) => { window.__place = a; window.dispatchEvent(new Event('ot-media-location')); }",
+        allowed,
+    )
+
+
+def test_photos_keep_where_they_were_taken_once_android_allows(page, devices: list[Server]) -> None:  # type: ignore[no-untyped-def]
+    page.add_init_script(PLACE_BRIDGE)
+    page.goto(devices[0].url)
+    switch = page.get_by_label(KEEP_PLACE)
+    expect(switch).not_to_be_checked()
+    switch.click()
+    assert page.evaluate("window.__asked") == 1
+    expect(switch).not_to_be_checked()  # until Android says yes
+    android_answers(page, True)
+    expect(switch).to_be_checked()
+    switch.click()  # only Android's settings can take it back
+    assert page.evaluate("window.__settings") == 1
+    expect(switch).to_be_checked()
+
+
+def test_limited_photo_access_says_what_keeps_them(page, devices: list[Server]) -> None:  # type: ignore[no-untyped-def]
+    page.add_init_script(PLACE_BRIDGE)
+    page.goto(devices[0].url)
+    page.get_by_label(KEEP_PLACE).click()
+    android_answers(page, False)
+    expect(page.locator(".toast", has_text="Allow all")).to_be_visible()
+    expect(page.get_by_label(KEEP_PLACE)).not_to_be_checked()
+
+
+def test_no_place_switch_outside_the_android_app(page, devices: list[Server]) -> None:  # type: ignore[no-untyped-def]
+    page.goto(devices[0].url)
+    expect(tile(page, "Bravo")).to_be_visible(timeout=10_000)
+    expect(page.locator("#keep-place-row")).to_be_hidden()

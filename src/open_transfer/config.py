@@ -58,8 +58,8 @@ class Config:
     pin: str | None = None
     #: Maximum size of a single upload in bytes. 0 = unlimited (bounded by free disk).
     max_upload_size: int = 0
-    #: Allow visitors to delete shared files.
-    allow_delete: bool = True
+    #: Allow visitors to delete shared files (shared-folder mode). Off unless asked for.
+    allow_delete: bool = False
     #: Allow visitors to upload files. Disable to only *serve* a folder.
     allow_upload: bool = True
     #: Allow visitors to see and download shared files. Disable for a "drop box".
@@ -68,6 +68,8 @@ class Config:
     public_url: str | None = None
     #: Extra Host header values to accept (DNS-rebinding protection). "*" disables the check.
     allowed_hosts: tuple[str, ...] = ()
+    #: Also serve browsers over TLS (self-signed) on a second port; links and QR use it.
+    https: bool = False
     #: Trust X-Forwarded-* headers from one reverse proxy in front of the app.
     trust_proxy: bool = False
     #: Always keep this many bytes of disk free.
@@ -96,6 +98,10 @@ class Config:
     auto_accept: bool = False
     #: Only accept files from paired devices (AirDrop's "Contacts only").
     paired_only: bool = False
+    #: Refuse app-to-app transfers that can't be encrypted (older versions). None:
+    #: what the owner chose (``<state>/settings.json``); on for a new installation,
+    #: off for one from before this version (recorded once, so older apps keep working).
+    encrypted_only: bool | None = None
     #: Let browsers that connect to this device see and download its folder
     #: (the classic shared-folder mode). Off by default: files are sent to
     #: chosen devices instead.

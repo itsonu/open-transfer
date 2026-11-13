@@ -57,7 +57,7 @@ Install it on each device from the [latest release](https://github.com/itsonu/op
 
 | Device | File | First launch |
 | ------ | ---- | ------------ |
-| **Windows 10/11** (x64) | `open-transfer-windows-x64.exe` | SmartScreen may warn about an unknown publisher → **More info → Run anyway**. Allow **Private networks** when the firewall asks (needed to be found). |
+| **Windows 10/11** (x64) | `open-transfer-windows-x64-setup.exe` (installer), or `open-transfer-windows-x64.exe` (portable, nothing installed) | The installer needs no admin rights and adds Open Transfer to the Start menu; running it again updates in place. SmartScreen may warn about an unknown publisher → **More info → Run anyway**. Allow **Private networks** when the firewall asks (needed to be found). |
 | **macOS 11+** Apple silicon | `open-transfer-macos-arm64.dmg` | Open the .dmg, drag **Open Transfer** to Applications. The app isn't notarised yet: the first time, **right-click → Open** (or System Settings → Privacy & Security → **Open Anyway**). Allow **local network** access when asked. |
 | **macOS 11+** Intel | `open-transfer-macos-x64.dmg` | Same as above. |
 | **Android 10+** phones & tablets (incl. Samsung Galaxy Tab) | `open-transfer-android.apk` | Allow installing from your browser/Files app when Android asks ("Install unknown apps"). Allow notifications so you see incoming files. 64-bit devices only. |
@@ -67,14 +67,26 @@ Received files go to **Downloads/Open Transfer** on every platform.
 
 **With Homebrew** (Mac): `brew install --cask itsonu/tap/open-transfer`. The first launch needs the same **Open Anyway** step as above.
 
-**Check your download** (optional): every release has a `SHA256SUMS` file. Put it next to what you downloaded and run `shasum -a 256 -c SHA256SUMS --ignore-missing` (macOS) or `sha256sum -c SHA256SUMS --ignore-missing` (Linux); each file should say **OK**. On Windows: `Get-FileHash .\open-transfer-windows-x64.exe` and compare with the line in `SHA256SUMS`.
+**Check your download** (optional): every release has a `SHA256SUMS` file. Put it next to what you downloaded and run `shasum -a 256 -c SHA256SUMS --ignore-missing` (macOS) or `sha256sum -c SHA256SUMS --ignore-missing` (Linux); each file should say **OK**. On Windows: `Get-FileHash .\open-transfer-windows-x64-setup.exe` and compare with the line in `SHA256SUMS`.
+
+**Updating** keeps your pairings, history and received files: install the new version over the old one (Windows installer, Mac: replace the app in Applications, Android: install the new APK, which must be signed with the same key).
+
+**Uninstalling.** Received files, pairings and history are kept unless you delete them too.
+
+| Platform | Remove the app | Remove everything else (optional) |
+| -------- | -------------- | --------------------------------- |
+| Windows (installer) | Settings → Apps → **Open Transfer** → Uninstall (it also turns off Start at login) | Delete `Downloads\Open Transfer` (files, and `.open-transfer` with pairings and history) and `%LOCALAPPDATA%\Open Transfer` (the window's data). Firewall rules (admin): Windows Defender Firewall → Advanced settings → Inbound Rules → delete those named **Open Transfer** |
+| Windows (portable .exe) | In the app, turn off **Start at login**, quit, delete the .exe | Same as above |
+| macOS | Turn off **Start at login**, **Quit** (menu bar ⇄), then drag **Open Transfer** from Applications to the Trash | Delete `~/Downloads/Open Transfer`, and the **Open Transfer** item in Keychain Access (the vault key; without it the saved pairings can't be opened anyway) |
+| Android | Long-press the icon → **Uninstall** | Android deletes its pairings and keys with the app; received files in `Download/Open Transfer` stay until you delete them |
+| Linux | Delete the binary; `~/.config/autostart/open-transfer.desktop` if you turned on Start at login | Delete `~/Downloads/Open Transfer` and the **Open Transfer vault key** entry in your keyring |
 
 **iPhone / iPad, or a device you can't install on?** Open the link or scan the QR code shown under **Add device** on any device that runs the app. The browser joins the group and can send and receive (through that device).
 
 **Build the apps yourself** (Python 3.10+, on the OS you want it for):
 
 ```bash
-python3 scripts/build_app.py --desktop   # Windows: dist/Open Transfer.exe · macOS: dist/open-transfer-macos-<arch>.dmg
+python3 scripts/build_app.py --desktop   # Windows: dist/Open Transfer.exe (+ installer with Inno Setup 6) · macOS: dist/open-transfer-macos-<arch>.dmg
 python3 scripts/build_app.py             # the single-file command-line build
 gradle -p android assembleRelease        # Android (needs the Android SDK; see android/README.md)
 ```
@@ -159,7 +171,7 @@ Any device can send to any other — there's no host or server role. A phone wit
 - Each device shows its **name, type and platform**; rename yours in one tap
 - Send to **one, several or all** devices; recipients are always shown before you send, and sending to everyone needs a confirmation
 - **Accept / Decline** prompt on the receiver with the sender, file names and sizes; offers expire after 2 minutes
-- **Pairing** with a QR code or 6-digit code (proved with HMAC, never sent in clear); paired devices auto-accept. Owners can also mint a **single-use guest link** (past the PIN, expires in 10 minutes)
+- **Pairing** with a QR code or 6-digit code (SRP: nothing on the Wi‑Fi lets anyone test a guess; it only works while Add device is open); paired devices auto-accept. Owners can also mint a **single-use guest link** (past the PIN, expires in 10 minutes)
 - **Paired-only** mode (like AirDrop's "Contacts only"), and add-by-address where multicast is blocked
 - Browsers without the app join a device's group by QR code and can send and receive too — **browser to browser goes direct** over WebRTC (falls back to the app if the network blocks it). Add the page to the home screen to use it like an app.
 
@@ -188,7 +200,7 @@ Any device can send to any other — there's no host or server role. A phone wit
 **Operating it**
 - One-command start on macOS, Linux and Windows; free-port fallback (macOS uses 5000 for AirPlay)
 - Optional **PIN** for browsers joining by link, with brute-force rate limiting
-- Classic **shared-folder** mode (`--share-folder`) with receive-only / read-only / no-delete, undo, search and ZIP download
+- Classic **shared-folder** mode (`--share-folder`) with receive-only / read-only, delete for visitors only if you allow it, undo, search and ZIP download
 - Docker image as an always-on hub, reverse-proxy support, and a documented [HTTP API](docs/api.md) and [device protocol](docs/protocol.md)
 
 ## Screenshots
@@ -215,6 +227,7 @@ Every option works as a command-line flag or an environment variable (flags win)
 | `--peer HOST:PORT` | `OPEN_TRANSFER_PEERS` (comma-separated) | — | Connect to an app directly (networks that block discovery) |
 | `--no-discovery` | `OPEN_TRANSFER_NO_DISCOVERY=1` | off | Don't announce this device or look for others |
 | `--paired-only` | `OPEN_TRANSFER_PAIRED_ONLY=1` | off | Only accept files from paired devices |
+| `--encrypted-only` | `OPEN_TRANSFER_ENCRYPTED_ONLY=1` | on for new installs | Refuse transfers to and from apps that can't encrypt (older versions); also a switch under Add device. Installs from before this version keep it off until you turn it on |
 | `--auto-accept` | `OPEN_TRANSFER_AUTO_ACCEPT=1` | off | Accept incoming files without asking (servers) |
 | `--share-folder` | `OPEN_TRANSFER_SHARE_FOLDER=1` | off | Classic mode: anyone who opens the link can browse the folder |
 | — | `OPEN_TRANSFER_DISCOVERY_PORT` | `47823` | UDP port for discovery |
@@ -224,10 +237,12 @@ Every option works as a command-line flag or an environment variable (flags win)
 | `--max-size` | `OPEN_TRANSFER_MAX_SIZE` | unlimited | Largest single upload, e.g. `500M`, `4G`, `2GiB` |
 | `--receive-only` | `OPEN_TRANSFER_RECEIVE_ONLY=1` | off | Shared-folder mode: visitors can send but not see files |
 | `--read-only` | `OPEN_TRANSFER_READ_ONLY=1` | off | Visitors can't send (shared-folder mode: download only) |
-| `--no-delete` | `OPEN_TRANSFER_NO_DELETE=1` | off | Shared-folder mode: visitors can't delete files |
+| `--allow-delete` | `OPEN_TRANSFER_ALLOW_DELETE=1` | off | Shared-folder mode: visitors can delete files (before 2026-10-31 this was the default) |
+| `--no-delete` | `OPEN_TRANSFER_NO_DELETE=1` | off | Shared-folder mode: visitors can't delete files, even with `--allow-delete` |
 | `--public-url` | `OPEN_TRANSFER_PUBLIC_URL` | auto | Address shown in the QR code (Docker, proxies, DNS names) |
 | `--allow-host NAME` | `OPEN_TRANSFER_ALLOWED_HOSTS` (comma-separated) | — | Extra host names to accept (see [DNS rebinding](#security--privacy)); `*` disables the check |
 | `--behind-proxy` | `OPEN_TRANSFER_BEHIND_PROXY=1` | off | Trust `X-Forwarded-*` from one reverse proxy |
+| `--https` | `OPEN_TRANSFER_HTTPS=1` | off | Also serve browsers over HTTPS on the next port (self-signed: browsers warn once); links and QR codes use it, and a browser opening an old `http://` link is sent there |
 | `--no-browser` | `OPEN_TRANSFER_NO_BROWSER=1` | off | Don't open a browser on start |
 | `--no-qr` | `OPEN_TRANSFER_NO_QR=1` | off | Don't print the QR code |
 | `-v, --verbose` | — | off | Log every request |
@@ -250,8 +265,8 @@ Open Transfer is designed for **trusted local networks** (home, office, a hotspo
 
 **What you should know**
 - Anyone on the same network can see your device's **name** and offer you files (you decide). Use `--paired-only` on shared or public Wi‑Fi, and `--pin` to keep strangers' browsers out.
-- **Traffic between devices is plain HTTP on your LAN — not encrypted.** Someone able to capture your Wi‑Fi traffic could read files in transit. Use networks you trust. (TLS with per-device certificates is on the roadmap.)
-- In `--share-folder` mode without a PIN, anyone who opens the link can see, download and delete the folder's files.
+- **Files between paired apps are encrypted end to end** (a fresh X25519 handshake per transfer, so a key stolen later doesn't open old transfers; AES-256-GCM with a key per file) and checked before they're kept. Each transfer says how it was protected. Between unpaired apps they're encrypted with a one-off key (**encrypted, not verified**). An older app gets plain HTTP, labelled **not encrypted** (or refused, with **Encrypted transfers only**). A browser without the app talks to its app over plain HTTP unless you start with `--https`. Details and the full coverage table: [docs/encryption.md](docs/encryption.md#coverage).
+- In `--share-folder` mode without a PIN, anyone who opens the link can see and download the folder's files (and delete them, with `--allow-delete`).
 - It is not meant to be exposed directly to the internet.
 
 Found a vulnerability? Please report it privately — see [SECURITY.md](SECURITY.md).

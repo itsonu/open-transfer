@@ -576,8 +576,13 @@ main {
   text-align: left;
 }
 
+.dropzone.is-compact > :not(.drop-icon) {
+  grid-column: 2; /* title, link, clipboard, hint: always beside the icon */
+  justify-self: start; /* the clipboard button hugs its label */
+}
+
 .dropzone.is-compact .drop-icon {
-  grid-row: span 3;
+  grid-row: 1 / span 4;
   width: 48px;
   height: 48px;
   margin: 0;
@@ -819,6 +824,14 @@ main {
 
 a.row-title:hover {
   text-decoration: none;
+}
+
+.row-text {
+  overflow: hidden;
+  color: var(--text);
+  font-size: 13px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .row-sub {
@@ -1413,6 +1426,10 @@ a.row-title:hover {
   font-size: 13px;
 }
 
+.me-allow {
+  margin-top: 6px;
+}
+
 .me-status::before {
   width: 7px;
   height: 7px;
@@ -1639,7 +1656,8 @@ body.is-dragging .device[data-online="1"] .device-button {
 
 /* Favorite star, quick send and the "drop here" hint on a tile. */
 .device-fav,
-.device-quick {
+.device-quick,
+.device-more {
   position: absolute;
   top: 6px;
   width: 32px;
@@ -1648,7 +1666,8 @@ body.is-dragging .device[data-online="1"] .device-button {
 }
 
 .device-fav .icon,
-.device-quick .icon {
+.device-quick .icon,
+.device-more .icon {
   width: 17px;
   height: 17px;
 }
@@ -1664,8 +1683,26 @@ body.is-dragging .device[data-online="1"] .device-button {
 
 .device:hover .device-fav,
 .device:focus-within .device-fav,
-.device.is-favorite .device-fav {
+.device.is-favorite .device-fav,
+.device:hover .device-more,
+.device:focus-within .device-more,
+.device-more[aria-expanded="true"] {
   opacity: 1;
+}
+
+/* The owner's ⋯ menu (remove pairing, pair): bottom corner, shown like the star;
+   its tile keeps the status line clear of it. */
+.device.has-menu .device-button {
+  padding-bottom: 34px;
+}
+
+.device-more {
+  top: auto;
+  right: 6px;
+  bottom: 6px;
+  color: var(--text-2);
+  opacity: 0;
+  transition: opacity var(--t-fast) var(--ease-out);
 }
 
 .device.is-favorite .device-fav {
@@ -1750,7 +1787,8 @@ body.is-dragging .everyone-target[data-ready="1"] {
 
 /* Touch screens have no hover: show the star, and leave room for it. */
 @media (pointer: coarse) {
-  .device-fav {
+  .device-fav,
+  .device-more {
     opacity: 1;
   }
 
@@ -2372,6 +2410,20 @@ body.has-send-bar .toasts {
   color: var(--success);
 }
 
+.history-names,
+.history-why {
+  overflow: hidden;
+  color: var(--text-2);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.history-dir[data-dir="failed"] {
+  background: var(--danger-soft);
+  color: var(--danger);
+}
+
 /* ------------------------------------------------------- invite links */
 
 .invite-block {
@@ -2574,6 +2626,7 @@ body.has-send-bar .toasts {
   }
 
   .send-bar-actions {
+    flex-wrap: wrap; /* the narrowest phones: Send gets its own row */
     width: 100%;
   }
 
@@ -2589,6 +2642,7 @@ body.has-send-bar .toasts {
   #download-all span,
   #send-folder span,
   #send-text span,
+  #send-clipboard span,
   #send-pick span {
     position: absolute;
     width: 1px;
@@ -2600,7 +2654,8 @@ body.has-send-bar .toasts {
 
   #send-pick,
   #send-folder,
-  #send-text {
+  #send-text,
+  #send-clipboard {
     min-height: 40px;
     padding: 0 12px;
   }
@@ -3119,7 +3174,9 @@ body.has-send-bar .toasts {
   font-size: 13px;
 }
 
-.clip-auto {
+.clip-auto,
+.enc-only,
+.keep-place {
   display: inline-flex;
   align-items: center;
   gap: 8px;
@@ -3167,10 +3224,16 @@ body.has-send-bar .toasts {
 }
 
 .clip-device input,
-.clip-auto input {
+.clip-auto input,
+.enc-only input,
+.keep-place input {
   width: 18px;
   height: 18px;
   accent-color: var(--accent);
+}
+
+.keep-place {
+  margin-top: 10px;
 }
 
 .clip-retention {

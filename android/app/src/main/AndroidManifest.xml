@@ -17,6 +17,9 @@
          keep arriving. (CHANGE_WIFI_MULTICAST_STATE above is its prerequisite.) -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <!-- Photos and videos you send keep where they were taken: without this Android
+         blanks the location in each copy it hands the app. -->
+    <uses-permission android:name="android.permission.ACCESS_MEDIA_LOCATION" />
 
     <!-- Android 10 only: received files go to Download/Open Transfer. Android 11+ lets
          apps create their own files there without any permission. -->
@@ -24,12 +27,17 @@
         android:name="android.permission.WRITE_EXTERNAL_STORAGE"
         android:maxSdkVersion="29" />
 
+    <!-- pageSizeCompat: Chaquopy's only cryptography build (42.0.8) has a 4 KB-aligned
+         _rust.so, which phones with 16 KB pages refuse to load, so the app couldn't start.
+         Android 16+ then loads it in compatibility mode. Drop this once that library is
+         16 KB-aligned. -->
     <application
         android:allowBackup="false"
         android:icon="@mipmap/ic_launcher"
         android:roundIcon="@mipmap/ic_launcher_round"
         android:label="@string/app_name"
         android:networkSecurityConfig="@xml/network_security_config"
+        android:pageSizeCompat="enabled"
         android:requestLegacyExternalStorage="true"
         android:supportsRtl="true"
         android:theme="@style/Theme.OpenTransfer">
@@ -46,12 +54,14 @@
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
-            <!-- Photos, videos and files from any app's share sheet (SharedFiles.kt).
-                 text/plain is left to ClipboardSendActivity ("Send to my devices"), which
-                 hands a shared .txt file back here. -->
+            <!-- Photos, videos, files, text and links from any app's share sheet
+                 (SharedFiles.kt): staged in the page to choose who gets them.
+                 ClipboardSendActivity ("Send to my devices") also takes text/plain: it
+                 sends to every synced device at once. -->
             <intent-filter>
                 <action android:name="android.intent.action.SEND" />
                 <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="text/plain" />
                 <data android:mimeType="image/*" />
                 <data android:mimeType="video/*" />
                 <data android:mimeType="audio/*" />
@@ -74,6 +84,10 @@
                 <data android:mimeType="*/*" />
             </intent-filter>
         </activity>
+
+        <receiver
+            android:name=".OfferActionReceiver"
+            android:exported="false" />
 
         <service
             android:name=".TransferService"

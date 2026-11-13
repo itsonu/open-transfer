@@ -275,14 +275,16 @@ class SyncEngine:
                 "size": size,
                 "devices": [self._name(d) for d in outcomes["delivered"]],
                 "queued": len(outcomes["queued"]),
+                "refused": [self._name(d) for d in outcomes["refused"]],  # e.g. sync off there
             }
         )
         log.info(
-            "Clipboard %s (%d bytes) synced to %d device(s), %d waiting",
+            "Clipboard %s (%d bytes) synced to %d device(s), %d waiting, %d refused",
             kind,
             size,
             len(outcomes["delivered"]),
             len(outcomes["queued"]),
+            len(outcomes["refused"]),
         )
         return {"status": "sent", "event": event_id, **{k: sorted(v) for k, v in outcomes.items()}}
 
@@ -815,10 +817,9 @@ class SyncEngine:
             raise SyncError(400, "bad_request", "Bad introduction.")
         if at <= self._store.revoked_at(device_id):
             return {"applied": False, "reason": "revoked"}
-        existing = self._trust.get(device_id)
-        if existing and (existing.paired_at, existing.key) >= (float(at), key.hex()):
+        name = str(device.get("name") or "")
+        if not self._trust.add(device_id, name, key, at=float(at), newer_only=True):
             return {"applied": False, "reason": "known"}
-        self._trust.add(device_id, str(device.get("name") or ""), key, at=float(at))
         address = device.get("address")
         if self._meet is not None and isinstance(address, str) and 0 < len(address) <= 300:
             self._meet(device_id, address)

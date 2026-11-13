@@ -118,6 +118,7 @@
                 <svg class="icon" aria-hidden="true"><use href="#i-edit"/></svg>
               </button>
               <span class="me-status" id="me-status"></span>
+              <button class="btn btn-tinted btn-small me-allow" type="button" id="me-allow" hidden>Allow on this network</button>
             </div>
           </div>
           <div class="section-head">
@@ -162,6 +163,7 @@
             <input type="file" id="file-input" multiple hidden>
             <input type="file" id="folder-input" hidden webkitdirectory>
           </div>
+          <label class="keep-place" id="keep-place-row" hidden><input type="checkbox" id="keep-place"> Keep where photos and videos were taken</label>
         </section>
 
         <section class="transfers" id="activity" aria-label="Transfers" hidden>
@@ -387,7 +389,9 @@
           <svg class="icon" aria-hidden="true"><use href="#i-copy"/></svg><span>Copy</span>
         </button>
       </div>
-      <p class="pin-note" id="pin-note" hidden>PIN <strong id="pin-note-value"></strong> — the QR code includes it.</p>
+      <p class="pin-note" id="pin-note" hidden>PIN <strong id="pin-note-value"></strong> — a browser that scans the QR code above in the next 10 minutes gets in without it. The code never contains the PIN.</p>
+      <p class="pin-note" id="tls-note" hidden>HTTPS: a browser warns once, because this certificate is this device’s own. Check its SHA-256 fingerprint in the browser’s certificate details: <strong id="tls-note-value"></strong></p>
+      <label class="enc-only pin-note" id="enc-only-row" hidden><input type="checkbox" id="enc-only"> Encrypted transfers only: don’t send to or take files from apps that can’t encrypt (older versions)</label>
       <button class="btn btn-plain btn-block" type="button" id="share-url-button" hidden>
         <svg class="icon" aria-hidden="true"><use href="#i-share"/></svg><span>Share link…</span>
       </button>
@@ -418,7 +422,7 @@
       <form class="pair-form" id="pair-form" novalidate>
         <label class="visually-hidden" for="pair-input">Pairing code</label>
         <input class="pin-input pair-input" id="pair-input" inputmode="numeric" autocomplete="one-time-code"
-               maxlength="7" placeholder="000 000" spellcheck="false">
+               placeholder="000 000" spellcheck="false">
         <details class="pair-address" id="pair-address-wrap">
           <summary>Not found? Enter its address</summary>
           <label class="visually-hidden" for="pair-address">Address</label>
@@ -435,6 +439,7 @@
       </button>
       <div class="scan-view" id="scan-view" hidden>
         <video id="scan-video" playsinline muted></video>
+        <button class="btn btn-plain btn-small" type="button" id="scan-switch" hidden>Use another camera</button>
         <button class="btn btn-plain btn-small" type="button" id="scan-cancel">Cancel</button>
       </div>
     </div>

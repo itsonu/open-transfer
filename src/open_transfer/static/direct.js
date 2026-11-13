@@ -12,6 +12,7 @@ import { api } from "./lib.js";
 /** Receivers keep direct files in memory until saved, so cap the size. */
 export const DIRECT_MAX_BYTES = 1_000_000_000;
 const CHUNK = 64 * 1024;
+const READ = 1024 * 1024;
 const HIGH_WATER = 4 * 1024 * 1024;
 const LOW_WATER = 1024 * 1024;
 const CONNECT_TIMEOUT = 12_000;
@@ -130,15 +131,19 @@ export async function sendDirect({ job, target, files, onProgress, signal }) {
       if (file.size > DIRECT_MAX_BYTES) throw new Error("file too large for direct transfer");
       const acked = new Promise((resolve, reject) => acks.set(index, (err) => (err ? reject(err) : resolve())));
       channel.send(JSON.stringify({ t: "file", i: index, name: file.name, size: file.size, mime: file.type || "application/octet-stream" }));
-      for (let offset = 0; offset < file.size; offset += CHUNK) {
-        if (closed) throw new Error("closed");
-        if (channel.bufferedAmount > HIGH_WATER) {
-          await new Promise((resolve) => channel.addEventListener("bufferedamountlow", resolve, { once: true }));
+      for (let offset = 0; offset < file.size; offset += READ) {
+        // A big share reads each range from its app, so read 1 MiB at a time.
+        const piece = await (await file.slice(offset, Math.min(offset + READ, file.size))).arrayBuffer();
+        for (let at = 0; at < piece.byteLength; at += CHUNK) {
+          if (closed) throw new Error("closed");
+          if (channel.bufferedAmount > HIGH_WATER) {
+            await new Promise((resolve) => channel.addEventListener("bufferedamountlow", resolve, { once: true }));
+          }
+          const chunk = piece.slice(at, at + CHUNK);
+          channel.send(chunk);
+          sent += chunk.byteLength;
+          onProgress?.(sent);
         }
-        const chunk = await file.slice(offset, offset + CHUNK).arrayBuffer();
-        channel.send(chunk);
-        sent += chunk.byteLength;
-        onProgress?.(sent);
       }
       channel.send(JSON.stringify({ t: "end", i: index }));
       await withTimeout(acked, ACK_TIMEOUT, "receipt");

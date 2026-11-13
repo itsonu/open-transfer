@@ -143,7 +143,7 @@ export async function putChunk(url, { method = "PUT", chunk, start, end, total, 
   };
   if (name) headers["X-Filename"] = encodeURIComponent(name);
   const ctrl = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(), timeout);
+  const timer = timeout ? setTimeout(() => ctrl.abort(), timeout) : 0; // 0: no limit
   if (signal) signal.addEventListener("abort", () => ctrl.abort(), { once: true });
   let res;
   try {
@@ -252,12 +252,16 @@ export async function uploadParallel(
       if (signal?.aborted) throw new DOMException("paused", "AbortError");
       const span = queue[cursor];
       cursor += 1;
-      const blob = file.slice(span.start, span.end);
+      // One of the last pieces completes the file, and its answer can wait for the app
+      // to pass the whole file on (66 s for 593 MB over a hotspot): not a stall. The
+      // app gives up on a receiver that stalls, and pausing still aborts it.
+      const last = cursor > queue.length - concurrency;
+      const blob = await file.slice(span.start, span.end); // a shared file reads its range
       const { data } = await putChunkRetry(
         url,
         {
           method, chunk: blob, start: span.start, end: span.end - 1, total,
-          uploadId, name, signal, timeout,
+          uploadId, name, signal, timeout: last ? 0 : timeout,
         },
       );
       finalData = data;
@@ -325,6 +329,13 @@ export function clearHistory() {
 //
 // Each upload samples its speed; the samples render as a tiny inline SVG
 // sparkline (no canvas, no dependencies) in the transfer row and in history.
+
+/**
+ * How far a send has really got: the slowest device still receiving. This app can
+ * take the bytes far faster than the Wi-Fi delivers them (a phone's own engine).
+ */
+export const deliveredBytes = (own, targets) =>
+  Math.min(own, ...targets.filter((t) => t.state === "accepted" || t.state === "sending").map((t) => t.sent || 0));
 
 export function pushSample(samples, speed) {
   samples.push(speed);

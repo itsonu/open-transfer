@@ -13,7 +13,7 @@ from tests.test_mesh import owner, wait_for
 
 
 def pair(a: Node, b: Node) -> None:
-    code = owner(b).state()["pairing"]["code"]
+    code = owner(b)("POST", "/api/pair/open")[1]["code"]
     status, data = owner(a)("POST", "/api/pair", {"code": code, "address": f"127.0.0.1:{b.port}"})
     assert status == 200, data
 

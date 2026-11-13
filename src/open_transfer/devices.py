@@ -2,7 +2,8 @@
 
 Every Open Transfer app has a stable random **device id** (kept in
 ``<state>/device.json``) and a human name. Pairing two devices stores a
-shared secret key on both sides (``<state>/trusted.json``); requests between
+shared secret key on both sides (``<state>/trusted.json``, sealed with a key
+from the OS keystore: see :mod:`open_transfer.keystore`); requests between
 paired devices are signed with it (see :func:`sign` / :func:`verify`), which
 lets them skip the "Accept?" prompt.
 """
@@ -20,7 +21,7 @@ import sys
 import threading
 import time
 import unicodedata
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -151,32 +152,65 @@ def _default_name() -> str:
 class TrustedDevice:
     id: str
     name: str
-    key: str  # hex
+    key: str = field(repr=False)  # hex; never in a log line
     paired_at: float
     form: str = ""  # remembered so an away device keeps its icon ("" = not known yet)
     platform: str = ""
+    enc: bool = False  # said in a signed hello that it speaks ot-file/2: never send it plain text
 
 
 class TrustStore:
     """Devices this one is paired with, and the key each pair shares."""
 
-    def __init__(self, state_dir: Path) -> None:
+    def __init__(self, state_dir: Path, vault: Any = None) -> None:
+        """``vault``: a :class:`open_transfer.keystore.Vault` (this folder's, by default)."""
+        from open_transfer.keystore import Locked, open_vault
+
+        self.vault = vault or open_vault(state_dir)
         self._path = state_dir / "trusted.json"
         self._lock = threading.Lock()
         self._devices: dict[str, TrustedDevice] = {}
+        # Entries whose key can't be opened (its vault key is gone, or it's damaged):
+        # kept as they are, never trusted, until the key is back or they're paired again.
+        self._locked: dict[str, dict[str, Any]] = {}
+        stale = False  # plain (from before the vault) or sealed with an older vault key
         for device_id, item in _read_json(self._path).items():
             try:
-                if valid_id(device_id) and len(bytes.fromhex(item["key"])) >= 16:
+                stored = item["key"]
+                if self.vault.is_sealed(stored):
+                    try:
+                        key = self.vault.open(stored, f"pair|{device_id}")
+                    except (Locked, ValueError):
+                        self._locked[device_id] = item
+                        continue
+                    stale |= not self.vault.is_current(stored)
+                else:
+                    key = bytes.fromhex(stored)
+                    stale = True
+                if valid_id(device_id) and len(key) >= 16:
                     self._devices[device_id] = TrustedDevice(
                         device_id,
                         clean_name(item.get("name")),
-                        item["key"],
+                        key.hex(),
                         float(item.get("paired_at", 0)),
                         clean_form(item["form"]) if item.get("form") else "",
                         clean_platform(item["platform"]) if item.get("platform") else "",
+                        item.get("enc") is True,
                     )
             except (KeyError, TypeError, ValueError):
                 continue
+        if self._locked:
+            log.warning(
+                "Couldn't unlock the pairing keys for %s; pair again to send to them.",
+                ", ".join(self.locked_names()),
+            )
+        if stale:
+            with self._lock:
+                self._save()
+
+    def locked_names(self) -> list[str]:
+        with self._lock:
+            return sorted(clean_name(item.get("name")) for item in self._locked.values())
 
     def get(self, device_id: str) -> TrustedDevice | None:
         with self._lock:
@@ -199,8 +233,13 @@ class TrustStore:
         *,
         form: str = "",
         platform: str = "",
-    ) -> TrustedDevice:
-        """Trust ``device_id``; ``at`` dates the key (introductions use the introducer's time)."""
+        newer_only: bool = False,
+    ) -> TrustedDevice | None:
+        """Trust ``device_id``; ``at`` dates the key (introductions use the introducer's time).
+
+        ``newer_only``: keep the key there if its (date, key) is later, so both ends of a
+        pair settle on the same key whatever order pairing and introductions arrive in.
+        """
         device = TrustedDevice(
             device_id,
             clean_name(name),
@@ -210,7 +249,11 @@ class TrustStore:
             clean_platform(platform) if platform else "",
         )
         with self._lock:
+            old = self._devices.get(device_id)
+            if newer_only and old and (old.paired_at, old.key) >= (device.paired_at, device.key):
+                return None
             self._devices[device_id] = device
+            self._locked.pop(device_id, None)
             self._save()
         return device
 
@@ -229,21 +272,31 @@ class TrustStore:
                 device.name, device.form, device.platform = seen
                 self._save()
 
+    def mark_enc(self, device_id: str) -> None:
+        with self._lock:
+            device = self._devices.get(device_id)
+            if device is not None and not device.enc:
+                device.enc = True
+                self._save()
+
     def remove(self, device_id: str) -> bool:
         with self._lock:
             removed = self._devices.pop(device_id, None) is not None
+            removed |= self._locked.pop(device_id, None) is not None
             if removed:
                 self._save()
         return removed
 
     def _save(self) -> None:
-        data = {
+        data: dict[str, Any] = dict(self._locked)
+        data |= {
             d.id: {
                 "name": d.name,
-                "key": d.key,
+                "key": self.vault.seal(bytes.fromhex(d.key), f"pair|{d.id}"),
                 "paired_at": d.paired_at,
                 **({"form": d.form} if d.form else {}),
                 **({"platform": d.platform} if d.platform else {}),
+                **({"enc": True} if d.enc else {}),
             }
             for d in self._devices.values()
         }
@@ -303,31 +356,16 @@ class SignatureChecker:
 
 # ------------------------------------------------------------------ pairing
 #
-# Pairing proves both sides know the same short code without sending it:
-#   1. B → A  {nonce_b}            A → B  {nonce_a}
-#   2. B → A  {proof_b}            A → B  {proof_a}
-# proof_x = HMAC(code, role | nonce_a | nonce_b | id_a | id_b), and the shared
-# key is HMAC(code, "key" | nonce_a | nonce_b | id_a | id_b). Each code is
-# short-lived and guesses are rate-limited.
+# Pairing runs SRP over the short code (see srp.py): someone watching learns
+# nothing to test guesses against, and someone pretending gets one guess per
+# attempt. The SRP session key K then gives the pair's long-term key.
 
 
-def _pair_mac(code: str, label: str, nonce_a: str, nonce_b: str, id_a: str, id_b: str) -> bytes:
-    message = f"open-transfer-pair/1\n{label}\n{nonce_a}\n{nonce_b}\n{id_a}\n{id_b}".encode()
-    return hmac.new(code.encode(), message, hashlib.sha256).digest()
-
-
-def pair_proof(code: str, role: str, nonce_a: str, nonce_b: str, id_a: str, id_b: str) -> str:
-    return _pair_mac(code, role, nonce_a, nonce_b, id_a, id_b).hex()
-
-
-def pair_key(code: str, nonce_a: str, nonce_b: str, id_a: str, id_b: str) -> bytes:
-    return _pair_mac(code, "key", nonce_a, nonce_b, id_a, id_b)
+def derive_pair_key(session_key: bytes, id_a: str, id_b: str) -> bytes:
+    """The long-term key for the pair (id_a shows the code, id_b enters it)."""
+    message = f"open-transfer-pair-key/2|{id_a}|{id_b}".encode()
+    return hmac.new(session_key, message, hashlib.sha256).digest()
 
 
 def new_pair_code() -> str:
     return f"{secrets.randbelow(10**6):06d}"
-
-
-def code_hint(code: str) -> str:
-    """What a device broadcasts to find whoever is showing ``code``."""
-    return hashlib.sha256(f"open-transfer-find/1\n{code}".encode()).hexdigest()[:16]

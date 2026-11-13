@@ -55,8 +55,8 @@ page can't do by itself.
 ## Build
 
 The Python sources are packaged straight from the repository's `src/` directory
-(`chaquopy.sourceSets.main.srcDir("../src")`). pip installs `flask`, `cheroot` and
-`segno` at build time. Keep them in sync with `pyproject.toml`.
+(`chaquopy.sourceSets.main.srcDir("../src")`). pip installs `flask`, `cheroot`, `segno` and
+`cryptography` (Chaquopy's 42.0.8 build) at build time. Keep them in sync with `pyproject.toml`.
 
 Requirements:
 

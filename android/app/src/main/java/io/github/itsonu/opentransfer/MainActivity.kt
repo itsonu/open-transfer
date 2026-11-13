@@ -2,8 +2,11 @@ package io.github.itsonu.opentransfer
 
 import android.Manifest
 import android.annotation.SuppressLint
+import android.app.AppOpsManager
 import android.app.DownloadManager
 import android.content.ActivityNotFoundException
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
@@ -12,6 +15,8 @@ import android.os.Bundle
 import android.os.Environment
 import android.os.Handler
 import android.os.Looper
+import android.os.Process
+import android.provider.Settings
 import android.util.Log
 import android.view.View
 import android.view.ViewGroup
@@ -50,6 +55,7 @@ import java.net.URL
 import java.util.Locale
 import java.util.concurrent.Callable
 import java.util.concurrent.FutureTask
+import java.util.concurrent.TimeUnit
 import kotlin.concurrent.thread
 
 /**
@@ -99,6 +105,15 @@ class MainActivity : ComponentActivity() {
             // app's own folder, without notifications offers only show inside the app.
             waitingForPermission = false
             startService()
+        }
+
+    private var afterMediaLocation: (() -> Unit)? = null
+    private val askMediaLocation =
+        registerForActivityResult(ActivityResultContracts.RequestPermission()) {
+            afterMediaLocation?.also { afterMediaLocation = null }?.invoke()
+            if (!destroyed && !webViewDead && shown is Screen.Page) {
+                webView.evaluateJavascript("window.dispatchEvent(new Event('ot-media-location'))", null)
+            }
         }
 
     private val pickFiles =
@@ -215,10 +230,45 @@ class MainActivity : ComponentActivity() {
         }
         if (action != Intent.ACTION_SEND && action != Intent.ACTION_SEND_MULTIPLE) return
         val app = applicationContext
-        thread(name = "ot-share", isDaemon = true) {
-            val kept = SharedFiles.receive(app, intent)
-            main.post { if (kept == 0) toast(R.string.share_nothing) else sharedArrived() }
+        withMediaLocation {
+            thread(name = "ot-share", isDaemon = true) {
+                val kept = SharedFiles.receive(app, intent)
+                main.post { if (kept == 0) toast(R.string.share_nothing) else sharedArrived() }
+            }
         }
+    }
+
+    /**
+     * Photos and videos keep where they were taken only with ACCESS_MEDIA_LOCATION
+     * (Android blanks it in each copy otherwise). Asked once, the first time files are
+     * sent, then [then] runs whatever the answer.
+     */
+    private fun withMediaLocation(then: () -> Unit) {
+        if (getPreferences(MODE_PRIVATE).getBoolean(KEY_ASKED_MEDIA_LOCATION, false) || keepsMediaLocation()) {
+            return then()
+        }
+        askForMediaLocation(then)
+    }
+
+    /**
+     * Granted isn't enough: "Allow limited access" grants it with its app op ignored
+     * (and only until the app restarts), and Android still blanks the location.
+     */
+    private fun keepsMediaLocation(): Boolean {
+        val permission = Manifest.permission.ACCESS_MEDIA_LOCATION
+        if (ContextCompat.checkSelfPermission(this, permission) != PackageManager.PERMISSION_GRANTED) return false
+        val op = AppOpsManager.permissionToOp(permission) ?: return true
+        return getSystemService(AppOpsManager::class.java)
+            .unsafeCheckOpNoThrow(op, Process.myUid(), packageName) == AppOpsManager.MODE_ALLOWED
+    }
+
+    /** Android's prompt; its answer reaches the page as `ot-media-location`. */
+    private fun askForMediaLocation(then: () -> Unit = {}) {
+        getPreferences(MODE_PRIVATE).edit().putBoolean(KEY_ASKED_MEDIA_LOCATION, true).apply()
+        // ponytail: [then] is lost if the activity is re-created while Android asks
+        // (a rotation): pick or share again. Persist the pending share if that bites.
+        afterMediaLocation = then
+        askMediaLocation.launch(Manifest.permission.ACCESS_MEDIA_LOCATION)
     }
 
     /** Tell the page, if it's up; otherwise it asks for them as soon as it loads. */
@@ -469,12 +519,14 @@ class MainActivity : ComponentActivity() {
             fileCallback?.onReceiveValue(null)
             fileCallback = filePathCallback
             allowMultiple = fileChooserParams?.mode == WebChromeClient.FileChooserParams.MODE_OPEN_MULTIPLE
-            try {
-                pickFiles.launch(mimeTypes(fileChooserParams?.acceptTypes))
-            } catch (e: ActivityNotFoundException) {
-                fileCallback = null
-                filePathCallback.onReceiveValue(null)
-                toast(R.string.no_file_picker)
+            withMediaLocation {
+                try {
+                    pickFiles.launch(mimeTypes(fileChooserParams?.acceptTypes))
+                } catch (e: ActivityNotFoundException) {
+                    fileCallback = null
+                    filePathCallback.onReceiveValue(null)
+                    toast(R.string.no_file_picker)
+                }
             }
             return true
         }
@@ -536,27 +588,47 @@ class MainActivity : ComponentActivity() {
 
     // ------------------------------------------------------------------ bridge
 
-    private fun openOwnFile(name: String?) {
+    /** A received file as a content:// URI other apps can be granted, with its type. */
+    private fun ownFile(name: String?): Pair<Uri, String>? {
         val safe = name?.takeIf { LocalPolicy.isSafeFileName(it) }
         if (safe == null) {
             Log.w(LOG_TAG, "Refusing to open '$name'")
-            return
+            return null
         }
         val file = File(TransferService.storageDir ?: Places.publicStorageDir(), safe)
         if (!file.isFile) {
             toast(R.string.file_missing)
-            return
+            return null
         }
         val uri = try {
             FileProvider.getUriForFile(this, "$packageName.files", file)
         } catch (e: IllegalArgumentException) {
             Log.w(LOG_TAG, "No FileProvider path for $file", e)
             toast(R.string.file_missing)
-            return
+            return null
         }
         val mime = MimeTypeMap.getSingleton()
             .getMimeTypeFromExtension(file.extension.lowercase(Locale.ROOT))
             ?: "application/octet-stream"
+        return uri to mime
+    }
+
+    private fun shareOwnFile(name: String?) {
+        val (uri, mime) = ownFile(name) ?: return
+        val send = Intent(Intent.ACTION_SEND)
+            .setType(mime)
+            .putExtra(Intent.EXTRA_STREAM, uri)
+            .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        send.clipData = ClipData.newRawUri(null, uri) // lets the chooser pass the grant on
+        try {
+            startActivity(Intent.createChooser(send, null))
+        } catch (e: ActivityNotFoundException) {
+            toast(R.string.no_app_for_file)
+        }
+    }
+
+    private fun openOwnFile(name: String?) {
+        val (uri, mime) = ownFile(name) ?: return
         val view = Intent(Intent.ACTION_VIEW)
             .setDataAndType(uri, mime)
             .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
@@ -602,6 +674,17 @@ class MainActivity : ComponentActivity() {
         )
     }
 
+    /** The clipboard's image (a content URI and its type), if one was copied. Main thread. */
+    private fun copiedImage(): Pair<Uri, String>? {
+        val clip = getSystemService(ClipboardManager::class.java)?.primaryClip ?: return null
+        val description = clip.description
+        val mime = (0 until description.mimeTypeCount)
+            .map { description.getMimeType(it) }
+            .firstOrNull { it.startsWith("image/") } ?: return null
+        val uri = (0 until clip.itemCount).firstNotNullOfOrNull { clip.getItemAt(it).uri } ?: return null
+        return uri to mime
+    }
+
     private fun toast(message: Int) {
         Toast.makeText(this, message, Toast.LENGTH_SHORT).show()
     }
@@ -618,9 +701,61 @@ class MainActivity : ComponentActivity() {
             main.post { openOwnFile(name) }
         }
 
+        /** The system Sharesheet for a received file (the WebView has no navigator.share). */
+        @JavascriptInterface
+        fun shareFile(name: String?) {
+            main.post { shareOwnFile(name) }
+        }
+
+        /** The clipboard's text, or "": the WebView never lets the page read it (no prompt to ask with). */
+        @JavascriptInterface
+        fun readClipboard(): String {
+            // Read on the main thread, where the focus is.
+            val read = FutureTask(Callable { ClipSync.readIfNew(this@MainActivity, force = true) })
+            main.post(read)
+            return try {
+                read.get(2, TimeUnit.SECONDS) ?: ""
+            } catch (e: Exception) {
+                ""
+            }
+        }
+
+        /** A copied image, served like a share (JSON `{url, mime, size}`), or "": text is [readClipboard]'s. */
+        @JavascriptInterface
+        fun readClipboardImage(): String {
+            val read = FutureTask(Callable { copiedImage() })
+            main.post(read)
+            val (uri, mime) = try {
+                read.get(2, TimeUnit.SECONDS)
+            } catch (e: Exception) {
+                null
+            } ?: return ""
+            return SharedFiles.copiedImage(this@MainActivity, uri, mime)
+        }
+
         /** Photos and files shared from other apps since the page last asked (JSON, or ""). */
         @JavascriptInterface
         fun takeShared(): String = SharedFiles.take()
+
+        /** Whether photos and videos keep where they were taken (see [withMediaLocation]). */
+        @JavascriptInterface
+        fun mediaLocation(): Boolean = keepsMediaLocation()
+
+        /** The page's switch: Android's prompt again, even after the first-time ask. */
+        @JavascriptInterface
+        fun askMediaLocation() {
+            main.post { askForMediaLocation() }
+        }
+
+        /** Switching it off: an app can't drop its own permission, Android's settings can. */
+        @JavascriptInterface
+        fun openAppSettings() {
+            main.post {
+                startActivity(
+                    Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.fromParts("package", packageName, null)),
+                )
+            }
+        }
 
         @JavascriptInterface
         fun platformInfo(): String =
@@ -637,5 +772,6 @@ class MainActivity : ComponentActivity() {
         const val ACTION_SHOW_SHARED = "io.github.itsonu.opentransfer.SHOW_SHARED"
         private const val LOG_TAG = "OpenTransfer"
         private const val KEY_ASKED_PERMISSIONS = "asked_permissions"
+        private const val KEY_ASKED_MEDIA_LOCATION = "asked_media_location"
     }
 }
