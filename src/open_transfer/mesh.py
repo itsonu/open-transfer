@@ -2457,8 +2457,6 @@ class Mesh:
                 push_sink.ok = ok
                 push_sink.error = error or ""
                 sinks.append(push_sink)
-                if ok:
-                    delivery.sent = size
         if job.canceled:
             self._relay_chunks.discard(upload_id)
             with self._lock:
@@ -2486,6 +2484,8 @@ class Mesh:
 
         src = _Path(str(path))
         offset = 0
+        # Progress counts the whole job: the files before this one, then this one so far.
+        before = sum(int(f["size"]) for f in job.files[:index])
         hasher = hashlib.sha256()
         try:
             cipher = self._send_cipher(delivery, index, size) if delivery.encrypted else None
@@ -2535,7 +2535,7 @@ class Mesh:
                             conn.close()
                         if res.status in (201, 308):
                             offset += len(data)
-                            delivery.sent = offset
+                            delivery.sent = before + offset
                             hasher.update(data)
                             break
                         if res.status == 410:

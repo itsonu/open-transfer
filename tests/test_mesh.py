@@ -220,14 +220,14 @@ def test_big_file_reaches_another_device_in_chunks(make_node: NodeFactory) -> No
     wait_for(lambda: target_states(alice, job) == {"Bravo": "done"})
 
 
-def send_in_chunks(client: Client, job: str, payload: bytes, upload_id: str) -> Any:
+def send_in_chunks(client: Client, job: str, payload: bytes, upload_id: str, index: int = 0) -> Any:
     piece = 2 * 1024 * 1024
     result: Any = None
     for start in range(0, len(payload), piece):
         chunk = payload[start : start + piece]
         status, result = client(
             "PUT",
-            f"/api/send/{job}/files/0",
+            f"/api/send/{job}/files/{index}",
             data=chunk,
             headers={
                 "Content-Range": f"bytes {start}-{start + len(chunk) - 1}/{len(payload)}",
@@ -237,6 +237,24 @@ def send_in_chunks(client: Client, job: str, payload: bytes, upload_id: str) -> 
         last = start + len(chunk) == len(payload)
         assert status in ({200, 201} if last else {308}), result
     return result
+
+
+def test_progress_counts_every_big_file_so_far(make_node: NodeFactory) -> None:
+    # Seen on a phone: after a few big files the sender read "57 MB of 2.4 GB"
+    # with 600 MB already on the Mac, as each big file restarted the count.
+    a, b = make_node("Alpha"), make_node("Bravo")
+    connect(a, b)
+    alice, bob = owner(a), owner(b)
+    first, second = os.urandom(5_000_000), os.urandom(5_000_000)
+    job = send(
+        alice, [device_id(alice, "Bravo")], [("a.mp4", first), ("b.mp4", second), ("c.txt", b"end")]
+    )
+    assert bob("POST", f"/api/incoming/{incoming(bob)['id']}/accept")[0] == 200
+    wait_for(lambda: target_states(alice, job) == {"Bravo": "accepted"})
+    send_in_chunks(alice, job, first, "u-first", 0)
+    send_in_chunks(alice, job, second, "u-second", 1)
+    sent = next(j for j in alice.state()["outgoing"] if j["id"] == job)["targets"][0]["sent"]
+    assert sent == len(first) + len(second)
 
 
 def test_resuming_a_finished_chunked_send_does_not_start_over(make_node: NodeFactory) -> None:
