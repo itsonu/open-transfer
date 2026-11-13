@@ -236,3 +236,55 @@ def test_a_big_shared_file_is_listed_at_once_and_read_as_it_is_sent(
     )
     assert (bravo.root / "VID_2041.mp4").read_bytes() == VIDEO
     assert all(asked), asked  # every read was a range, never the whole file
+
+
+# ------------------------------------------- where photos were taken
+
+PLACE_BRIDGE = """
+window.__place = false;
+window.__asked = 0;
+window.__settings = 0;
+window.OpenTransferAndroid = {
+  mediaLocation() { return window.__place; },
+  askMediaLocation() { window.__asked += 1; },
+  openAppSettings() { window.__settings += 1; },
+};
+"""
+KEEP_PLACE = "Keep where photos and videos were taken"
+
+
+def android_answers(page, allowed: bool) -> None:  # type: ignore[no-untyped-def]
+    page.evaluate(
+        "(a) => { window.__place = a; window.dispatchEvent(new Event('ot-media-location')); }",
+        allowed,
+    )
+
+
+def test_photos_keep_where_they_were_taken_once_android_allows(page, devices: list[Server]) -> None:  # type: ignore[no-untyped-def]
+    page.add_init_script(PLACE_BRIDGE)
+    page.goto(devices[0].url)
+    switch = page.get_by_label(KEEP_PLACE)
+    expect(switch).not_to_be_checked()
+    switch.click()
+    assert page.evaluate("window.__asked") == 1
+    expect(switch).not_to_be_checked()  # until Android says yes
+    android_answers(page, True)
+    expect(switch).to_be_checked()
+    switch.click()  # only Android's settings can take it back
+    assert page.evaluate("window.__settings") == 1
+    expect(switch).to_be_checked()
+
+
+def test_limited_photo_access_says_what_keeps_them(page, devices: list[Server]) -> None:  # type: ignore[no-untyped-def]
+    page.add_init_script(PLACE_BRIDGE)
+    page.goto(devices[0].url)
+    page.get_by_label(KEEP_PLACE).click()
+    android_answers(page, False)
+    expect(page.locator(".toast", has_text="Allow all")).to_be_visible()
+    expect(page.get_by_label(KEEP_PLACE)).not_to_be_checked()
+
+
+def test_no_place_switch_outside_the_android_app(page, devices: list[Server]) -> None:  # type: ignore[no-untyped-def]
+    page.goto(devices[0].url)
+    expect(tile(page, "Bravo")).to_be_visible(timeout=10_000)
+    expect(page.locator("#keep-place-row")).to_be_hidden()

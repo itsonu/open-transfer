@@ -112,6 +112,7 @@ function applyInfo(info) {
   const max = info.limits?.max_upload_size;
   if (max) hints.push(`Up to ${formatBytes(max)} per file.`);
   $("#drop-hint").textContent = hints.join(" ");
+  showKeepPlace();
   $("#overlay-text").textContent = deviceMode ? "Drop to send" : `Drop to share with everyone`;
   $("#library-title").textContent = { owner: "Received", shared: "Shared files", inbox: "Sent to you" }[mode];
   $("#empty-title").textContent = mode === "shared" ? "No files yet" : "Nothing received yet";
@@ -137,6 +138,16 @@ function showLock() {
   requestAnimationFrame(() => $("#pin-input").focus());
 }
 
+/** Android blanks where a photo or video was taken unless the app may keep it. */
+function showKeepPlace(answered = false) {
+  const native = nativeApp();
+  const row = $("#keep-place-row");
+  row.hidden = !native?.mediaLocation || !isDeviceMode();
+  if (row.hidden) return;
+  $("#keep-place").checked = native.mediaLocation();
+  if (answered && !native.mediaLocation()) toast("Android keeps them only with “Allow all”", { icon: "image" });
+}
+
 function enterMain() {
   state.locked = false;
   showView("main");
@@ -148,9 +159,17 @@ function enterMain() {
     state.started = true;
     document.addEventListener("visibilitychange", () => {
       if (!document.hidden) poll(true);
+      if (!document.hidden) showKeepPlace(); // back from Android's settings
     });
     setInterval(updateRelativeTimes, 30_000);
     window.addEventListener("ot-native-share", () => takeShared());
+    window.addEventListener("ot-media-location", () => showKeepPlace(true));
+    $("#keep-place").addEventListener("change", (event) => {
+      // On: Android asks (answering with "ot-media-location"). Off: only Android's settings can.
+      if (event.target.checked) nativeApp().askMediaLocation();
+      else nativeApp().openAppSettings();
+      event.target.checked = nativeApp().mediaLocation();
+    });
     announceSelf()
       .then(() => poll(true))
       .finally(() => takeShared());

@@ -2,6 +2,7 @@ package io.github.itsonu.opentransfer
 
 import android.Manifest
 import android.annotation.SuppressLint
+import android.app.AppOpsManager
 import android.app.DownloadManager
 import android.content.ActivityNotFoundException
 import android.content.ClipData
@@ -14,6 +15,8 @@ import android.os.Bundle
 import android.os.Environment
 import android.os.Handler
 import android.os.Looper
+import android.os.Process
+import android.provider.Settings
 import android.util.Log
 import android.view.View
 import android.view.ViewGroup
@@ -108,6 +111,9 @@ class MainActivity : ComponentActivity() {
     private val askMediaLocation =
         registerForActivityResult(ActivityResultContracts.RequestPermission()) {
             afterMediaLocation?.also { afterMediaLocation = null }?.invoke()
+            if (!destroyed && !webViewDead && shown is Screen.Page) {
+                webView.evaluateJavascript("window.dispatchEvent(new Event('ot-media-location'))", null)
+            }
         }
 
     private val pickFiles =
@@ -238,18 +244,31 @@ class MainActivity : ComponentActivity() {
      * sent, then [then] runs whatever the answer.
      */
     private fun withMediaLocation(then: () -> Unit) {
-        val prefs = getPreferences(MODE_PRIVATE)
-        val permission = Manifest.permission.ACCESS_MEDIA_LOCATION
-        if (prefs.getBoolean(KEY_ASKED_MEDIA_LOCATION, false) ||
-            ContextCompat.checkSelfPermission(this, permission) == PackageManager.PERMISSION_GRANTED
-        ) {
+        if (getPreferences(MODE_PRIVATE).getBoolean(KEY_ASKED_MEDIA_LOCATION, false) || keepsMediaLocation()) {
             return then()
         }
-        prefs.edit().putBoolean(KEY_ASKED_MEDIA_LOCATION, true).apply()
+        askForMediaLocation(then)
+    }
+
+    /**
+     * Granted isn't enough: "Allow limited access" grants it with its app op ignored
+     * (and only until the app restarts), and Android still blanks the location.
+     */
+    private fun keepsMediaLocation(): Boolean {
+        val permission = Manifest.permission.ACCESS_MEDIA_LOCATION
+        if (ContextCompat.checkSelfPermission(this, permission) != PackageManager.PERMISSION_GRANTED) return false
+        val op = AppOpsManager.permissionToOp(permission) ?: return true
+        return getSystemService(AppOpsManager::class.java)
+            .unsafeCheckOpNoThrow(op, Process.myUid(), packageName) == AppOpsManager.MODE_ALLOWED
+    }
+
+    /** Android's prompt; its answer reaches the page as `ot-media-location`. */
+    private fun askForMediaLocation(then: () -> Unit = {}) {
+        getPreferences(MODE_PRIVATE).edit().putBoolean(KEY_ASKED_MEDIA_LOCATION, true).apply()
         // ponytail: [then] is lost if the activity is re-created while Android asks
         // (a rotation): pick or share again. Persist the pending share if that bites.
         afterMediaLocation = then
-        askMediaLocation.launch(permission)
+        askMediaLocation.launch(Manifest.permission.ACCESS_MEDIA_LOCATION)
     }
 
     /** Tell the page, if it's up; otherwise it asks for them as soon as it loads. */
@@ -717,6 +736,26 @@ class MainActivity : ComponentActivity() {
         /** Photos and files shared from other apps since the page last asked (JSON, or ""). */
         @JavascriptInterface
         fun takeShared(): String = SharedFiles.take()
+
+        /** Whether photos and videos keep where they were taken (see [withMediaLocation]). */
+        @JavascriptInterface
+        fun mediaLocation(): Boolean = keepsMediaLocation()
+
+        /** The page's switch: Android's prompt again, even after the first-time ask. */
+        @JavascriptInterface
+        fun askMediaLocation() {
+            main.post { askForMediaLocation() }
+        }
+
+        /** Switching it off: an app can't drop its own permission, Android's settings can. */
+        @JavascriptInterface
+        fun openAppSettings() {
+            main.post {
+                startActivity(
+                    Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.fromParts("package", packageName, null)),
+                )
+            }
+        }
 
         @JavascriptInterface
         fun platformInfo(): String =

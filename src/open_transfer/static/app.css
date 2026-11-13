@@ -3175,7 +3175,8 @@ body.has-send-bar .toasts {
 }
 
 .clip-auto,
-.enc-only {
+.enc-only,
+.keep-place {
   display: inline-flex;
   align-items: center;
   gap: 8px;
@@ -3224,10 +3225,15 @@ body.has-send-bar .toasts {
 
 .clip-device input,
 .clip-auto input,
-.enc-only input {
+.enc-only input,
+.keep-place input {
   width: 18px;
   height: 18px;
   accent-color: var(--accent);
+}
+
+.keep-place {
+  margin-top: 10px;
 }
 
 .clip-retention {
