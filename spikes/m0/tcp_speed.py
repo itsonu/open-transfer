@@ -27,7 +27,10 @@ def sink() -> None:
                 while data := conn.recv(len(CHUNK)):
                     total += len(data)
                 secs = max(time.monotonic() - started, 1e-3)
-                print(f"RECEIVED {total // 2**20} MB from {peer} in {secs:.1f} s = {total / 2**20 / secs:.1f} MB/s", flush=True)
+                print(
+                    f"RECEIVED {total // 2**20} MB from {peer} in {secs:.1f} s = {total / 2**20 / secs:.1f} MB/s",
+                    flush=True,
+                )
 
 
 def send(host: str, mb: int) -> None:
@@ -43,9 +46,17 @@ def send(host: str, mb: int) -> None:
 
 def gateway() -> str:
     if sys.platform == "darwin":
-        out = subprocess.run(["route", "-n", "get", "default"], capture_output=True, text=True).stdout
+        out = subprocess.run(
+            ["route", "-n", "get", "default"],  # noqa: S607 - the system's route, fixed arguments
+            capture_output=True,
+            text=True,
+        ).stdout
         return next((line.split()[-1] for line in out.splitlines() if "gateway:" in line), "")
-    out = subprocess.run(["ip", "-4", "route", "show", "default"], capture_output=True, text=True).stdout
+    out = subprocess.run(
+        ["ip", "-4", "route", "show", "default"],  # noqa: S607 - the system's ip, fixed arguments
+        capture_output=True,
+        text=True,
+    ).stdout
     return out.split()[2] if out.split() else ""
 
 
@@ -54,7 +65,10 @@ if __name__ == "__main__":
     if cmd == "sink":
         sink()
     elif cmd == "send" and len(sys.argv) > 2:
-        send(sys.argv[2] if sys.argv[2] != "gateway" else gateway(), int(sys.argv[3]) if len(sys.argv) > 3 else 100)
+        send(
+            sys.argv[2] if sys.argv[2] != "gateway" else gateway(),
+            int(sys.argv[3]) if len(sys.argv) > 3 else 100,
+        )
     elif cmd == "gateway":
         print(gateway())
     else:
