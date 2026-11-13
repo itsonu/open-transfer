@@ -25,6 +25,22 @@ class SharePolicyTest {
     }
 
     @Test
+    fun aBigShareIsReadARangeAtATime() {
+        val mb = 1024L * 1024
+        assertEquals(0L..0L, SharePolicy.range("bytes=0-0", 3_000 * mb))
+        assertEquals(2 * mb..4 * mb - 1, SharePolicy.range("bytes=${2 * mb}-${4 * mb - 1}", 3_000 * mb))
+        assertEquals(10L..99L, SharePolicy.range("bytes=10-", 100)) // open-ended
+        assertEquals(90L..99L, SharePolicy.range("bytes=90-500", 100)) // past the end: up to it
+        // Anything else is the whole file, as before.
+        assertNull(SharePolicy.range(null, 100))
+        assertNull(SharePolicy.range("bytes=100-", 100)) // starts past the end
+        assertNull(SharePolicy.range("bytes=5-2", 100))
+        assertNull(SharePolicy.range("bytes=0-1,5-9", 100)) // several ranges
+        assertNull(SharePolicy.range("bytes=-500", 100)) // the last 500
+        assertNull(SharePolicy.range("bytes=0-0", -1)) // size unknown
+    }
+
+    @Test
     fun theUrlThePageFetches() {
         assertEquals("/__shared/abc_D-9/0", SharePolicy.path("abc_D-9", 0))
         assertEquals("abc_D-9" to 3, SharePolicy.parse("/__shared/abc_D-9/3"))

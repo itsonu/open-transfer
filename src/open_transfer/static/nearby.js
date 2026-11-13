@@ -3,7 +3,7 @@
 // and renaming this device.
 
 import { DIRECT_MAX_BYTES, directSupported, handleSignals, sendDirect } from "./direct.js";
-import { $, ApiError, addHistory, api, chunkLimits, copyText, formatBytes, formatDuration, guessKind, h, icon, looksSensitive, newUploadId, plural, pushSample, SENSITIVE_REASONS, shouldChunk, sparklineSVG, state, toast, uploadParallel } from "./lib.js";
+import { $, ApiError, addHistory, api, copyText, deliveredBytes, formatBytes, formatDuration, guessKind, h, icon, looksSensitive, newUploadId, plural, pushSample, SENSITIVE_REASONS, shouldChunk, sparklineSVG, state, toast, uploadParallel } from "./lib.js";
 import { saveThumb } from "./activity.js";
 import { isImage, makeThumb, openMenu } from "./media.js";
 import { notify } from "./notify.js";
@@ -786,7 +786,7 @@ function renderStagedThumbs(files) {
   box.dataset.sig = sig;
   box.replaceChildren(
     ...images.map((file) => {
-      if (!mesh.stagedUrls.has(file)) mesh.stagedUrls.set(file, URL.createObjectURL(file));
+      if (!mesh.stagedUrls.has(file)) mesh.stagedUrls.set(file, file.url || URL.createObjectURL(file)); // a big share: its own URL
       return h("img", { src: mesh.stagedUrls.get(file), alt: "" });
     }),
   );
@@ -857,7 +857,7 @@ async function startSend(ids, files, { queued = false } = {}) {
   mesh.jobs.set(job.id, job);
   const picture = files.find((f) => isImage(f) && f.size <= 25_000_000);
   if (picture) {
-    makeThumb(picture).then((thumb) => {
+    makeThumb(picture.url || picture).then((thumb) => {
       job.thumb = thumb;
       scheduleJobRender();
     });
@@ -1090,8 +1090,6 @@ function uploadNext(job) {
   const xhr = new XMLHttpRequest();
   job.xhr = xhr;
   job.startedAt = job.startedAt || performance.now();
-  job.lastAt = performance.now();
-  job.lastLoaded = 0;
   job.fileLoaded = 0;
   xhr.open("PUT", `/api/send/${encodeURIComponent(job.id)}/files/${job.index}`);
   xhr.responseType = "json";
@@ -1100,14 +1098,6 @@ function uploadNext(job) {
   xhr.setRequestHeader("Content-Type", "application/octet-stream");
   xhr.upload.addEventListener("progress", (event) => {
     if (!event.lengthComputable) return;
-    const now = performance.now();
-    const dt = (now - job.lastAt) / 1000;
-    if (dt >= 0.3) {
-      const instant = (event.loaded - job.lastLoaded) / dt;
-      job.speed = job.speed ? job.speed * 0.7 + instant * 0.3 : instant;
-      job.lastAt = now;
-      job.lastLoaded = event.loaded;
-    }
     job.fileLoaded = event.loaded;
     scheduleJobRender();
   });
@@ -1149,34 +1139,19 @@ async function uploadNextChunked(job) {
   // so resuming reuses the staged bytes instead of starting over.
   const file = job.files[job.index];
   const total = file.size;
-  const { size: chunkSize } = chunkLimits();
-  const chunks = Math.max(1, Math.ceil(total / chunkSize));
   job.chunkIds = job.chunkIds || {};
   const uploadId = (job.chunkIds[job.index] ||= newUploadId());
   const url = `/api/send/${encodeURIComponent(job.id)}/files/${job.index}`;
   const statusUrl = `${url}/status?upload_id=${encodeURIComponent(uploadId)}`;
   job.abortChunk = new AbortController();
-  job.samples = job.samples || [];
   job.startedAt = job.startedAt || performance.now();
-  let lastAt = performance.now();
-  let lastSent = 0;
   try {
     await uploadParallel(
       url,
       {
         file, total, uploadId, statusUrl, signal: job.abortChunk.signal, concurrency: 3,
         onProgress: (sent) => {
-          const now = performance.now();
-          const dt = (now - lastAt) / 1000;
-          if (dt >= 0.4 && sent > lastSent) {
-            const instant = (sent - lastSent) / dt;
-            job.speed = job.speed ? job.speed * 0.6 + instant * 0.4 : instant;
-            pushSample(job.samples, job.speed);
-            lastAt = now;
-            lastSent = sent;
-          }
           job.fileLoaded = sent;
-          job.chunkNote = total > chunkSize ? `${Math.min(chunks, Math.ceil(sent / chunkSize) + 1)}/${chunks} chunks · 3 parallel` : "";
           scheduleJobRender();
         },
       },
@@ -1346,6 +1321,21 @@ const TARGET_TEXT = {
   failed: "Failed",
 };
 
+/** Speed from what the devices have received (updated each poll), not from the hand-over to this app. */
+function measureSpeed(job, done) {
+  const now = performance.now();
+  if (job.doneAt === undefined || done < job.doneBytes) {
+    Object.assign(job, { doneAt: now, doneBytes: done });
+    return;
+  }
+  const dt = (now - job.doneAt) / 1000;
+  if (dt < 0.4 || done === job.doneBytes) return;
+  const instant = (done - job.doneBytes) / dt;
+  job.speed = job.speed ? job.speed * 0.6 + instant * 0.4 : instant;
+  job.samples = pushSample(job.samples || [], job.speed);
+  Object.assign(job, { doneAt: now, doneBytes: done });
+}
+
 function renderJobs() {
   const list = $("#job-list");
   const keep = new Set();
@@ -1361,12 +1351,14 @@ function renderJobs() {
     const total = view.total || 1;
     const title = job.files.length === 1 ? job.files[0].name : plural(job.files.length, "file");
     const own = Math.min(total, job.uploaded + (job.fileLoaded || 0));
+    const done = deliveredBytes(own, view.targets.map((t) => effectiveTarget(job, t)));
+    measureSpeed(job, done);
     let headline;
-    if (job.paused) headline = job.chunkNote || `Paused · ${formatBytes(own)} of ${formatBytes(view.total)}`;
+    if (job.paused) headline = job.chunkNote || `Paused · ${formatBytes(done)} of ${formatBytes(view.total)}`;
     else if (job.state === "waiting") headline = `${formatBytes(view.total)} · waiting for ${plural(view.targets.filter((t) => t.state === "waiting" || t.state === "offering").length, "answer")}`;
-    else if (job.state === "running" && job.relayRunning) {
-      const eta = job.speed > 0 ? formatDuration((total - own) / job.speed) : "";
-      headline = [`${formatBytes(own)} of ${formatBytes(view.total)}`, job.speed > 0 && `${formatBytes(job.speed)}/s`, eta, job.chunkNote].filter(Boolean).join(" · ");
+    else if (job.state === "running" && (job.relayRunning || done < own)) {
+      const eta = job.speed > 0 ? formatDuration((total - done) / job.speed) : "";
+      headline = [`${formatBytes(done)} of ${formatBytes(view.total)}`, job.speed > 0 && `${formatBytes(job.speed)}/s`, eta].filter(Boolean).join(" · ");
     } else if (job.state === "running") headline = `${formatBytes(view.total)} · sending directly`;
     else headline = formatBytes(view.total);
     const anyWaiting = view.targets.some((t) => t.state === "waiting" || t.state === "offering");

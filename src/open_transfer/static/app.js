@@ -1083,15 +1083,22 @@ async function takeShared() {
   // Text, links and captions (EXTRA_TEXT, EXTRA_SUBJECT, ClipData text): a .txt file.
   const text = typeof shared?.text === "string" ? shared.text : "";
   if (!items.length && !text) return;
-  const total = items.reduce((n, item) => n + Math.max(0, Number(item.size) || 0), 0);
-  if (total > 20_000_000) toast(`Getting ${plural(items.length, "shared file")} ready…`, { icon: "clock" });
+  // Big files are read as they're sent (byte ranges), not copied in first: 3.1 GB of
+  // videos took minutes to show up. Small ones, and an app without ranges, are copied.
+  const big = (item) => shouldChunk(Number(item.size) || 0);
+  const copied = items.filter((item) => !big(item)).reduce((n, item) => n + Math.max(0, Number(item.size) || 0), 0);
+  if (copied > 20_000_000) toast(`Getting ${plural(items.length, "shared file")} ready…`, { icon: "clock" });
   const files = [];
   let failed = 0;
   for (const item of items) {
     try {
       if (!SHARED_URL.test(String(item.url))) throw new Error("not a shared file");
-      const res = await fetch(item.url, { cache: "no-store" });
+      const res = await fetch(item.url, { cache: "no-store", headers: big(item) ? { Range: "bytes=0-0" } : {} });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      if (res.status === 206) {
+        files.push(sharedFile(item));
+        continue;
+      }
       const blob = await res.blob();
       files.push(new File([blob], String(item.name || "Shared file"), { type: item.mime || blob.type }));
     } catch {
@@ -1102,6 +1109,25 @@ async function takeShared() {
   if (failed) toast(`Couldn’t read ${plural(failed, "shared file")}`, { tone: "error", icon: "alert" });
   if (files.length) enqueueFiles(files, { source: "share" });
 }
+
+/**
+ * A big shared file the app keeps serving: like a File, but ``slice`` reads that range
+ * from the app when it's sent (and is async: callers ``await`` it).
+ */
+const sharedFile = ({ url, name, mime, size }) => ({
+  url,
+  name: String(name || "Shared file"),
+  size: Number(size),
+  type: mime || "application/octet-stream",
+  lastModified: Date.now(),
+  async slice(start, end) {
+    const last = Math.min(end, this.size) - 1;
+    const res = await fetch(url, { cache: "no-store", headers: { Range: `bytes=${start}-${last}` } });
+    const blob = res.status === 206 ? await res.blob() : null;
+    if (blob?.size !== last - start + 1) throw new Error(`Couldn’t read ${this.name} any more. Share it again.`);
+    return blob;
+  },
+});
 
 const textFile = (text, label) => new File([text.replace(/\r\n/g, "\n")], `${label} ${stamp()}.txt`, { type: "text/plain" });
 

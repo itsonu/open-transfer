@@ -14,7 +14,9 @@ import org.json.JSONArray
 import org.json.JSONObject
 import java.io.ByteArrayInputStream
 import java.io.File
+import java.io.FilterInputStream
 import java.io.IOException
+import java.io.InputStream
 import java.security.SecureRandom
 import java.util.Locale
 
@@ -183,7 +185,25 @@ object SharedFiles {
             Log.w(LOG_TAG, "Couldn't open a shared file", e)
             null
         } ?: return missing()
-        return WebResourceResponse(item.mime, null, 200, "OK", mapOf("Cache-Control" to "no-store"), stream)
+        // A big file is read a range at a time as it's sent (the page asks for 1-2 MiB).
+        // WebView itself skips to the range's start (seen on Android 16), but reads on to
+        // the end of the file: stop the stream at the range's end.
+        val header = request?.requestHeaders?.entries?.firstOrNull { it.key.equals("Range", true) }?.value
+        val range = SharePolicy.range(header, item.size)
+        val headers = mutableMapOf("Cache-Control" to "no-store")
+        if (range == null) return WebResourceResponse(item.mime, null, 200, "OK", headers, stream)
+        headers["Content-Range"] = "bytes ${range.first}-${range.last}/${item.size}"
+        return WebResourceResponse(item.mime, null, 206, "Partial Content", headers, Limited(stream, range.last - range.first + 1))
+    }
+
+    /** At most [left] bytes of [input] (skips, done by WebView, don't count). */
+    private class Limited(input: InputStream, private var left: Long) : FilterInputStream(input) {
+        override fun read(): Int = if (left <= 0) -1 else super.read().also { if (it >= 0) left-- }
+
+        override fun read(b: ByteArray, off: Int, len: Int): Int {
+            if (left <= 0) return -1
+            return super.read(b, off, minOf(len.toLong(), left).toInt()).also { if (it > 0) left -= it }
+        }
     }
 
     private fun missing() =
@@ -262,6 +282,18 @@ object SharePolicy {
     }
 
     fun path(token: String, index: Int): String = "$PREFIX$token/$index"
+
+    /**
+     * `Range: bytes=a-b` (or `a-`) of a file of [size] bytes, for the response's
+     * Content-Range; null to send the whole file (no header, unknown size, anything else).
+     */
+    fun range(header: String?, size: Long): LongRange? {
+        val match = Regex("^bytes=(\\d{1,15})-(\\d{0,15})$").matchEntire(header?.trim() ?: return null) ?: return null
+        val start = match.groupValues[1].toLong()
+        val end = match.groupValues[2].toLongOrNull() ?: (size - 1)
+        if (size <= 0 || start >= size || end < start) return null
+        return start..minOf(end, size - 1)
+    }
 
     fun parse(path: String?): Pair<String, Int>? {
         val match = PATH.matchEntire(path ?: return null) ?: return null

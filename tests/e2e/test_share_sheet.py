@@ -183,3 +183,56 @@ def test_a_mixed_share_keeps_what_it_can_and_says_what_it_cant(phone) -> None:  
     share_text(phone, "Holiday album\nhttps://example.com/album", PHOTO_ITEM, gone)
     expect(phone.locator(".toast", has_text="Couldn’t read 1 shared file")).to_be_visible()
     expect(phone.locator("#send-bar-files")).to_contain_text("2 files")  # the photo and the link
+
+
+# ------------------------------------------------------- big shares
+
+VIDEO = bytes(range(256)) * 24_000  # 6.1 MB: over the 4 MiB line where sending goes in pieces
+
+
+def test_a_big_shared_file_is_listed_at_once_and_read_as_it_is_sent(
+    page, second_page, devices: list[Server]
+) -> None:  # type: ignore[no-untyped-def]
+    """20 videos (3.1 GB) were copied into the page before any of them showed up.
+    Now the app serves byte ranges and the page reads a big file only as it sends."""
+    _alpha, bravo, _charlie = devices
+    asked: list[str] = []
+
+    def app(route) -> None:  # type: ignore[no-untyped-def]
+        wanted = route.request.headers.get("range", "")
+        asked.append(wanted)
+        start, _, end = wanted.removeprefix("bytes=").partition("-")
+        if not wanted:
+            route.fulfill(status=200, body=VIDEO, content_type="video/mp4")
+            return
+        last = min(int(end), len(VIDEO) - 1)
+        route.fulfill(
+            status=206,
+            body=VIDEO[int(start) : last + 1],
+            headers={"Content-Range": f"bytes {start}-{last}/{len(VIDEO)}"},
+            content_type="video/mp4",
+        )
+
+    page.add_init_script(FAKE_BRIDGE)
+    page.route("**/__shared/**", app)
+    page.goto(devices[0].url)
+    second_page.goto(bravo.url)
+    expect(tile(page, "Bravo")).to_be_visible(timeout=10_000)
+    item = {
+        "url": "/__shared/t0k3n/0",
+        "name": "VID_2041.mp4",
+        "mime": "video/mp4",
+        "size": len(VIDEO),
+    }
+    share(page, item)
+    expect(page.locator("#send-bar-files")).to_contain_text("VID_2041.mp4")
+    assert asked == ["bytes=0-0"]  # only checked it can be read: nothing copied yet
+
+    tile(page, "Bravo").locator(".device-button").click()
+    page.click("#send-go")
+    second_page.locator("#incoming-accept").click(timeout=10_000)
+    expect(page.locator(".job-target", has_text="Bravo")).to_contain_text(
+        "Delivered", timeout=15_000
+    )
+    assert (bravo.root / "VID_2041.mp4").read_bytes() == VIDEO
+    assert all(asked), asked  # every read was a range, never the whole file
