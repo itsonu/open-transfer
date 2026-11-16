@@ -561,7 +561,8 @@ function renderFiles() {
   $("#library-sort").value = sort;
   $("#search-wrap").hidden = all.length < 6 && !term;
   const download = $("#download-all");
-  download.hidden = all.length < 2 || (term && visible.length === 0);
+  // A visitor's zip holds what was sent to them, not videos shared to watch.
+  download.hidden = (inInbox() ? all.filter((f) => !f.watch) : all).length < 2 || (term && visible.length === 0);
   const query = term ? visible.map((f) => `name=${encodeURIComponent(f.name)}`).join("&") : "";
   download.href = inInbox() ? "/api/inbox/archive" : `/api/archive${query ? `?${query}` : ""}`;
   download.querySelector("span").textContent = term ? `Download ${visible.length}` : "Download all";

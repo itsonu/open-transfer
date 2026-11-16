@@ -687,7 +687,7 @@ def create_app(config: Config | None = None) -> Flask:
     watching: dict[str, str] = {}
 
     def watch_list() -> list[dict[str, Any]]:
-        ids = {name: token for token, name in watching.items()}
+        ids = {name: token for token, name in list(watching.items())}
         return [
             {**f.to_dict(), "id": ids[f.name], "url": f"/api/watch/{ids[f.name]}"}
             for f in storage.files()
@@ -705,7 +705,9 @@ def create_app(config: Config | None = None) -> Flask:
         path = storage.resolve(str((request.get_json(silent=True) or {}).get("name", "")))
         if not (mimetypes.guess_type(path.name)[0] or "").startswith("video/"):
             return error(400, "not_a_video", "Only videos can be shared to watch.")
-        token = next((t for t, n in watching.items() if n == path.name), secrets.token_urlsafe(12))
+        token = next(
+            (t for t, n in list(watching.items()) if n == path.name), secrets.token_urlsafe(12)
+        )
         watching[token] = path.name
         log.info("Sharing %s to watch", log_safe(path.name))
         return jsonify({"id": token}), 201

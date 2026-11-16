@@ -28,10 +28,10 @@ def mac(tmp_path: Path) -> Iterator[Server]:
     server = next(gen)
     server.root.mkdir(parents=True, exist_ok=True)
     film = server.root / "film.mkv"
-    subprocess.run(  # 20 s of H.264/AAC at 4 Mbit/s: ~10 MB, more than a browser reads at once
+    subprocess.run(  # 20 s of VP9/Opus at 4 Mbit/s (no H.264 needed): ~10 MB, more than a browser reads at once
         [ffmpeg, "-nostdin", "-v", "error", "-f", "lavfi", "-i", "testsrc2=size=640x360:rate=25",
-         "-f", "lavfi", "-i", "sine=frequency=440", "-t", "20", "-c:v", "libx264",
-         "-preset", "ultrafast", "-b:v", "4M", "-g", "25", "-c:a", "aac", str(film)],
+         "-f", "lavfi", "-i", "sine=frequency=440", "-t", "20", "-c:v", "libvpx-vp9",
+         "-deadline", "realtime", "-cpu-used", "8", "-b:v", "4M", "-g", "25", "-c:a", "libopus", str(film)],
         check=True,
     )  # fmt: skip
     subprocess.run(
@@ -80,6 +80,7 @@ def test_watch_streams_seeks_and_says_when_it_cant(mac: Server, page, second_pag
             "button", name="Delete film.mkv"
         )
     ).to_have_count(0)
+    expect(visitor.locator("#download-all")).to_be_hidden()  # its zip holds only what was sent
 
     for name in ("film.mkv", "clip.mp4"):
         ranges.clear()
