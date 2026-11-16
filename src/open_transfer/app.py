@@ -7,6 +7,8 @@ import hmac
 import io
 import ipaddress
 import logging
+import mimetypes
+import secrets
 import time
 from collections import OrderedDict
 from pathlib import Path
@@ -676,6 +678,50 @@ def create_app(config: Config | None = None) -> Flask:
         if request.method == "GET" and not request.range and attachment:
             log.info("Sent %s to %s", log_safe(path.name), client_id())
         return response
+
+    # ------------------------------------------------------- watch in the browser
+
+    # Videos the owner shares to watch (id → name in the folder): visitors stream
+    # them with Range requests, without the folder being shared or the file sent.
+    # ponytail: in memory, so sharing ends when the app quits; persist if people ask.
+    watching: dict[str, str] = {}
+
+    def watch_list() -> list[dict[str, Any]]:
+        ids = {name: token for token, name in watching.items()}
+        return [
+            {**f.to_dict(), "id": ids[f.name], "url": f"/api/watch/{ids[f.name]}"}
+            for f in storage.files()
+            if f.name in ids
+        ]
+
+    @app.get("/api/watch")
+    def watch_index() -> Response:
+        return jsonify({"files": watch_list()})
+
+    @app.post("/api/watch")
+    def watch_share() -> Any:
+        if not is_owner():
+            return error(403, "owner_only", "Only the person using this device can do that.")
+        path = storage.resolve(str((request.get_json(silent=True) or {}).get("name", "")))
+        if not (mimetypes.guess_type(path.name)[0] or "").startswith("video/"):
+            return error(400, "not_a_video", "Only videos can be shared to watch.")
+        token = next((t for t, n in watching.items() if n == path.name), secrets.token_urlsafe(12))
+        watching[token] = path.name
+        log.info("Sharing %s to watch", log_safe(path.name))
+        return jsonify({"id": token}), 201
+
+    @app.delete("/api/watch/<token>")
+    def watch_stop(token: str) -> Any:
+        if not is_owner():
+            return error(403, "owner_only", "Only the person using this device can do that.")
+        watching.pop(token, None)
+        return jsonify({"ok": True})
+
+    @app.get("/api/watch/<token>")
+    def watch_stream(token: str) -> Response:
+        if token not in watching:
+            abort(404, "This video isn’t shared any more.")
+        return serve_file(storage.resolve(watching[token]), inline=True)
 
     @app.post("/api/files/<path:name>/<any(open, reveal):action>")
     def open_locally(name: str, action: str) -> Response:

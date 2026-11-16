@@ -82,6 +82,7 @@ jobs:
           cache: pip
       - run: pip install -e ".[dev,e2e]"
       - run: python -m playwright install --with-deps chromium
+      - run: sudo apt-get install -y ffmpeg # tests/e2e/test_watch.py makes real videos
       - run: pytest -m e2e -v
 
   runner:

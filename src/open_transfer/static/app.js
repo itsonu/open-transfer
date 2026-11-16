@@ -51,6 +51,8 @@ Object.assign(state, {
   started: false,
   library: loadLibraryPrefs(), // { view: "list" | "grid", filter, sort }
   visible: [], // files in the list right now, in order (the preview steps through them)
+  inbox: [], // a visitor's: files sent to this browser
+  watching: [], // videos the owner shares to watch: { id, name, url, … }
 });
 
 function loadLibraryPrefs() {
@@ -234,6 +236,12 @@ async function refresh() {
         renderFiles();
       }
     }
+    const watch = (await api("/api/watch")).data.files;
+    if (JSON.stringify(watch) !== JSON.stringify(state.watching)) {
+      state.watching = watch;
+      if (inInbox()) showInbox();
+      else renderFiles();
+    }
     markOnline(true);
     if (!$("#fatal-view").hidden) showView("main");
   } catch (err) {
@@ -253,8 +261,34 @@ async function refresh() {
 
 const rows = new Map(); // name -> { el, sig }
 
-// Files received straight from another browser live in this page (a blob: URL).
+// Files received straight from another browser live in this page (a blob: URL);
+// videos shared to watch come with theirs.
 const urlFor = (file, inline = false) => file.url || fileUrl(file.name, inline);
+const watchOf = (file) => state.watching.find((w) => w.name === file.name);
+
+/** A visitor's list: files sent to this browser, then videos shared to watch. */
+function showInbox() {
+  const names = new Set(state.inbox.map((f) => f.name));
+  const files = [...state.inbox, ...state.watching.filter((f) => !names.has(f.name)).map((f) => ({ ...f, watch: true }))];
+  const sig = JSON.stringify(files.map((f) => [f.name, f.size, f.modified, f.url]));
+  if (sig === state.inboxSig) return;
+  state.inboxSig = sig;
+  state.files = files;
+  renderFiles();
+}
+
+async function toggleWatch(file) {
+  const shared = watchOf(file);
+  try {
+    if (shared) await api(`/api/watch/${shared.id}`, { method: "DELETE" });
+    else await api("/api/watch", { method: "POST", json: { name: file.name } });
+    const who = `Browsers that open ${state.info.share_url || "this device"}${state.info.auth?.required ? " with the PIN" : ""}`;
+    toast(shared ? `Stopped sharing “${file.name}”` : `${who} can now watch “${file.name}”`, { icon: "eye" });
+    poll(true);
+  } catch (err) {
+    toast(err.message, { tone: "error", icon: "alert" });
+  }
+}
 
 function buildFileRow(file) {
   const href = urlFor(file);
@@ -297,7 +331,7 @@ function buildFileRow(file) {
     openNative
       ? h("button", { class: "icon-btn is-accent", type: "button", "aria-label": `Open ${file.name}`, title: "Open", onclick: () => nativeApp().openFile(file.name) }, icon("download"))
       : h("a", { class: "icon-btn is-accent", href, download: file.name, "aria-label": `Download ${file.name}`, title: "Download" }, icon("download")),
-    (can("delete") || inInbox()) &&
+    (can("delete") || (inInbox() && !file.watch)) &&
       h(
         "button",
         { class: "icon-btn is-danger", type: "button", "aria-label": `Delete ${file.name}`, title: "Delete", onclick: () => deleteFile(file, row) },
@@ -403,7 +437,7 @@ async function copyFileText(file) {
 function linkFor(file) {
   // Owners share their LAN address so the link works on other devices.
   const base = state.info.owner && state.info.share_url ? state.info.share_url : location.origin;
-  return new URL(fileUrl(file.name), base).href;
+  return new URL(urlFor(file), base).href;
 }
 
 async function localAction(file, action) {
@@ -424,6 +458,7 @@ function fileActions(file, row) {
   if (native) items.push({ label: "Open", icon: "file", run: () => nativeApp().openFile(file.name) });
   else if (owner && state.info.local_open && file.kind !== "app") items.push({ label: "Open", icon: "file", run: () => localAction(file, "open") });
   if (owner && state.info.local_open) items.push({ label: "Show in folder", icon: "folder", run: () => localAction(file, "reveal") });
+  if (owner && isVideo(file)) items.push({ label: watchOf(file) ? "Stop sharing to watch" : "Share to watch", icon: "eye", run: () => toggleWatch(file) });
   if (kind === "text" && file.size <= COPYABLE_TEXT_BYTES) items.push({ label: "Copy text", icon: "copy", run: () => copyFileText(file) });
   if (isImage(file) && navigator.clipboard?.write) {
     items.push({
@@ -452,13 +487,13 @@ function fileActions(file, row) {
   // Android's WebView has no navigator.share: the app opens the system Sharesheet.
   if (native && nativeApp().shareFile) items.push({ label: "Share…", icon: "share", run: () => nativeApp().shareFile(file.name) });
   else if (canShareFiles()) items.push({ label: "Share…", icon: "share", run: () => shareFile(urlFor(file), file) });
-  if (can("delete") || inInbox()) items.push({ label: "Delete", icon: "trash", danger: true, run: () => deleteFile(file, row) });
+  if (can("delete") || (inInbox() && !file.watch)) items.push({ label: "Delete", icon: "trash", danger: true, run: () => deleteFile(file, row) });
   return items;
 }
 
 function updateRowTime(row) {
   const f = row._file;
-  const where = f.direct ? (f.saved ? " · saved" : " · in this browser — save it") : "";
+  const where = f.direct ? (f.saved ? " · saved" : " · in this browser — save it") : f.watch || (libraryMode() === "owner" && watchOf(f)) ? " · shared to watch" : "";
   row.querySelector(".row-sub").textContent = `${formatBytes(f.size)} · ${relativeTime(f.modified)}${where}`;
 }
 
@@ -483,7 +518,7 @@ function renderFiles() {
 
   let cursor = list.firstElementChild;
   for (const file of visible) {
-    const sig = `${file.size}:${file.modified}`;
+    const sig = `${file.size}:${file.modified}:${Boolean(file.watch || watchOf(file))}`;
     let entry = rows.get(file.name);
     if (!entry || entry.sig !== sig) {
       const el = buildFileRow(file);
@@ -1305,12 +1340,8 @@ function boot() {
     droppedFiles,
     libraryChanged: (inbox) => {
       if (inbox && inInbox()) {
-        const sig = JSON.stringify(inbox.map((f) => [f.name, f.size, f.modified]));
-        if (sig !== state.inboxSig) {
-          state.inboxSig = sig;
-          state.files = inbox;
-          renderFiles();
-        }
+        state.inbox = inbox;
+        showInbox();
       } else if (!inbox) {
         state.etag = null;
       }

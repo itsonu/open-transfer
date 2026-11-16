@@ -4,7 +4,7 @@
 import { $, formatBytes, h, icon, toast } from "./lib.js";
 
 const IMAGE_MIME = new Set(["image/png", "image/jpeg", "image/gif", "image/webp", "image/avif", "image/bmp", "image/svg+xml"]);
-const VIDEO_MIME = new Set(["video/mp4", "video/webm", "video/ogg", "video/quicktime"]);
+const VIDEO_MIME = new Set(["video/mp4", "video/webm", "video/ogg", "video/quicktime", "video/x-matroska", "video/x-m4v"]);
 const TEXT_EXT = new Set("txt md markdown csv tsv log json xml yaml yml ini cfg conf toml py js mjs ts tsx jsx html htm css scss sh bash zsh c h cpp hpp go rs java kt swift rb php sql srt vtt".split(" "));
 const TEXT_PREVIEW_BYTES = 512 * 1024;
 const THUMB_SIZE = 96;
@@ -102,7 +102,7 @@ function showPreview() {
   const stage = $("#preview-stage");
   stage.dataset.kind = kind || "none";
   if (kind === "image") stage.replaceChildren(h("img", { src: url, alt: file.name }));
-  else if (kind === "video") stage.replaceChildren(h("video", { src: url, controls: true, playsinline: true, preload: "metadata" }));
+  else if (kind === "video") stage.replaceChildren(playable(h("video", { src: url, controls: true, playsinline: true, preload: "metadata" }), file, save.href));
   else if (kind === "audio") stage.replaceChildren(h("div", { class: "preview-audio" }, icon("audio"), h("audio", { src: url, controls: true, preload: "metadata" })));
   else if (kind === "pdf") stage.replaceChildren(h("iframe", { src: url, title: file.name }));
   else if (kind === "text") showText(stage, file, preview.controller.signal);
@@ -111,6 +111,30 @@ function showPreview() {
       h("div", { class: "preview-none" }, icon("file"), h("p", {}, "No preview for this kind of file."), h("a", { class: "btn btn-tinted", href: save.href, download: file.name }, icon("download"), h("span", {}, "Save"))),
     );
   }
+}
+
+/**
+ * ``video``, swapped for why this browser can't play it when it can't (Safari has
+ * no MKV; a codec it lacks leaves no picture) — never a broken player.
+ */
+function playable(video, file, saveHref) {
+  const cant = () => {
+    if (!video.isConnected) return;
+    video.removeAttribute("src"); // stop fetching it
+    video.replaceWith(
+      h(
+        "div",
+        { class: "preview-none", role: "alert" },
+        icon("video"),
+        h("p", {}, "This browser can’t play this video."),
+        ext(file.name) === "mkv" && h("p", { class: "muted" }, "MKV videos often play in Chrome or Edge, not in Safari. Or save it and watch it in another app."),
+        h("a", { class: "btn btn-tinted", href: saveHref, download: file.name }, icon("download"), h("span", {}, "Save")),
+      ),
+    );
+  };
+  video.addEventListener("error", cant);
+  video.addEventListener("loadedmetadata", () => video.videoWidth || cant());
+  return video;
 }
 
 async function showText(stage, file, signal) {
