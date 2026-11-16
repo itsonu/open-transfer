@@ -1660,7 +1660,7 @@ function renderIncomingRows() {
     if (s.state === "done" && !info.doneAt) info.doneAt = Date.now();
     const pct = s.total ? Math.min(100, (s.received / s.total) * 100) : s.state === "done" ? 100 : 0;
     const title = s.files.length === 1 ? s.files[0].name : plural(s.files.length, "file");
-    const text = s.state === "done" ? `Received from ${s.from.name}` : s.state === "accepted" ? `Waiting for ${s.from.name}…` : `${formatBytes(s.received)} of ${formatBytes(s.total)} from ${s.from.name}`;
+    const text = s.state === "done" ? `Received from ${s.from.name}` : s.state === "accepted" && !s.received ? `Waiting for ${s.from.name}…` : `${formatBytes(s.received)} of ${formatBytes(s.total)} from ${s.from.name}`;
     info.el.dataset.state = s.state;
     info.el.replaceChildren(
       h(

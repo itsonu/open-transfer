@@ -317,3 +317,28 @@ def test_a_long_hand_off_doesnt_stop_the_send(devices: list[Server], page) -> No
     )
     assert data == {"received": total, "done": True}
     assert got["bytes"] == total  # and nothing was sent twice
+
+
+def test_the_owner_sees_a_browsers_big_file_arriving(page, devices: list[Server]) -> None:  # type: ignore[no-untyped-def]
+    # A 35 GB file from a Windows browser read "Waiting for Windows PC…" on the Mac
+    # for its whole upload.
+    from tests.test_mesh import Client, lan_ip, send
+
+    alpha = devices[0]
+    me = Client(alpha.url)
+    pc = Client(f"http://{lan_ip()}:{alpha.url.rsplit(':', 1)[1]}")
+    assert (
+        pc("POST", "/api/me", {"name": "Windows PC", "form": "computer", "platform": "windows"})[0]
+        == 200
+    )
+    total = 5_000_000
+    job = send(pc, [me.state()["me"]["id"]], [("film.mkv", b"x" * total)])
+    page.goto(alpha.url)
+    offer = next(s for s in me.state()["incoming"] if s["state"] == "pending")
+    assert me("POST", f"/api/incoming/{offer['id']}/accept")[0] == 200
+    piece = b"x" * (2 * 1024 * 1024)
+    headers = {"Content-Range": f"bytes 0-{len(piece) - 1}/{total}", "X-Upload-Id": "u-pc"}
+    assert pc("PUT", f"/api/send/{job}/files/0", data=piece, headers=headers)[0] == 308
+    expect(page.locator(".job", has_text="film.mkv")).to_contain_text(
+        "of 5.0 MB from Windows PC", timeout=10_000
+    )

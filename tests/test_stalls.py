@@ -213,3 +213,24 @@ def test_closing_the_receiving_app_records_it(make_node: NodeFactory) -> None:
     assert entry["direction"] == "received"
     assert entry["status"] != "done"  # never "received"
     assert "Open Transfer was closed" in entry["devices"][0]["reason"]
+
+
+def test_a_browser_still_uploading_to_the_owner_is_not_given_up_on(make_node: NodeFactory) -> None:
+    # A 35 GB file from a Windows browser: the Mac ended it as "didn't start sending"
+    # after 4 minutes, at 3 GB, as the pieces wait in the app until the last one is in.
+    import os
+
+    from tests.test_mesh import incoming, owner, send, target_states, visitor, wait_for
+
+    a = make_node("Alpha")
+    pc = visitor(a, "Windows PC", form="computer", platform="windows")
+    payload = os.urandom(5_000_000)
+    job = send(pc, [a.mesh.id], [("film.mkv", payload)])
+    offer = incoming(owner(a))
+    owner(a)("POST", f"/api/incoming/{offer['id']}/accept")
+    wait_for(lambda: target_states(pc, job) == {"Alpha": "accepted"})
+    piece = payload[: 2 * 1024 * 1024]
+    headers = {"Content-Range": f"bytes 0-{len(piece) - 1}/{len(payload)}", "X-Upload-Id": "u-pc"}
+    assert pc("PUT", f"/api/send/{job}/files/0", data=piece, headers=headers)[0] == 308
+    a.mesh._expire_sessions(now=time.monotonic() + OFFER_TTL * 2 + 1)
+    assert a.mesh._incoming[offer["id"]].state == ACCEPTED

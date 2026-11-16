@@ -3088,7 +3088,11 @@ class Mesh:
                 sender = session.origin.get("name") or "The sender"
                 if session.state == PENDING and now - session.created > OFFER_TTL:
                     session.state, session.reason, session.finished = EXPIRED, "No answer", now
-                elif session.state == ACCEPTED and now - session.created > OFFER_TTL * 2:
+                elif (
+                    session.state == ACCEPTED
+                    and now - session.created > OFFER_TTL * 2
+                    and not self._uploading_here(session, now)
+                ):
                     # Accepted but nothing came (its window closed, say): don't leak it.
                     session.state, session.finished = EXPIRED, now
                     session.reason = f"{sender} didn’t start sending."
@@ -3361,7 +3365,41 @@ class Mesh:
                     out.append(entry)
         return out
 
+    def _uploading_here(self, s: IncomingSession, now: float) -> bool:
+        """Our own owner or visitor is still uploading it: its pieces wait in the app
+        until the last one is in, so the session sees no bytes until then. If that
+        upload goes quiet, the sending job's own check ends both ends."""
+        job = self._jobs.get(s.job) if s.local else None
+        return (
+            job is not None
+            and not job.canceled
+            and now - max(job.created, job.active) < RECEIVE_IDLE
+        )
+
+    def _staged(self, s: IncomingSession) -> dict[int, int]:
+        """Bytes of each file our own owner or visitor has uploaded so far.
+
+        Their big files wait here in pieces and are written to the session only when
+        the last piece is in: without this a 35 GB file read "Waiting…" for hours.
+        """
+        if not (s.local and s.job):
+            return {}
+        with self._lock:
+            uploads = [(uid, m) for uid, m in self._relay_meta.items() if m.get("job_id") == s.job]
+        staged: dict[int, int] = {}
+        for uid, meta in uploads:
+            info = self._relay_chunks.status(uid)
+            if info:
+                staged[int(str(meta["index"]))] = info["received"]
+        return staged
+
+    def _received(self, s: IncomingSession) -> list[int]:
+        """Bytes of each file that reached this app, staged pieces included."""
+        staged = self._staged(s)
+        return [max(f.received, staged.get(i, 0)) for i, f in enumerate(s.files)]
+
     def _incoming_view(self, s: IncomingSession) -> dict[str, Any]:
+        got = self._received(s)
         return {
             "id": s.id,
             "from": {k: s.origin.get(k) for k in ("id", "name", "form", "platform", "via_name")},
@@ -3375,7 +3413,7 @@ class Mesh:
             "reason": s.reason,
             "retry": s.retry,
             "total": s.total,
-            "received": s.received,
+            "received": sum(got),
             "files": [
                 {
                     "name": f.name,
@@ -3383,7 +3421,7 @@ class Mesh:
                     "mime": f.mime,
                     "kind": file_kind(f.name),
                     "state": f.state,
-                    "received": f.received,
+                    "received": got[i],
                     "saved_name": f.saved_name,
                     "direct": f.direct,
                     "duplicate": f.duplicate,
@@ -3392,7 +3430,7 @@ class Mesh:
                     "verified": f.verified,
                     "error": f.error,
                 }
-                for f in s.files
+                for i, f in enumerate(s.files)
             ],
             "expires_in": max(0, round(OFFER_TTL - (time.monotonic() - s.created)))
             if s.state == PENDING
@@ -3405,7 +3443,7 @@ class Mesh:
         for target_id, d in job.deliveries.items():
             sent = d.sent
             if d.session is not None:
-                sent = max(sent, d.session.received)
+                sent = max(sent, sum(self._received(d.session)))
             targets.append(
                 {
                     **d.target,

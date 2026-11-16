@@ -657,6 +657,35 @@ def test_visitor_sends_to_the_app_owner(make_node: NodeFactory) -> None:
     assert (Path(a.config.storage_dir) / "selfie.jpg").read_bytes() == b"img"
 
 
+def test_the_owner_sees_a_visitors_big_file_arriving(make_node: NodeFactory) -> None:
+    # A 35 GB file from a Windows browser read "Waiting for Windows PC…" on the Mac
+    # for its whole upload: the pieces wait in the app until the last one is in.
+    a = make_node("Alpha")
+    pc = visitor(a, "Windows PC", form="computer", platform="windows")
+    payload = os.urandom(5_000_000)
+    job = send(pc, [a.mesh.id], [("film.mkv", payload)])
+    offer = incoming(owner(a))
+    owner(a)("POST", f"/api/incoming/{offer['id']}/accept")
+    wait_for(lambda: target_states(pc, job) == {"Alpha": "accepted"})
+    piece = payload[: 2 * 1024 * 1024]
+    status, _ = pc(
+        "PUT",
+        f"/api/send/{job}/files/0",
+        data=piece,
+        headers={
+            "Content-Range": f"bytes 0-{len(piece) - 1}/{len(payload)}",
+            "X-Upload-Id": "u-pc",
+        },
+    )
+    assert status == 308
+    arriving = next(s for s in owner(a).state()["incoming"] if s["id"] == offer["id"])
+    assert arriving["received"] == len(piece)
+    assert arriving["files"][0]["received"] == len(piece)
+    # And the browser's own readout: it showed "0 bytes of 35 GB" while sending.
+    sending = next(j for j in pc.state()["outgoing"] if j["id"] == job)
+    assert sending["targets"][0]["sent"] == len(piece)
+
+
 def test_visitor_paired_by_qr_code_is_auto_accepted(make_node: NodeFactory) -> None:
     a = make_node("Alpha")
     code = show_code(a)
