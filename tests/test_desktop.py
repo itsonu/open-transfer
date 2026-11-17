@@ -117,6 +117,9 @@ class FakeWindow:
         self.calls.append(f"run_js:{script}")
         return self.webview.js_result
 
+    def load_url(self, url: str) -> None:
+        self.calls.append(f"load_url:{url}")
+
     def destroy(self) -> None:
         self.calls.append("destroy")
         self.gone.set()
@@ -576,3 +579,38 @@ def test_a_stopped_watcher_answers_nothing_more(tmp_path: Path) -> None:
     watcher = FocusRequests(tmp_path / "focus", lambda: None, interval=0.5).start()
     watcher.stop()
     assert not watcher._thread.is_alive()
+
+
+def run_window(fake: FakeWebview) -> tuple[desktop.WindowApp, threading.Thread]:
+    app = desktop.WindowApp(fake, "http://127.0.0.1:1/", check_every=0.05, check_timeout=0.5)
+    thread = threading.Thread(target=app.run, daemon=True)
+    thread.start()
+    assert fake.started.wait(10)
+    return app, thread
+
+
+def test_a_window_whose_page_died_loads_it_again() -> None:
+    fake = FakeWebview()
+    fake.js_result = None  # what a page process that ended answers: nothing
+    run_window(fake)
+    assert fake.window is not None
+    deadline = time.monotonic() + 10
+    while "load_url:http://127.0.0.1:1/" not in fake.window.calls and time.monotonic() < deadline:
+        time.sleep(0.05)
+    deadline = time.monotonic() + 10
+    while (
+        fake.window.calls.count("load_url:http://127.0.0.1:1/") < 2 and time.monotonic() < deadline
+    ):
+        time.sleep(0.05)
+    assert fake.window.calls.count("load_url:http://127.0.0.1:1/") >= 2  # macOS needs it twice
+    fake.user_closes_window()
+
+
+def test_a_window_whose_page_answers_is_left_alone() -> None:
+    fake = FakeWebview()
+    run_window(fake)
+    assert fake.window is not None
+    time.sleep(0.6)  # a dozen checks
+    assert not [c for c in fake.window.calls if c.startswith("load_url")]
+    assert any(c.startswith(("evaluate_js", "run_js")) for c in fake.window.calls)
+    fake.user_closes_window()

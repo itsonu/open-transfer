@@ -72,6 +72,10 @@ MIN_SIZE = (380, 560)
 #: falls back to the browser (a blank WebView2 window helps nobody).
 LOAD_TIMEOUT = 45.0
 #: --smoke-test always exits within this many seconds.
+#: A page that stops answering this many checks in a row is loaded again.
+HEALTH_EVERY = 5.0
+HEALTH_TIMEOUT = 5.0
+HEALTH_MISSES = 2
 SMOKE_TIMEOUT = 60.0
 SMOKE_LOAD_TIMEOUT = 40.0
 #: Proves the Open Transfer page rendered inside the native web view.
@@ -393,6 +397,8 @@ class WindowApp:
         private: bool = False,
         storage: Path | None = None,
         load_timeout: float = LOAD_TIMEOUT,
+        check_every: float = HEALTH_EVERY,
+        check_timeout: float = HEALTH_TIMEOUT,
     ) -> None:
         self.webview = webview
         self.url = url
@@ -400,6 +406,9 @@ class WindowApp:
         self.private = private
         self.storage = storage
         self.load_timeout = load_timeout
+        self.check_every = check_every
+        self.check_timeout = check_timeout
+        self.watching = False
         self.window: Any = None
         self.renderer: str | None = None
         self.error: str | None = None
@@ -520,6 +529,9 @@ class WindowApp:
             self.fail("the Microsoft Edge WebView2 Runtime is not installed")
             return
         self.loaded.set()
+        if not self.watching:
+            self.watching = True
+            threading.Thread(target=self._keep_alive, name="ot-window-health", daemon=True).start()
 
     def _on_closing(self) -> None:
         # Return None: returning False would cancel the close.
@@ -531,6 +543,29 @@ class WindowApp:
 
     def _on_restored(self) -> None:
         self.minimized = False
+
+    def _keep_alive(self) -> None:
+        """Load the page again if it stops answering.
+
+        The system web view's page process can end (memory pressure, a driver crash);
+        the window then stays blank for good. A page busy for a few seconds still answers.
+        """
+        misses = 0
+        while not self.closed.wait(self.check_every):
+            try:
+                answered = self.evaluate("document.readyState", self.check_timeout)[0]
+            except Exception:
+                answered = None
+            misses = 0 if answered else misses + 1
+            if misses >= HEALTH_MISSES:
+                misses = 0
+                log.warning("native window: the page stopped answering; loading it again")
+                # Twice: the first load starts a new page process, but macOS leaves its view
+                # blank until the page is loaded once more.
+                for _ in range(2):
+                    with contextlib.suppress(Exception):
+                        self.window.load_url(self.url)
+                    self.closed.wait(3)
 
     def _watchdog(self) -> None:
         if not self.loaded.wait(self.load_timeout) and not self.closed.is_set():
