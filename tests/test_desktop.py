@@ -614,3 +614,26 @@ def test_a_window_whose_page_answers_is_left_alone() -> None:
     assert not [c for c in fake.window.calls if c.startswith("load_url")]
     assert any(c.startswith(("evaluate_js", "run_js")) for c in fake.window.calls)
     fake.user_closes_window()
+
+
+def test_a_window_in_the_background_is_not_reloaded() -> None:
+    """macOS naps a background window's page: it answers late, and isn't broken."""
+    fake = FakeWebview()
+    fake.js_result = None
+    app = desktop.WindowApp(fake, "http://127.0.0.1:1/", check_every=0.05, check_timeout=0.5)
+    app.is_showing = lambda: False
+    thread = threading.Thread(target=app.run, daemon=True)
+    thread.start()
+    assert fake.started.wait(10)
+    assert fake.window is not None
+    time.sleep(0.8)
+    assert not [c for c in fake.window.calls if c.startswith("load_url")]
+    app.is_showing = lambda: True  # uncovered: now a dead page is loaded again
+    deadline = time.monotonic() + 10
+    while (
+        not [c for c in fake.window.calls if c.startswith("load_url")]
+        and time.monotonic() < deadline
+    ):
+        time.sleep(0.05)
+    assert [c for c in fake.window.calls if c.startswith("load_url")]
+    fake.user_closes_window()

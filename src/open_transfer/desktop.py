@@ -409,6 +409,7 @@ class WindowApp:
         self.check_every = check_every
         self.check_timeout = check_timeout
         self.watching = False
+        self.is_showing: Callable[[], bool] = _window_is_showing
         self.window: Any = None
         self.renderer: str | None = None
         self.error: str | None = None
@@ -552,6 +553,9 @@ class WindowApp:
         """
         misses = 0
         while not self.closed.wait(self.check_every):
+            if not self.is_showing():
+                misses = 0
+                continue
             try:
                 answered = self.evaluate("document.readyState", self.check_timeout)[0]
             except Exception:
@@ -570,6 +574,25 @@ class WindowApp:
     def _watchdog(self) -> None:
         if not self.loaded.wait(self.load_timeout) and not self.closed.is_set():
             self.fail(f"the page did not load within {self.load_timeout:.0f} s")
+
+
+def _window_is_showing() -> bool:
+    """Whether any of this app's windows is at least partly on screen. macOS naps the
+    page of a fully covered or hidden window, so it can't answer for a while; only a
+    window someone can see is checked."""
+    if sys.platform != "darwin":
+        return True
+    try:
+        from AppKit import NSApplication, NSWindowOcclusionStateVisible
+
+        return any(
+            w.isVisible()
+            and w.frame().size.height > 300  # the page's window, not a helper
+            and w.occlusionState() & NSWindowOcclusionStateVisible
+            for w in NSApplication.sharedApplication().windows()
+        )
+    except Exception:
+        return True
 
 
 def _with_timeout(call: Callable[[], Any], timeout: float) -> Any:
