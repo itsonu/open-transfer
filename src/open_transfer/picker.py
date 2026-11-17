@@ -12,6 +12,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+from open_transfer import opener
+
 PROMPT = "Choose a video to watch on another device"
 TIMEOUT = 600  # seconds: the dialog stays until the person answers it
 WINDOWS = (
@@ -42,9 +44,7 @@ def available(platform: str = sys.platform) -> bool:
     """Whether this machine can ask its user to choose a file (not a server or container)."""
     if platform in {"darwin", "win32"}:
         return True
-    from open_transfer.opener import available as graphical
-
-    return graphical(platform) and command(platform) is not None
+    return opener.available() and command(platform) is not None
 
 
 def pick_video(platform: str = sys.platform) -> Path | None:
