@@ -579,17 +579,15 @@ class WindowApp:
 def _window_is_showing() -> bool:
     """Whether any of this app's windows is at least partly on screen. macOS naps the
     page of a fully covered or hidden window, so it can't answer for a while; only a
-    window someone can see is checked."""
-    if sys.platform != "darwin":
-        return True
+    window someone can see is checked. (Elsewhere there is no AppKit: always checked.)"""
     try:
-        from AppKit import NSApplication, NSWindowOcclusionStateVisible
-
+        appkit = importlib.import_module("AppKit")
+        visible = appkit.NSWindowOcclusionStateVisible
         return any(
             w.isVisible()
             and w.frame().size.height > 300  # the page's window, not a helper
-            and w.occlusionState() & NSWindowOcclusionStateVisible
-            for w in NSApplication.sharedApplication().windows()
+            and w.occlusionState() & visible
+            for w in appkit.NSApplication.sharedApplication().windows()
         )
     except Exception:
         return True
