@@ -342,3 +342,29 @@ def test_the_owner_sees_a_browsers_big_file_arriving(page, devices: list[Server]
     expect(page.locator(".job", has_text="film.mkv")).to_contain_text(
         "of 5.0 MB from Windows PC", timeout=10_000
     )
+
+
+def test_a_chosen_video_can_be_looked_at_before_it_is_sent(
+    devices: list[Server], page, tmp_path: Path
+) -> None:  # type: ignore[no-untyped-def]
+    page.goto(devices[0].url)
+    film = tmp_path / "Holiday in Goa.mp4"
+    film.write_bytes(b"v" * 50_000)
+    note = tmp_path / "notes.txt"
+    note.write_text("hello")
+
+    page.set_input_files("#file-input", str(note))
+    expect(page.locator("#send-bar")).to_be_visible()
+    expect(page.locator("#send-preview")).to_be_hidden()  # nothing to look at in a text file
+
+    page.set_input_files("#file-input", str(film))
+    expect(page.locator("#send-bar-thumbs .staged-video")).to_have_count(1)
+    page.get_by_role("button", name="Preview").click()
+    expect(page.locator("#preview-dialog")).to_be_visible()
+    expect(page.locator("#preview-title")).to_have_text("Holiday in Goa.mp4")
+    page.keyboard.press("Escape")
+    expect(page.locator("#preview-dialog")).to_be_hidden()
+    expect(page.locator("#send-bar")).to_be_visible()  # still ready to send
+
+    page.click("#send-clear")
+    expect(page.locator("#send-preview")).to_be_hidden()

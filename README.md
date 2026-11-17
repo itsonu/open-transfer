@@ -191,6 +191,8 @@ Any device can send to any other — there's no host or server role. A phone wit
 - Native windows on Windows and macOS, a native shell on Android (file picker, QR scanner, notifications, **Share → Open Transfer** from any app)
 - Clear states everywhere: looking-for-devices radar, waiting / accepted / sending / delivered per device, reconnecting indicator, errors with reasons
 - Preview photos, videos, audio, PDFs and text in the app; a grid view with filters; a ⋯ menu per file (copy, share, open, show in folder)
+- **Watch a video on another device without sending it**: choose any video on this computer (**Choose a video…** under *Watch on another device*), play it here first, then **Share to watch**. Browsers on your network that open this device's address stream it and can jump around in it; the file is never copied and nothing else in the folder is visible. Sharing ends when you stop it or quit the app. (Desktop app and `open-transfer` on a computer with a screen; on Android, send the video instead.)
+- Before sending, **Preview** shows the chosen photos and videos full screen
 - Every file checked with SHA-256 between apps; choose to keep both, skip or replace files you already have; notifications in the background
 - Activity: searchable history of what was sent and received, grouped by day; a send queue; connection quality per device
 - Clipboard: paste to send, Ctrl/⌘+Shift+V to send what you copied, and clipboard sharing between paired devices (both sides opt in; passwords and codes are never saved)

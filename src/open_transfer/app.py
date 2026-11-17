@@ -33,7 +33,7 @@ from flask import (
 from werkzeug.exceptions import ClientDisconnected, HTTPException
 from werkzeug.middleware.proxy_fix import ProxyFix
 
-from open_transfer import __version__, keystore, network, opener
+from open_transfer import __version__, keystore, network, opener, picker
 from open_transfer.archive import zip_stream
 from open_transfer.config import Config
 from open_transfer.mesh import Mesh, Viewer, visitor_identity
@@ -49,7 +49,7 @@ from open_transfer.security import (
     same_origin,
 )
 from open_transfer.serve import FILE_CSP, serve_file
-from open_transfer.storage import IncompleteUpload, InvalidName, Storage, StorageError
+from open_transfer.storage import FileInfo, IncompleteUpload, InvalidName, Storage, StorageError
 
 log = logging.getLogger("open_transfer")
 
@@ -255,6 +255,7 @@ def create_app(config: Config | None = None) -> Flask:
             "owner": owner,
             # Only the device's own window can open files on it.
             "local_open": owner and opener.available(),
+            "local_pick": owner and picker.available(),
             "auth": {
                 "required": bool(config.pin),
                 "authenticated": authed,
@@ -681,49 +682,89 @@ def create_app(config: Config | None = None) -> Flask:
 
     # ------------------------------------------------------- watch in the browser
 
-    # Videos the owner shares to watch (id → name in the folder): visitors stream
-    # them with Range requests, without the folder being shared or the file sent.
+    # Videos the owner shares to watch (token → where it is, and whether visitors may
+    # see it yet): visitors stream them with Range requests, without the folder being
+    # shared or the file sent. A video chosen from anywhere on this computer waits
+    # unshared while its owner previews it.
     # ponytail: in memory, so sharing ends when the app quits; persist if people ask.
-    watching: dict[str, str] = {}
+    watching: dict[str, dict[str, Any]] = {}
 
-    def watch_list() -> list[dict[str, Any]]:
-        ids = {name: token for token, name in list(watching.items())}
-        return [
-            {**f.to_dict(), "id": ids[f.name], "url": f"/api/watch/{ids[f.name]}"}
-            for f in storage.files()
-            if f.name in ids
-        ]
+    def watch_entry(token: str, path: Path) -> dict[str, Any]:
+        return {**FileInfo.from_path(path).to_dict(), "id": token, "url": f"/api/watch/{token}"}
+
+    def watch_list(*, everything: bool = False) -> list[dict[str, Any]]:
+        listed: dict[str, dict[str, Any]] = {}  # one per name: the list is keyed by it
+        for token, share in list(watching.items()):
+            if (share["public"] or everything) and share["path"].is_file():
+                listed.setdefault(share["path"].name, watch_entry(token, share["path"]))
+        return list(listed.values())
+
+    def watch_owner_only() -> Any:
+        if not is_owner():
+            return error(403, "owner_only", "Only the person using this device can do that.")
+        return None
+
+    def is_video_name(name: str) -> bool:
+        return (mimetypes.guess_type(name)[0] or "").startswith("video/")
 
     @app.get("/api/watch")
     def watch_index() -> Response:
-        return jsonify({"files": watch_list()})
+        return jsonify(
+            {"files": watch_list(everything=is_owner() and request.args.get("all") == "1")}
+        )
 
     @app.post("/api/watch")
     def watch_share() -> Any:
-        if not is_owner():
-            return error(403, "owner_only", "Only the person using this device can do that.")
+        if denied := watch_owner_only():
+            return denied
         path = storage.resolve(str((request.get_json(silent=True) or {}).get("name", "")))
-        if not (mimetypes.guess_type(path.name)[0] or "").startswith("video/"):
+        if not is_video_name(path.name):
             return error(400, "not_a_video", "Only videos can be shared to watch.")
-        token = next(
-            (t for t, n in list(watching.items()) if n == path.name), secrets.token_urlsafe(12)
-        )
-        watching[token] = path.name
+        token = next((t for t, s in list(watching.items()) if s["path"] == path), None)
+        token = token or secrets.token_urlsafe(12)
+        watching[token] = {"path": path, "public": True}
         log.info("Sharing %s to watch", log_safe(path.name))
         return jsonify({"id": token}), 201
 
+    @app.post("/api/watch/pick")
+    def watch_pick() -> Any:
+        """Choose a video anywhere on this computer. Not shared until ``share`` is called."""
+        if denied := watch_owner_only():
+            return denied
+        if not picker.available():
+            return error(501, "no_picker", "This computer can’t show a file dialog.")
+        path = picker.pick_video()
+        if path is None:
+            return jsonify({"canceled": True})
+        if not path.is_file() or not is_video_name(path.name):
+            return error(400, "not_a_video", "Only videos can be shared to watch.")
+        token = secrets.token_urlsafe(12)
+        watching[token] = {"path": path.resolve(), "public": False}
+        return jsonify(watch_entry(token, path)), 201
+
+    @app.post("/api/watch/<token>/share")
+    def watch_publish(token: str) -> Any:
+        if denied := watch_owner_only():
+            return denied
+        if token not in watching:
+            abort(404, "This video isn’t there any more.")
+        watching[token]["public"] = True
+        log.info("Sharing %s to watch", log_safe(watching[token]["path"].name))
+        return jsonify({"ok": True})
+
     @app.delete("/api/watch/<token>")
     def watch_stop(token: str) -> Any:
-        if not is_owner():
-            return error(403, "owner_only", "Only the person using this device can do that.")
+        if denied := watch_owner_only():
+            return denied
         watching.pop(token, None)
         return jsonify({"ok": True})
 
     @app.get("/api/watch/<token>")
     def watch_stream(token: str) -> Response:
-        if token not in watching:
+        share = watching.get(token)
+        if not share or not (share["public"] or is_owner()) or not share["path"].is_file():
             abort(404, "This video isn’t shared any more.")
-        return serve_file(storage.resolve(watching[token]), inline=True)
+        return serve_file(share["path"], inline=True)
 
     @app.post("/api/files/<path:name>/<any(open, reveal):action>")
     def open_locally(name: str, action: str) -> Response:

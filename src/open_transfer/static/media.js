@@ -23,7 +23,7 @@ export function previewKind(file) {
   return null;
 }
 
-export const isVideo = (file) => VIDEO_MIME.has(file.mime || "");
+export const isVideo = (file) => VIDEO_MIME.has(file.mime || file.type || "");
 export const isImage = (file) => IMAGE_MIME.has(file.mime || file.type || "");
 
 // ------------------------------------------------------------ thumbnails

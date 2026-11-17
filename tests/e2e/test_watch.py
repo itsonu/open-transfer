@@ -114,3 +114,52 @@ def test_watch_streams_seeks_and_says_when_it_cant(mac: Server, page, second_pag
     page.get_by_role("menuitem", name="Stop sharing to watch").click()
     visitor.locator("#preview-close").click()
     expect(rows).to_have_count(2)
+
+
+def test_choose_a_video_from_anywhere_preview_it_then_share(  # type: ignore[no-untyped-def]
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, page, second_page
+) -> None:
+    """The system's file dialog is faked: a program that prints where the video is."""
+    film = tmp_path / "Movies" / "holiday.mp4"
+    film.parent.mkdir()
+    film.write_bytes(os.urandom(50_000))
+    fake = tmp_path / "bin"
+    fake.mkdir()
+    for dialog in ("osascript", "zenity", "xdg-open"):  # macOS, Linux, and what Linux checks for
+        (fake / dialog).write_text(f'#!/bin/sh\nprintf %s "{film}"\n')
+        (fake / dialog).chmod(0o755)
+    monkeypatch.setenv("PATH", f"{fake}{os.pathsep}{os.environ['PATH']}")
+    monkeypatch.setenv("DISPLAY", ":0")
+    gen = _start(tmp_path, name="Mac", owner=True, host="0.0.0.0")
+    server = next(gen)
+    try:
+        page.goto(server.url)
+        visitor = second_page
+        visitor.goto(f"http://{lan_ip()}:{server.url.rsplit(':', 1)[1]}")
+
+        page.get_by_role("button", name="Choose a video…").click()
+        expect(page.locator("#watch-card")).to_be_visible()
+        expect(page.locator("#watch-card-name")).to_contain_text("holiday.mp4")
+        expect(page.locator("#watch-card-note")).to_contain_text("Only you can see it")
+        expect(page.locator("#watch-player")).to_be_visible()
+        page.wait_for_timeout(1500)  # a visitor's list refreshes every second or so
+        expect(visitor.locator("#file-list .file-row")).to_have_count(0)
+
+        page.get_by_role("button", name="Cancel").click()
+        expect(page.locator("#watch-card")).to_be_hidden()
+        expect(page.locator("#watch-list")).to_be_hidden()
+
+        page.get_by_role("button", name="Choose a video…").click()
+        page.get_by_role("button", name="Share to watch").click()
+        expect(page.locator("#watch-card")).to_be_hidden()
+        expect(page.locator("#watch-list .row")).to_contain_text("holiday.mp4")
+        expect(visitor.locator("#file-list .file-row .row-title")).to_have_text(
+            "holiday.mp4", timeout=10_000
+        )
+
+        page.get_by_role("button", name="Stop sharing: holiday.mp4").click()
+        expect(page.locator("#watch-list")).to_be_hidden()
+        expect(visitor.locator("#file-list .file-row")).to_have_count(0, timeout=10_000)
+    finally:
+        for _ in gen:
+            pass

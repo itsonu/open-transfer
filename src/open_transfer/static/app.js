@@ -115,6 +115,7 @@ function applyInfo(info) {
   if (max) hints.push(`Up to ${formatBytes(max)} per file.`);
   $("#drop-hint").textContent = hints.join(" ");
   showKeepPlace();
+  renderWatch();
   $("#overlay-text").textContent = deviceMode ? "Drop to send" : `Drop to share with everyone`;
   $("#library-title").textContent = { owner: "Received", shared: "Shared files", inbox: "Sent to you" }[mode];
   $("#empty-title").textContent = mode === "shared" ? "No files yet" : "Nothing received yet";
@@ -172,6 +173,9 @@ function enterMain() {
       else nativeApp().openAppSettings();
       event.target.checked = nativeApp().mediaLocation();
     });
+    $("#watch-pick").addEventListener("click", pickWatch);
+    $("#watch-share").addEventListener("click", shareWatchPick);
+    $("#watch-cancel").addEventListener("click", dropWatchPick);
     announceSelf()
       .then(() => poll(true))
       .finally(() => takeShared());
@@ -241,6 +245,7 @@ async function refresh() {
       state.watching = watch;
       if (inInbox()) showInbox();
       else renderFiles();
+      renderWatch();
     }
     markOnline(true);
     if (!$("#fatal-view").hidden) showView("main");
@@ -288,6 +293,93 @@ async function toggleWatch(file) {
   } catch (err) {
     toast(err.message, { tone: "error", icon: "alert" });
   }
+}
+
+// ----------------------------------------- watch on another device (owner)
+
+const watchAddress = () => `${state.info.share_url || "this device’s address"}${state.info.auth?.required ? " with the PIN" : ""}`;
+
+/** The videos shared to watch, and the picker for one from anywhere on this computer. */
+function renderWatch() {
+  const section = $("#watch-section");
+  section.hidden = !(state.info.owner && (state.info.local_pick || state.watching.length));
+  if (section.hidden) return;
+  $("#watch-pick").hidden = !state.info.local_pick;
+  $("#watch-meta").textContent = state.watching.length ? plural(state.watching.length, "video") : "";
+  $("#watch-hint").hidden = $("#watch-list").hidden = !state.watching.length;
+  $("#watch-hint").textContent = `On another device, open ${watchAddress()} to watch.`;
+  $("#watch-list").replaceChildren(...state.watching.map(watchRow));
+}
+
+function watchRow(file) {
+  const link = new URL(file.url, state.info.share_url || location.origin).href;
+  const thumb = h("span", { class: "thumb thumb-link", "aria-hidden": "true" }, icon("video"), videoThumb(file.url));
+  thumb.style.setProperty("--kind", "var(--k-video)");
+  thumb.addEventListener("click", () => openPreview([file], 0, { urlFor: (f) => f.url }));
+  const button = (label, iconName, onclick, extra = "") =>
+    h("button", { class: `icon-btn${extra}`, type: "button", "aria-label": `${label}: ${file.name}`, title: label, onclick }, icon(iconName));
+  return h(
+    "li",
+    { class: "row", dataset: { name: file.name } },
+    thumb,
+    h("div", { class: "row-main" }, h("span", { class: "row-title", title: file.name }, file.name), h("span", { class: "row-sub" }, `${formatBytes(file.size)} · shared to watch`)),
+    h(
+      "div",
+      { class: "row-actions" },
+      button("Copy link", "link", async () => toast((await copyText(link)) ? "Link copied" : "Couldn’t copy the link", { icon: "link" })),
+      button("Stop sharing", "x", () => toggleWatch(file), " is-danger"),
+    ),
+  );
+}
+
+/** Choose a video in the system's own dialog, then watch it here before anyone else can. */
+async function pickWatch() {
+  const button = $("#watch-pick");
+  button.disabled = true;
+  try {
+    await dropWatchPick();
+    const { data } = await api("/api/watch/pick", { method: "POST" });
+    if (data.canceled) return;
+    state.picked = data;
+    const player = $("#watch-player");
+    player.src = data.url;
+    $("#watch-card-name").textContent = `${data.name} · ${formatBytes(data.size)}`;
+    $("#watch-card-note").textContent = `Only you can see it until you share it. Browsers that open ${watchAddress()} can then watch it.`;
+    $("#watch-card").hidden = false;
+    $("#watch-card").scrollIntoView({ block: "nearest" });
+    $("#watch-share").focus({ preventScroll: true });
+  } catch (err) {
+    toast(err.message, { tone: "error", icon: "alert" });
+  } finally {
+    button.disabled = false;
+  }
+}
+
+/** Close the preview, and forget a video that was chosen but never shared. */
+async function dropWatchPick() {
+  const picked = state.picked;
+  state.picked = null;
+  const player = $("#watch-player");
+  player.pause();
+  player.removeAttribute("src");
+  player.load();
+  $("#watch-card").hidden = true;
+  if (picked) await api(`/api/watch/${picked.id}`, { method: "DELETE" }).catch(() => {});
+}
+
+async function shareWatchPick() {
+  const picked = state.picked;
+  if (!picked) return;
+  try {
+    await api(`/api/watch/${picked.id}/share`, { method: "POST" });
+  } catch (err) {
+    toast(err.message, { tone: "error", icon: "alert" });
+    return;
+  }
+  state.picked = null;
+  await dropWatchPick();
+  toast(`Browsers that open ${watchAddress()} can now watch “${picked.name}”`, { icon: "eye" });
+  poll(true);
 }
 
 function buildFileRow(file) {

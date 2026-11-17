@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import subprocess
 from pathlib import Path
 
+import pytest
 from flask.testing import FlaskClient
 
+from open_transfer import picker
 from tests.conftest import AppFactory
 
 VISITOR = {"REMOTE_ADDR": "192.168.1.20"}
@@ -92,3 +95,65 @@ def test_watching_needs_the_pin(make_app: AppFactory) -> None:
     assert visitor.get("/api/watch").status_code == 401
     visitor.post("/api/auth", json={"pin": "4821"})
     assert visitor.get(url).status_code == 200
+
+
+def test_a_video_from_anywhere_waits_unshared_until_the_owner_shares_it(
+    make_app: AppFactory, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    owner, visitor, _ = setup(make_app)
+    elsewhere = tmp_path / "Movies"
+    elsewhere.mkdir()
+    film = elsewhere / "film.mkv"
+    film.write_bytes(bytes(range(200)))
+    chosen: list[Path | None] = [film, None, elsewhere / "notes.txt"]
+    (elsewhere / "notes.txt").write_text("hi")
+    monkeypatch.setattr(picker, "available", lambda *_: True)
+    monkeypatch.setattr(picker, "pick_video", lambda *_: chosen.pop(0))
+
+    assert visitor.post("/api/watch/pick").status_code == 403
+    picked = owner.post("/api/watch/pick")
+    assert picked.status_code == 201
+    token = picked.json["id"]
+    assert (picked.json["name"], picked.json["size"]) == ("film.mkv", 200)
+
+    # Previewing is for the owner alone: no visitor sees or streams it yet.
+    assert visitor.get("/api/watch").json == {"files": []}
+    assert visitor.get(f"/api/watch/{token}").status_code == 404
+    assert (
+        owner.get(f"/api/watch/{token}", headers={"Range": "bytes=10-19"}).data
+        == film.read_bytes()[10:20]
+    )
+    assert owner.get("/api/watch").json == {"files": []}
+    assert [f["id"] for f in owner.get("/api/watch?all=1").json["files"]] == [token]
+    assert visitor.get("/api/watch?all=1").json == {"files": []}  # only the owner sees the unshared
+
+    assert visitor.post(f"/api/watch/{token}/share").status_code == 403
+    assert owner.post(f"/api/watch/{token}/share").status_code == 200
+    (listed,) = visitor.get("/api/watch").json["files"]
+    assert listed["name"] == "film.mkv"
+    assert visitor.get(listed["url"], headers={"Range": "bytes=0-4"}).status_code == 206
+
+    assert owner.post("/api/watch/pick").json == {"canceled": True}
+    assert owner.post("/api/watch/pick").status_code == 400  # a text file
+
+    assert owner.delete(f"/api/watch/{token}").status_code == 200
+    assert visitor.get(f"/api/watch/{token}").status_code == 404
+
+    # A video that went away is no longer offered.
+    film.unlink()
+    assert owner.get("/api/watch?all=1").json == {"files": []}
+
+
+def test_picker_commands_name_the_systems_own_dialog() -> None:
+    assert picker.command("darwin")[0] == "osascript"
+    assert picker.command("win32")[0] == "powershell"
+    assert picker.available("darwin")
+    assert picker.available("win32")
+
+
+def test_the_picker_reads_a_name_that_isnt_ascii(monkeypatch: pytest.MonkeyPatch) -> None:
+    done = subprocess.CompletedProcess([], 0, stdout="\ufeffC:\\Видео\\फिल्म.mp4\r\n")
+    monkeypatch.setattr(subprocess, "run", lambda *a, **k: done)
+    assert picker.pick_video("win32") == Path("C:\\Видео\\फिल्म.mp4")
+    done.returncode = 1  # the dialog was closed
+    assert picker.pick_video("win32") is None

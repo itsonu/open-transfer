@@ -166,6 +166,31 @@
           <label class="keep-place" id="keep-place-row" hidden><input type="checkbox" id="keep-place"> Keep where photos and videos were taken</label>
         </section>
 
+        <section class="watch" id="watch-section" aria-labelledby="watch-title" hidden>
+          <div class="section-head">
+            <h2 id="watch-title">Watch on another device</h2>
+            <span class="section-meta" id="watch-meta"></span>
+            <button class="btn btn-tinted btn-small" id="watch-pick" type="button" hidden>
+              <svg class="icon" aria-hidden="true"><use href="#i-video"/></svg><span>Choose a video…</span>
+            </button>
+          </div>
+          <div class="card watch-card" id="watch-card" hidden>
+            <video id="watch-player" controls preload="metadata" playsinline></video>
+            <div class="watch-card-body">
+              <div class="watch-card-text">
+                <strong id="watch-card-name"></strong>
+                <span class="muted" id="watch-card-note"></span>
+              </div>
+              <div class="watch-card-actions">
+                <button class="btn btn-primary" id="watch-share" type="button">Share to watch</button>
+                <button class="btn btn-plain" id="watch-cancel" type="button">Cancel</button>
+              </div>
+            </div>
+          </div>
+          <p class="muted watch-hint" id="watch-hint" hidden></p>
+          <ul class="list card" id="watch-list" hidden></ul>
+        </section>
+
         <section class="transfers" id="activity" aria-label="Transfers" hidden>
           <div class="section-head"><h2>Transfers</h2></div>
           <ul class="list card jobs" id="job-list"></ul>
@@ -345,6 +370,7 @@
         <span class="send-bar-to" id="send-bar-to"></span>
       </div>
       <div class="send-bar-actions">
+        <button class="btn btn-plain btn-small" id="send-preview" type="button" hidden>Preview</button>
         <button class="btn btn-plain btn-small" id="send-clear" type="button">Clear</button>
         <button class="btn btn-tinted" id="send-pick" type="button">
           <svg class="icon" aria-hidden="true"><use href="#i-upload"/></svg><span>Add files</span>

@@ -5,7 +5,7 @@
 import { DIRECT_MAX_BYTES, directSupported, handleSignals, sendDirect } from "./direct.js";
 import { $, ApiError, addHistory, api, copyText, deliveredBytes, formatBytes, formatDuration, guessKind, h, icon, looksSensitive, newUploadId, plural, pushSample, SENSITIVE_REASONS, shouldChunk, sparklineSVG, state, toast, uploadParallel } from "./lib.js";
 import { saveThumb } from "./activity.js";
-import { isImage, makeThumb, openMenu } from "./media.js";
+import { isImage, isVideo, makeThumb, openMenu, openPreview, videoThumb } from "./media.js";
 import { notify } from "./notify.js";
 import { collectDropped, zipFiles, zipName } from "./zip.js";
 
@@ -30,7 +30,7 @@ export const mesh = {
   incomingRows: new Map(),
   favorites: loadFavorites(), // [{ id, name, form, platform, kind }], first = Alt+1
   quickTarget: null, // device id the quick-send file picker is for
-  stagedUrls: new Map(), // staged image File -> object URL for its thumbnail
+  stagedUrls: new Map(), // staged File -> object URL (thumbnail, preview)
   queue: [], // sends waiting their turn: { qid, ids, files }
   starting: 0, // sends being created right now (they count against the limit)
 };
@@ -743,6 +743,7 @@ function renderSendBar() {
   document.body.classList.toggle("has-send-bar", !bar.hidden);
   if (bar.hidden) return;
   renderStagedThumbs(files);
+  $("#send-preview").hidden = !stagedMedia().length;
   const size = files.reduce((sum, f) => sum + f.size, 0);
   $("#send-bar-files").textContent = files.length
     ? files.length === 1
@@ -771,25 +772,37 @@ async function confirmRecipients(ids, files) {
   });
 }
 
-/** Up to three thumbnails of the staged images (object URLs, revoked when unstaged). */
+/** The staged files the preview can show: images and videos. */
+const stagedMedia = () => mesh.staged.filter((f) => (isImage(f) && f.size <= 25_000_000) || isVideo(f));
+
+const stagedUrl = (file) => {
+  if (!mesh.stagedUrls.has(file)) mesh.stagedUrls.set(file, file.url || URL.createObjectURL(file)); // a big share: its own URL
+  return mesh.stagedUrls.get(file);
+};
+
+/** Look at what's about to be sent: each staged image or video, full screen, before it goes. */
+function previewStaged() {
+  const files = stagedMedia().map((f) => ({ name: f.name, size: f.size, mime: f.type || f.mime, file: f }));
+  openPreview(files, 0, { urlFor: (f) => stagedUrl(f.file), trigger: $("#send-preview") });
+}
+
+/**
+ * Up to three thumbnails of the staged images and videos (object URLs, revoked when unstaged).
+ * A big share's video gets no picture: showing one would read it before anyone chose to send it.
+ */
 function renderStagedThumbs(files) {
-  const images = files.filter((f) => isImage(f) && f.size <= 25_000_000).slice(0, 3);
+  const media = stagedMedia().slice(0, 3);
   for (const [file, url] of mesh.stagedUrls) {
-    if (!images.includes(file)) {
+    if (!files.includes(file)) {
       URL.revokeObjectURL(url);
       mesh.stagedUrls.delete(file);
     }
   }
   const box = $("#send-bar-thumbs");
-  const sig = images.map((f) => `${f.name}:${f.size}`).join("|");
+  const sig = media.map((f) => `${f.name}:${f.size}`).join("|");
   if (box.dataset.sig === sig) return;
   box.dataset.sig = sig;
-  box.replaceChildren(
-    ...images.map((file) => {
-      if (!mesh.stagedUrls.has(file)) mesh.stagedUrls.set(file, file.url || URL.createObjectURL(file)); // a big share: its own URL
-      return h("img", { src: mesh.stagedUrls.get(file), alt: "" });
-    }),
-  );
+  box.replaceChildren(...media.map((file) => (isVideo(file) ? h("span", { class: "staged-video" }, file.url ? icon("video") : videoThumb(stagedUrl(file))) : h("img", { src: stagedUrl(file), alt: "" }))));
 }
 
 async function sendStaged() {
@@ -2184,6 +2197,7 @@ export function initNearby(context) {
   });
   $("#send-go").addEventListener("click", sendStaged);
   setupQuickSend();
+  $("#send-preview").addEventListener("click", previewStaged);
   $("#send-clear").addEventListener("click", () => {
     mesh.staged = [];
     mesh.selected.clear();
