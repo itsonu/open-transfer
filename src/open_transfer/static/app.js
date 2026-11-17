@@ -3,7 +3,7 @@
 // file list · shared-folder uploads · drag/drop/paste · PIN · boot.
 // lib.js has the helpers, nearby.js the devices, sending and pairing.
 
-import { $, addHistory, api, can, chunkLimits, copyText, formatBytes, formatDuration, guessKind, h, icon, newUploadId, plural, pushSample, relativeTime, setLockHandler, shouldChunk, sparklineSVG, stamp, state, toast, uploadParallel } from "./lib.js";
+import { $, addHistory, api, can, chunkLimits, copyText, formatBytes, forgetUpload, formatDuration, guessKind, h, icon, plural, pushSample, relativeTime, resumableId, setLockHandler, shouldChunk, sparklineSVG, stamp, state, toast, uploadParallel } from "./lib.js";
 import { initActivity } from "./activity.js";
 import { initClipboard, readClipboard } from "./clipboard.js";
 import { initSync } from "./sync.js";
@@ -834,7 +834,7 @@ async function startChunkedUpload(t) {
   // Big files go up in parallel chunks (3 in flight): a Wi-Fi hiccup loses
   // the in-flight pieces, not the whole file. Pausing aborts the workers but
   // keeps the upload id, so resuming continues where it stopped.
-  t.uploadId = t.uploadId || newUploadId();
+  t.uploadId = t.uploadId || resumableId(t.file);
   t.abort = new AbortController();
   t.samples = t.samples || [];
   const total = t.size;
@@ -867,6 +867,7 @@ async function startChunkedUpload(t) {
       },
     );
     const saved = data?.files?.[0] || null;
+    forgetUpload(t.file);
     t.state = "done";
     t.loaded = total;
     t.chunkNote = "";
@@ -941,6 +942,7 @@ function settle() {
 }
 
 function cancelOrDismiss(t) {
+  forgetUpload(t.file); // giving up: choosing the file again starts over
   if (t.state === "uploading" || t.state === "paused" || t.state === "pausing") {
     t.wantCancel = true;
     if (t.xhr) t.xhr.abort();

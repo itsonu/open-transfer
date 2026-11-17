@@ -132,6 +132,40 @@ export function newUploadId() {
   return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 14)}`;
 }
 
+// A big upload keeps its id in this browser, so choosing the same file again after a reload
+// or a crash carries on from the pieces the device already has (it keeps them for a day).
+const RESUME_KEY = "ot-resume";
+const RESUME_TTL = 24 * 3600 * 1000;
+const fileKey = (f) => `${f.name}|${f.size}|${f.lastModified}`;
+
+function resumeBook() {
+  try {
+    const book = JSON.parse(localStorage.getItem(RESUME_KEY) || "{}");
+    return Object.fromEntries(Object.entries(book).filter(([, v]) => Date.now() - v.at < RESUME_TTL));
+  } catch {
+    return {};
+  }
+}
+
+function saveResumeBook(book) {
+  try { localStorage.setItem(RESUME_KEY, JSON.stringify(book)); } catch { /* private mode: no resume after a reload */ }
+}
+
+export function resumableId(file) {
+  const book = resumeBook();
+  const id = book[fileKey(file)]?.id || newUploadId();
+  book[fileKey(file)] = { id, at: Date.now() };
+  saveResumeBook(book);
+  return id;
+}
+
+/** Once a file is delivered (or dropped), sending it again is a new upload. */
+export function forgetUpload(file) {
+  const book = resumeBook();
+  delete book[fileKey(file)];
+  saveResumeBook(book);
+}
+
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 /** PUT one chunk with ``Content-Range``. Resolves ``{received, total, done, data}``. */
