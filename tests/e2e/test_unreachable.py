@@ -92,7 +92,7 @@ def test_the_public_network_guess_gives_way_to_evidence(page, devices: list[Serv
     _network(page, {"public": ["Home-5G"], "unreachable_by": [], "reachable_by": 1})
     page.goto(devices[0].url)
     status = page.locator("#me-status")
-    expect(status).to_have_text(re.compile("discoverable|Visible"), timeout=10_000)
+    expect(status).to_have_text(re.compile("isible to nearby"), timeout=10_000)
     expect(status).not_to_contain_text("Public network")
 
 

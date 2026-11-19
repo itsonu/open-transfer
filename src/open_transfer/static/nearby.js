@@ -253,7 +253,7 @@ function renderMe() {
     status.textContent = `Other devices may not reach this PC: Windows treats “${blocked[0]}” as a Public network. Set it to Private, and allow Open Transfer on Private networks.`;
     status.dataset.tone = "warn";
   } else if (me.kind === "owner") {
-    status.textContent = discovery ? "Visible to nearby devices" : "Not discoverable — add devices by code or address";
+    status.textContent = discovery ? "Visible to nearby devices" : "Not visible to nearby devices — add them by code or address";
     status.dataset.tone = discovery ? "ok" : "warn";
   } else {
     // This page's own hop to its app: TLS with --https, else plain HTTP (unless on this machine).
@@ -579,10 +579,13 @@ function renderDevices() {
   const allSelected = online.length > 0 && online.every((d) => mesh.selected.has(d.id));
   all.textContent = allSelected ? "Deselect all" : "Select all";
   const owner = mesh.data.me.kind === "owner";
+  const searching = !owner || mesh.data.discovery;
+  $("#nearby-empty-title").textContent = searching ? "Looking for devices…" : "No devices yet";
+  $("#nearby-help").hidden = !searching;
   $("#nearby-empty-text").textContent = owner
     ? mesh.data.discovery
       ? "Open Open Transfer on your other devices — they’ll appear here. Phones without the app can scan this device’s QR code."
-      : "Discovery is off. Add a device with its code or address."
+      : "Automatic discovery is off. Use Add device to connect with a code or address."
     : `Nobody else is here yet. Open Open Transfer on another device, or scan ${mesh.data.host.name}’s QR code with it.`;
 }
 
@@ -2045,7 +2048,6 @@ function stopScanner() {
 
 function setupConnectSheet() {
   const dialog = $("#connect-dialog");
-  for (const button of document.querySelectorAll(".js-add-device")) button.addEventListener("click", () => openAddDevice());
   dialog.addEventListener("click", (event) => {
     if (event.target === dialog) dialog.close();
   });

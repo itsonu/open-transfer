@@ -109,6 +109,7 @@
 
       <!-- Main view -->
       <div class="view" id="main-view" hidden>
+        <h1 class="visually-hidden">Send and receive files</h1>
         <section class="nearby" id="nearby" aria-labelledby="nearby-title">
           <div class="me-line">
             <span class="me-icon" id="me-icon" aria-hidden="true"></span>
@@ -137,21 +138,28 @@
           <div class="nearby-empty card" id="nearby-empty">
             <div class="radar" aria-hidden="true"><span></span><span></span><span></span>
               <svg class="icon"><use href="#i-wifi"/></svg></div>
-            <h3>Looking for devices…</h3>
+            <h3 id="nearby-empty-title">Looking for devices…</h3>
             <p class="muted" id="nearby-empty-text">Open Open Transfer on your other devices — they’ll appear here.</p>
-            <button class="btn btn-tinted js-add-device" type="button">
-              <svg class="icon" aria-hidden="true"><use href="#i-qr"/></svg><span>Add a device</span>
-            </button>
+            <details class="nearby-help" id="nearby-help">
+              <summary>Not seeing a device?</summary>
+              <ul>
+                <li>Both devices are on the same Wi‑Fi, and it isn’t a guest network.</li>
+                <li>Open Transfer is open on the other device.</li>
+                <li>A VPN is off on either device.</li>
+                <li>A firewall isn’t blocking Open Transfer. Windows asks the first time: choose <em>Private networks</em>.</li>
+                <li>Still nothing? Use <b>Add device</b> above and enter its code or address.</li>
+              </ul>
+            </details>
           </div>
         </section>
 
         <section class="send" id="send-section" aria-labelledby="drop-title">
           <div class="dropzone" id="dropzone" role="button" tabindex="0" aria-describedby="drop-hint">
             <div class="drop-icon" aria-hidden="true"><svg class="icon"><use href="#i-upload"/></svg></div>
-            <h1 class="drop-title" id="drop-title">
+            <h2 class="drop-title" id="drop-title">
               <span class="only-pointer" id="drop-title-pointer">Drop files to send</span>
               <span class="only-touch" id="drop-title-touch">Send files</span>
-            </h1>
+            </h2>
             <p class="drop-sub">
               <span class="only-pointer">or <span class="link-like">choose from your computer</span></span>
               <span class="only-touch"><span class="link-like">Tap to choose photos or files</span></span>
