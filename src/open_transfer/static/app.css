@@ -3850,5 +3850,31 @@ kbd {
   summary {
     display: inline-flex;
     align-items: center;
+    gap: 4px; /* the ▸ after a summary lost its space to the flex layout */
   }
+}
+
+/* Add device: the rare things (encryption switch, guest link, other addresses) wait behind one summary. */
+.more-options {
+  margin-top: 12px;
+}
+
+.more-options:not(:has(> :not(summary):not([hidden]))) {
+  display: none;
+}
+
+.more-options > summary {
+  padding: 10px 0;
+  color: var(--accent-text);
+  font-weight: 500;
+  text-align: center;
+  cursor: pointer;
+}
+
+.more-options > summary::after {
+  content: " ▸";
+}
+
+.more-options[open] > summary::after {
+  content: " ▾";
 }

@@ -425,31 +425,34 @@
       </div>
       <p class="pin-note" id="pin-note" hidden>PIN <strong id="pin-note-value"></strong> — a browser that scans the QR code above in the next 10 minutes gets in without it. The code never contains the PIN.</p>
       <p class="pin-note" id="tls-note" hidden>HTTPS: a browser warns once, because this certificate is this device’s own. Check its SHA-256 fingerprint in the browser’s certificate details: <strong id="tls-note-value"></strong></p>
-      <label class="enc-only pin-note" id="enc-only-row" hidden><input type="checkbox" id="enc-only"> Encrypted transfers only: don’t send to or take files from apps that can’t encrypt (older versions)</label>
       <button class="btn btn-plain btn-block" type="button" id="share-url-button" hidden>
         <svg class="icon" aria-hidden="true"><use href="#i-share"/></svg><span>Share link…</span>
       </button>
-      <details class="other-urls" id="other-urls" hidden>
-        <summary>Other addresses</summary>
-        <ul id="other-url-list"></ul>
-      </details>
-      <div class="invite-block" id="invite-block" hidden>
-        <div class="invite-head">
-          <svg class="icon" aria-hidden="true"><use href="#i-link"/></svg>
-          <span>Guest link</span>
-          <span class="muted" id="invite-expiry"></span>
-        </div>
-        <p class="muted invite-note">Single use, expires in 10 min — lets one guest in past the PIN, then dies.</p>
-        <div class="url-field" id="invite-field" hidden>
-          <code id="invite-url" class="url-text"></code>
-          <button class="btn btn-tinted btn-small" type="button" id="invite-copy">
-            <svg class="icon" aria-hidden="true"><use href="#i-copy"/></svg><span>Copy</span>
+      <details class="more-options">
+        <summary>More options</summary>
+        <label class="enc-only pin-note" id="enc-only-row" hidden><input type="checkbox" id="enc-only"> Encrypted transfers only: don’t send to or take files from apps that can’t encrypt (older versions)</label>
+        <details class="other-urls" id="other-urls" hidden>
+          <summary>Other addresses</summary>
+          <ul id="other-url-list"></ul>
+        </details>
+        <div class="invite-block" id="invite-block" hidden>
+          <div class="invite-head">
+            <svg class="icon" aria-hidden="true"><use href="#i-link"/></svg>
+            <span>Guest link</span>
+            <span class="muted" id="invite-expiry"></span>
+          </div>
+          <p class="muted invite-note">Single use, expires in 10 min — lets one guest in past the PIN, then dies.</p>
+          <div class="url-field" id="invite-field" hidden>
+            <code id="invite-url" class="url-text"></code>
+            <button class="btn btn-tinted btn-small" type="button" id="invite-copy">
+              <svg class="icon" aria-hidden="true"><use href="#i-copy"/></svg><span>Copy</span>
+            </button>
+          </div>
+          <button class="btn btn-tinted btn-block" type="button" id="invite-new">
+            <svg class="icon" aria-hidden="true"><use href="#i-link"/></svg><span>New guest link…</span>
           </button>
         </div>
-        <button class="btn btn-tinted btn-block" type="button" id="invite-new">
-          <svg class="icon" aria-hidden="true"><use href="#i-link"/></svg><span>New guest link…</span>
-        </button>
-      </div>
+      </details>
     </div>
     <div data-panel="enter" id="panel-enter" role="tabpanel" hidden>
       <p class="muted">Enter the code shown in Open Transfer on the other device. Paired devices can send to each other without asking.</p>

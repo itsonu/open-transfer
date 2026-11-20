@@ -160,3 +160,21 @@ def test_a_failed_upload_says_why_in_full(browser, visitor: Server) -> None:  # 
     row.wait_for()
     cut_off = row.evaluate("(e) => e.scrollWidth > e.clientWidth")
     assert not cut_off, row.inner_text()
+
+
+def test_the_add_device_sheet_starts_with_just_what_you_need(
+    browser, devices: list[Server]
+) -> None:  # type: ignore[no-untyped-def]
+    page = browser.new_context(**PHONE).new_page()
+    page.goto(devices[0].url)
+    page.click("#connect-button")
+    sheet = page.locator("#connect-dialog")
+    expect(page.locator("#qr-image")).to_be_visible()
+    expect(page.locator("#share-url")).to_be_visible()
+    for rare in ("#enc-only", "#invite-new"):
+        expect(page.locator(rare)).not_to_be_visible()
+    fits = sheet.evaluate("(e) => e.scrollHeight <= e.clientHeight + 1")
+    assert fits, "the first view scrolls on a phone"
+    page.get_by_text("More options").click()
+    for rare in ("#enc-only", "#invite-new"):
+        expect(page.locator(rare)).to_be_visible()

@@ -222,6 +222,7 @@ def test_the_owner_chooses_whether_to_refuse_unencrypted_transfers(
     page.goto(devices[0].url)
     expect(page.locator("#me-status")).to_be_visible(timeout=10_000)
     page.click("#connect-button")
+    page.get_by_text("More options").click()
     box = page.locator("#enc-only")
     expect(box).to_be_checked()  # a new installation starts with it on
     box.uncheck()  # to send to an older app
@@ -231,4 +232,5 @@ def test_the_owner_chooses_whether_to_refuse_unencrypted_transfers(
     page.reload()
     expect(page.locator("#me-status")).to_be_visible(timeout=10_000)
     page.click("#connect-button")
+    page.get_by_text("More options").click()
     expect(page.locator("#enc-only")).not_to_be_checked()
