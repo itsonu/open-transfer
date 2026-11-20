@@ -15,12 +15,13 @@
   --border: rgba(0, 0, 0, 0.1);
   --accent: #0071e3;
   --accent-text: #005ec2; /* text on the soft tint: 4.5:1 or better */
+  --accent-fill: #0071e3; /* behind white text: 4.5:1 or better, in both themes */
   --accent-hover: #0077ed;
   --accent-pressed: #006edb;
   --accent-soft: rgba(0, 113, 227, 0.1);
   --accent-soft-hover: rgba(0, 113, 227, 0.16);
   --on-accent: #ffffff;
-  --success: #1a8f3c;
+  --success: #137a2f;
   --success-soft: rgba(52, 199, 89, 0.14);
   --danger: #d70015;
   --danger-soft: rgba(255, 59, 48, 0.1);
@@ -78,9 +79,9 @@
     --separator: rgba(255, 255, 255, 0.09);
     --border: rgba(255, 255, 255, 0.14);
     --accent: #0a84ff;
-    --accent-text: #4da3ff;
-    --accent-hover: #2b95ff;
-    --accent-pressed: #0077ed;
+    --accent-text: #66b0ff;
+    --accent-hover: #0068d0; /* darker, not lighter: white text must stay readable */
+    --accent-pressed: #005cb8;
     --accent-soft: rgba(10, 132, 255, 0.18);
     --accent-soft-hover: rgba(10, 132, 255, 0.26);
     --success: #30d158;
@@ -160,8 +161,8 @@ button {
 }
 
 :focus-visible {
-  outline: none;
-  box-shadow: var(--focus);
+  outline: 3px solid var(--accent-text);
+  outline-offset: 2px;
 }
 
 [hidden] {
@@ -384,7 +385,7 @@ main {
 }
 
 .btn-primary {
-  background: var(--accent);
+  background: var(--accent-fill);
   color: var(--on-accent);
 }
 
@@ -407,7 +408,7 @@ main {
 
 .btn-plain {
   background: transparent;
-  color: var(--accent);
+  color: var(--accent-text);
 }
 
 .btn-plain:hover:not(:disabled) {
@@ -899,6 +900,7 @@ a.row-title:hover {
 
 .transfer-row[data-state="error"] .row-sub {
   color: var(--danger);
+  white-space: normal; /* the reason, in full */
 }
 
 .transfer-row[data-state="done"] .row-sub {
@@ -1061,8 +1063,6 @@ a.row-title:hover {
 
 .pin-input:focus {
   border-color: var(--accent);
-  outline: none;
-  box-shadow: var(--focus);
 }
 
 .pin-input.is-invalid {
@@ -1536,7 +1536,7 @@ body.is-dragging .device[data-online="1"] .device-button {
 }
 
 .device.is-selected .device-avatar {
-  background: var(--accent);
+  background: var(--accent-fill);
   color: var(--on-accent);
 }
 
@@ -1550,7 +1550,7 @@ body.is-dragging .device[data-online="1"] .device-button {
   height: 22px;
   border: 2px solid var(--surface);
   border-radius: 50%;
-  background: var(--accent);
+  background: var(--accent-fill);
   color: var(--on-accent);
   transform: scale(0);
   transition: transform var(--t-med) var(--ease-spring);
@@ -1625,7 +1625,7 @@ body.is-dragging .device[data-online="1"] .device-button {
 }
 
 .device-sub[data-tone="accent"] {
-  color: var(--accent);
+  color: var(--accent-text);
   font-weight: 500;
 }
 
@@ -1732,7 +1732,7 @@ body.is-dragging .device[data-online="1"] .device-button {
   display: none;
   padding: 2px 9px;
   border-radius: 999px;
-  background: var(--accent);
+  background: var(--accent-fill);
   color: var(--on-accent);
   font-size: 11px;
   font-weight: 600;
@@ -1767,7 +1767,7 @@ body.is-dragging .everyone-target[data-ready="1"] {
 
 .everyone-target.is-drop-target {
   border-style: solid;
-  background: var(--accent);
+  background: var(--accent-fill);
   color: var(--on-accent);
 }
 
@@ -1935,7 +1935,7 @@ body.has-send-bar main {
 }
 
 body.has-send-bar .toasts {
-  bottom: calc(max(20px, env(safe-area-inset-bottom)) + 84px);
+  bottom: calc(var(--send-bar-h, 76px) + 8px); /* just above the bar, however tall it grows */
 }
 
 /* ------------------------------------------------------------- transfers */
@@ -2153,8 +2153,6 @@ body.has-send-bar .toasts {
 
 .text-input:focus {
   border-color: var(--accent);
-  outline: none;
-  box-shadow: var(--focus);
 }
 
 /* ------------------------------------------------------------ text sheet */
@@ -2404,7 +2402,7 @@ body.has-send-bar .toasts {
 
 .history-dir[data-dir="up"] {
   background: var(--accent-soft);
-  color: var(--accent);
+  color: var(--accent-text);
 }
 
 .history-dir[data-dir="down"] {
@@ -2657,7 +2655,7 @@ body.has-send-bar .toasts {
   #send-folder,
   #send-text,
   #send-clipboard {
-    min-height: 40px;
+    min-height: 44px;
     padding: 0 12px;
   }
 
@@ -2795,8 +2793,8 @@ body.has-send-bar .toasts {
   }
 }
 
-[tabindex="-1"]:focus,
-[tabindex="-1"]:focus-visible {
+[tabindex="-1"]:not(button):focus,
+[tabindex="-1"]:not(button):focus-visible {
   outline: none;
   box-shadow: none;
 }
@@ -3164,7 +3162,10 @@ body.has-send-bar .toasts {
 .menu-item:hover,
 .menu-item:focus-visible {
   background: var(--accent-soft);
-  outline: none;
+}
+
+.menu-item:focus-visible {
+  outline-offset: -3px; /* inside the menu, which clips what sticks out */
 }
 
 .menu-item.is-danger,
@@ -3624,7 +3625,7 @@ body.has-send-bar .toasts {
   padding: 1px 8px;
   border-radius: var(--r-pill);
   background: var(--accent-soft);
-  color: var(--accent);
+  color: var(--accent-text);
   font-size: 11px;
   font-weight: 600;
 }
@@ -3820,4 +3821,34 @@ kbd {
 
 .nearby-help[open] summary::after {
   content: " ▾";
+}
+
+/* Thumbs: nothing you tap is smaller than 44 px, whatever its own rule says. */
+@media (pointer: coarse) {
+  .icon-btn,
+  .view-toggle .icon-btn,
+  .list.is-grid .row-actions .icon-btn,
+  .sheet-close,
+  .device-fav,
+  .device-more {
+    width: 44px;
+    height: 44px;
+  }
+
+  .chip,
+  .segmented [role="tab"],
+  .menu-item,
+  .link-button,
+  summary,
+  select,
+  .select-wrap select,
+  .search input {
+    min-height: 44px;
+  }
+
+  .link-button,
+  summary {
+    display: inline-flex;
+    align-items: center;
+  }
 }

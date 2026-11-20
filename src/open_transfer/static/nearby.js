@@ -2186,6 +2186,8 @@ function setupInvites() {
 
 export function initNearby(context) {
   ctx = { ...ctx, ...context };
+  // Toasts sit just above the send bar, which grows when its buttons wrap.
+  new ResizeObserver(([bar]) => document.body.style.setProperty("--send-bar-h", `${bar.target.offsetHeight}px`)).observe($("#send-bar"));
   setupConnectSheet();
   setupRename();
   setupTextDialog();

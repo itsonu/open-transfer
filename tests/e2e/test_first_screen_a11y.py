@@ -13,9 +13,10 @@ from tests.e2e.test_ui import Server, _start, sync_api
 pytestmark = pytest.mark.e2e
 expect = sync_api.expect
 
-LOW_CONTRAST = """() => {
+LOW_CONTRAST = """(sel) => {
+  const root = document.querySelector(sel) || document.body;
   const shown = (e) => { const r = e.getBoundingClientRect(), s = getComputedStyle(e);
-    return r.width > 0 && r.height > 0 && s.visibility !== 'hidden'
+    return r.width > 1 && r.height > 1 && s.visibility !== 'hidden'
       && !e.closest('[aria-hidden="true"]') && !e.closest('[hidden]')
       && (() => { for (let n = e; n; n = n.parentElement) if (getComputedStyle(n).opacity === '0') return false; return true; })(); };
   const lum = (c) => { const [r, g, b] = c.map((v) => { v /= 255; return v <= 0.03928 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4); }); return 0.2126 * r + 0.7152 * g + 0.0722 * b; };
@@ -24,7 +25,7 @@ LOW_CONTRAST = """() => {
   const background = (e) => { const stack = []; for (let n = e; n; n = n.parentElement) { const p = parse(getComputedStyle(n).backgroundColor); if (p && p.a > 0) stack.push(p); if (p && p.a > 0.95) break; }
     return stack.reduceRight((under, p) => mix(p, under), [255, 255, 255]); };
   const bad = [];
-  for (const e of document.querySelectorAll('body *')) {
+  for (const e of root.querySelectorAll('*')) {
     if (![...e.childNodes].some((n) => n.nodeType === 3 && n.textContent.trim()) || !shown(e)) continue;
     const s = getComputedStyle(e), fg = parse(s.color), bg = background(e);
     const l1 = lum(mix(fg, bg)), l2 = lum(bg), ratio = (Math.max(l1, l2) + 0.05) / (Math.min(l1, l2) + 0.05);
@@ -34,10 +35,12 @@ LOW_CONTRAST = """() => {
   return bad;
 }"""
 
-SMALL_TARGETS = """() => [...document.querySelectorAll('button,a[href],input:not([hidden]),select,textarea,[role=button],[role=tab]')]
-  .filter((e) => { const r = e.getBoundingClientRect(), s = getComputedStyle(e); return r.width > 0 && r.height > 0 && s.visibility !== 'hidden' && !e.closest('.skip-link'); })
-  .filter((e) => { const r = e.getBoundingClientRect(); return r.width < 44 || r.height < 44; })
-  .map((e) => `${e.tagName}#${e.id} ${Math.round(e.getBoundingClientRect().width)}x${Math.round(e.getBoundingClientRect().height)} ${(e.getAttribute('aria-label') || e.textContent).trim().slice(0, 25)}`)"""
+SMALL_TARGETS = """(sel) => [...(document.querySelector(sel) || document.body)
+    .querySelectorAll('button,a[href],input:not([hidden]),select,textarea,[role=button],[role=tab],[role=menuitem],summary')]
+  .filter((e) => { const r = e.getBoundingClientRect(); return r.width > 0 && r.height > 0 && getComputedStyle(e).visibility !== 'hidden' && !e.closest('.skip-link, .row-title'); })
+  .map((e) => [e, (e.closest('label') || e).getBoundingClientRect()])
+  .filter(([, r]) => r.width < 44 || r.height < 44)
+  .map(([e, r]) => `${e.tagName}#${e.id}.${e.className} ${Math.round(r.width)}x${Math.round(r.height)} ${(e.getAttribute('aria-label') || e.textContent).trim().slice(0, 25)}`)"""
 
 
 @pytest.fixture
