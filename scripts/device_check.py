@@ -298,6 +298,13 @@ class Node:
     def state(self) -> dict[str, Any]:
         return expect(self.base, "GET", "/api/state")  # type: ignore[no-any-return]
 
+    def show_code(self) -> str:
+        """Open Add device (codes only work while it's open) and read the code."""
+        status, data = request(self.base, "POST", "/api/pair/open")
+        if status == 404:  # an app from before the pairing window
+            return str(self.state()["pairing"]["code"])
+        return str(data["code"])
+
     @property
     def address(self) -> str:
         return f"{self.lan_host}:{self.lan_port}"
@@ -1041,7 +1048,7 @@ class Checker:
             self.report.add("6.4", "Too big → refused up front", False, str(exc))
 
     def pair(self, enters: Node, shows: Node, *, address: bool) -> tuple[bool, str]:
-        code = shows.state()["pairing"]["code"]
+        code = shows.show_code()
         body: dict[str, Any] = {"code": code}
         if address:
             body["address"] = shows.address
@@ -1065,8 +1072,7 @@ class Checker:
     def pairing(self) -> None:
         step("2. Pairing (code, both directions; the request a QR scan makes)")
         pc = self.computer
-        state = pc.state()
-        code = state["pairing"]["code"]
+        code = pc.show_code()
         status, svg = request(pc.base, "GET", "/api/pair/qr.svg")
         self.report.add(
             "2.1",
@@ -1116,7 +1122,7 @@ class Checker:
 
     def rate_limit(self) -> None:
         pc, a = self.computer, self.androids[0]
-        code = pc.state()["pairing"]["code"]
+        code = pc.show_code()
         wrong = f"{(int(code) + 7) % 1_000_000:06d}"
         statuses = [
             request(

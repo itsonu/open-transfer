@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>CFBundleIdentifier</key><string>io.github.itsonu.opentransfer.m0</string>
+  <key>CFBundleName</key><string>otble</string>
+  <key>NSBluetoothAlwaysUsageDescription</key><string>Open Transfer M0 spike: Bluetooth LE test with your other devices.</string>
+</dict>
+</plist>

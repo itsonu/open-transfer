@@ -25,6 +25,22 @@ class SharePolicyTest {
     }
 
     @Test
+    fun aBigShareIsReadARangeAtATime() {
+        val mb = 1024L * 1024
+        assertEquals(0L..0L, SharePolicy.range("bytes=0-0", 3_000 * mb))
+        assertEquals(2 * mb..4 * mb - 1, SharePolicy.range("bytes=${2 * mb}-${4 * mb - 1}", 3_000 * mb))
+        assertEquals(10L..99L, SharePolicy.range("bytes=10-", 100)) // open-ended
+        assertEquals(90L..99L, SharePolicy.range("bytes=90-500", 100)) // past the end: up to it
+        // Anything else is the whole file, as before.
+        assertNull(SharePolicy.range(null, 100))
+        assertNull(SharePolicy.range("bytes=100-", 100)) // starts past the end
+        assertNull(SharePolicy.range("bytes=5-2", 100))
+        assertNull(SharePolicy.range("bytes=0-1,5-9", 100)) // several ranges
+        assertNull(SharePolicy.range("bytes=-500", 100)) // the last 500
+        assertNull(SharePolicy.range("bytes=0-0", -1)) // size unknown
+    }
+
+    @Test
     fun theUrlThePageFetches() {
         assertEquals("/__shared/abc_D-9/0", SharePolicy.path("abc_D-9", 0))
         assertEquals("abc_D-9" to 3, SharePolicy.parse("/__shared/abc_D-9/3"))
@@ -74,5 +90,41 @@ class SharePolicyTest {
         assertEquals("application/octet-stream", SharePolicy.mime(null, "image/*"))
         assertEquals("application/octet-stream", SharePolicy.mime(null, "*/*"))
         assertEquals("application/octet-stream", SharePolicy.mime("", null))
+    }
+
+    @Test
+    fun sharedTextIsKeptWithItsTitle() {
+        // A browser shares a page: the title as the subject, the address as the text.
+        assertEquals(
+            "Open Transfer docs\nhttps://example.com/docs",
+            SharePolicy.sharedText("Open Transfer docs", listOf("https://example.com/docs")),
+        )
+        assertEquals("Meet at 5", SharePolicy.sharedText(null, listOf("Meet at 5")))
+        // A subject that's already in the text isn't repeated.
+        assertEquals("Hi there", SharePolicy.sharedText("Hi", listOf("Hi there")))
+        // ClipData and EXTRA_TEXT often carry the same text: once.
+        assertEquals("a\n\nb", SharePolicy.sharedText(null, listOf("a", " b ", "a", "")))
+        assertEquals("Only a subject", SharePolicy.sharedText("Only a subject", emptyList()))
+        // File managers put the file's name in the subject: that's not text to send.
+        assertNull(SharePolicy.sharedText("IMG_2041.jpg", emptyList(), hasFiles = true))
+        assertEquals("Look", SharePolicy.sharedText("Album", listOf("Look"), hasFiles = true)?.lines()?.last())
+        assertNull(SharePolicy.sharedText("  ", listOf("", " ")))
+        assertNull(SharePolicy.sharedText(null, emptyList()))
+    }
+
+    @Test
+    fun sharedTextHasALimit() {
+        val long = "x".repeat(SharePolicy.MAX_TEXT + 10)
+        assertEquals(SharePolicy.MAX_TEXT, SharePolicy.sharedText(null, listOf(long))?.length)
+    }
+
+    @Test
+    fun sendToMyDevicesOpensTheAppWhenItCantSendItself() {
+        // Clipboard sync off or nobody to send to: choose a device in the app instead.
+        assertTrue(SharePolicy.opensAppInstead("off"))
+        assertTrue(SharePolicy.opensAppInstead("no_devices"))
+        assertTrue(SharePolicy.opensAppInstead("paused"))
+        assertFalse(SharePolicy.opensAppInstead("sensitive"))  // asks first instead
+        assertFalse(SharePolicy.opensAppInstead(""))
     }
 }

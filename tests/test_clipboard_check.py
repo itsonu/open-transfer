@@ -9,6 +9,7 @@ import importlib.util
 import sys
 from pathlib import Path
 from types import ModuleType
+from typing import Any
 
 import pytest
 
@@ -64,7 +65,7 @@ def test_against_two_computers(make_node: NodeFactory, tmp_path: Path) -> None:
     here.start_clipboard(here_clip).interval = 0.02
     there.start_clipboard(there_clip).interval = 0.02
     owner(there)("PUT", "/api/sync/policy", {"enabled": True})
-    code = owner(there).state()["pairing"]["code"]
+    code = owner(there)("POST", "/api/pair/open")[1]["code"]
     owner(here)("POST", "/api/pair", {"code": code, "address": f"127.0.0.1:{there.port}"})
     wait_for(lambda: there.mesh.id in here.mesh._online_ids())
 
@@ -92,7 +93,7 @@ def test_asking_for_help_with_another_computer(
     here.start_clipboard(here_clip).interval = 0.02
     there.start_clipboard(there_clip).interval = 0.02
     owner(there)("PUT", "/api/sync/policy", {"enabled": True})
-    code = owner(there).state()["pairing"]["code"]
+    code = owner(there)("POST", "/api/pair/open")[1]["code"]
     owner(here)("POST", "/api/pair", {"code": code, "address": f"127.0.0.1:{there.port}"})
     wait_for(lambda: there.mesh.id in here.mesh._online_ids())
 
@@ -177,10 +178,19 @@ def three_devices(make_node: NodeFactory):  # type: ignore[no-untyped-def]
         node.start_clipboard(clips[node]).interval = 0.02
         owner(node)("PUT", "/api/sync/policy", {"enabled": True})
     for a, b in ((mac, pc), (mac, phone), (pc, phone)):
-        code = owner(b).state()["pairing"]["code"]
+        code = owner(b)("POST", "/api/pair/open")[1]["code"]
         owner(a)("POST", "/api/pair", {"code": code, "address": f"127.0.0.1:{b.port}"})
     for a, b in ((mac, pc), (mac, phone), (pc, phone), (phone, pc)):
         wait_for(lambda a=a, b=b: b.mesh.id in a.mesh._online_ids())
+
+    def same_key(a: Any, b: Any) -> bool:
+        # The network introduces PC and phone while they also pair by code: until both
+        # sides hold the same key, a clip between them is refused (CI py3.10, once).
+        ka, kb = a.mesh.trust.get(b.mesh.id), b.mesh.trust.get(a.mesh.id)
+        return bool(ka and kb and ka.key == kb.key)
+
+    for a, b in ((mac, pc), (mac, phone), (pc, phone)):
+        wait_for(lambda a=a, b=b: same_key(a, b))
     return mac, pc, phone, clips
 
 

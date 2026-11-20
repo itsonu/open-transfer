@@ -77,6 +77,7 @@ class History:
                 needle
                 and needle not in str(e.get("title", "")).lower()
                 and not any(needle in str(d.get("name", "")).lower() for d in devices)
+                and not any(needle in str(n).lower() for n in e.get("names") or [])
             ):
                 continue
             out.append(dict(e))

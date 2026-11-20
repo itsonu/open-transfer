@@ -34,6 +34,12 @@ from open_transfer.chunks import ChunkSessions
 CHUNK_SIZE = 1024 * 1024
 STATE_DIR = ".open-transfer"
 DELETE_ATTEMPTS = 20  # x 0.1 s: how long a delete waits for a file that is still open
+# Not every system's table knows these (a Windows or Linux machine without VLC or
+# a full /etc/mime.types calls an .mkv a mystery), and a video that isn't known as one
+# can't be previewed or shared to watch.
+for _mime, _ext in (("video/x-matroska", ".mkv"), ("video/x-m4v", ".m4v"), ("video/webm", ".webm")):
+    mimetypes.add_type(_mime, _ext)
+
 MAX_NAME_BYTES = 240  # leave headroom below the common 255-byte limit for " (12)"
 
 _WINDOWS_RESERVED = {

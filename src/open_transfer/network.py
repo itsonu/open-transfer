@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import base64
 import ipaddress
 import socket
+import struct
 import subprocess
 import sys
 import threading
@@ -12,13 +14,21 @@ from collections.abc import Callable
 from contextlib import closing
 from typing import Any
 
+#: Never on a LAN: 192.0.0.4 is Android's 464XLAT (mobile data), 192.0.0.2 DS-Lite.
+_PROTOCOL_ASSIGNMENTS = ipaddress.ip_network("192.0.0.0/24")
+
 
 def _is_usable(ip: str) -> bool:
     try:
         addr = ipaddress.ip_address(ip)
     except ValueError:
         return False
-    return addr.version == 4 and not (addr.is_loopback or addr.is_link_local or addr.is_unspecified)
+    return addr.version == 4 and not (
+        addr.is_loopback
+        or addr.is_link_local
+        or addr.is_unspecified
+        or addr in _PROTOCOL_ASSIGNMENTS
+    )
 
 
 def primary_ip() -> str | None:
@@ -87,16 +97,69 @@ def _host_ips(wait: float = 1.0) -> list[str]:
         return list(_host_ips_cache or [])
 
 
+# Interfaces nobody nearby can reach: mobile data, VPNs, containers, Apple's peer links.
+_NOT_LAN = (
+    "lo", "rmnet", "ccmni", "pdp_ip", "v4-", "clat", "tun", "utun", "ppp", "ipsec", "wg",
+    "tailscale", "zt", "docker", "veth", "br-", "virbr", "vmnet", "vboxnet", "awdl", "llw",
+    "dummy",
+)  # fmt: skip
+
+
+def interface_ips() -> list[tuple[str, str]]:
+    """(name, IPv4 address) of each interface; empty where there's no list (Windows,
+    whose host name resolves to every adapter instead)."""
+    if sys.platform == "win32" or not hasattr(socket, "if_nameindex"):
+        return []
+    import fcntl
+
+    request = 0xC0206921 if sys.platform == "darwin" else 0x8915  # SIOCGIFADDR
+    found = []
+    with closing(socket.socket(socket.AF_INET, socket.SOCK_DGRAM)) as sock:
+        try:
+            names = [name for _, name in socket.if_nameindex()]
+        except OSError:
+            return []
+        for name in names:
+            try:
+                ifreq = fcntl.ioctl(sock.fileno(), request, struct.pack("256s", name.encode()[:15]))
+            except OSError:  # no IPv4 address
+                continue
+            found.append((name, socket.inet_ntoa(ifreq[20:24])))
+    return found
+
+
 def lan_ips() -> list[str]:
-    """All usable IPv4 addresses of this machine, primary first."""
+    """All usable IPv4 addresses of this machine, primary first.
+
+    Interfaces count too: a device that *is* the hotspot (192.168.43.1 on an
+    Android phone, bridge100 on a Mac sharing its connection) has that address
+    on neither the route out nor its host name. Mobile data, VPN and container
+    interfaces are left out, even as the route out: nobody nearby reaches them.
+    """
+    ifaces = interface_ips()
+    unreachable = {ip for name, ip in ifaces if name.startswith(_NOT_LAN)}
     found: list[str] = []
-    primary = primary_ip()
-    if primary:
-        found.append(primary)
-    for ip in _host_ips():
-        if ip not in found:
+    for ip in [primary_ip(), *(ip for _, ip in ifaces), *_host_ips()]:
+        if ip and _is_usable(ip) and ip not in unreachable and ip not in found:
             found.append(ip)
     return found
+
+
+def neighbours(ips: list[str]) -> list[str]:
+    """Every other address of the private /24 around each of ``ips``.
+
+    For networks that drop multicast (many hotspots): hotspots and home Wi-Fi
+    are /24s. Never outside private ranges.
+    """
+    found: dict[str, None] = {}
+    for ip in ips:
+        addr = ipaddress.ip_address(ip)
+        if addr.is_private and not addr.is_loopback:
+            for host in ipaddress.ip_network(f"{ip}/24", strict=False).hosts():
+                found.setdefault(str(host))
+    for ip in ips:
+        found.pop(ip, None)
+    return list(found)
 
 
 def hostname() -> str:
@@ -105,16 +168,19 @@ def hostname() -> str:
 
 
 def port_is_free(host: str, port: int) -> bool:
-    with closing(socket.socket(socket.AF_INET, socket.SOCK_STREAM)) as sock:
-        # Match the server socket (cheroot sets SO_REUSEADDR) so a port that only
-        # has TIME_WAIT leftovers from a restart counts as free. Not on Windows,
-        # where SO_REUSEADDR would let us "share" a port that is really in use.
-        if sys.platform != "win32":
-            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        try:
-            sock.bind((host, port))
-        except OSError:
-            return False
+    # macOS lets one address bind next to a listener on every address (0.0.0.0),
+    # and then the two share the port, so check that too.
+    for addr in dict.fromkeys((host, "0.0.0.0")):
+        with closing(socket.socket(socket.AF_INET, socket.SOCK_STREAM)) as sock:
+            # Match the server socket (cheroot sets SO_REUSEADDR) so a port that only
+            # has TIME_WAIT leftovers from a restart counts as free. Not on Windows,
+            # where SO_REUSEADDR would let us "share" a port that is really in use.
+            if sys.platform != "win32":
+                sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            try:
+                sock.bind((addr, port))
+            except OSError:
+                return False
     return True
 
 
@@ -131,6 +197,95 @@ def find_free_port(host: str, preferred: int, attempts: int = 20) -> int:
         if port_is_free(host, port):
             return port
     raise OSError(f"No free port found between {preferred} and {preferred + attempts - 1}")
+
+
+DISCOVERY_PORT = 47823  # discovery.PORT; nearby devices' announcements
+
+
+def can_allow_firewall() -> bool:
+    """Only the packaged Windows app: a rule for python.exe would let in far more than us."""
+    return sys.platform == "win32" and bool(getattr(sys, "frozen", False))
+
+
+def _blocks(program: str) -> str:
+    """Enabled inbound Block rules for exactly ``program`` (already quoted), nothing else."""
+    return (
+        f"Get-NetFirewallApplicationFilter -Program '{program}' | Get-NetFirewallRule | "
+        "Where-Object { $_.Direction -eq 'Inbound' -and $_.Action -eq 'Block' "
+        "-and $_.Enabled -eq 'True' }"
+    )
+
+
+def block_rules(
+    exe: str, run: Callable[..., Any] = subprocess.run, platform: str = sys.platform
+) -> list[str]:
+    """Names of Windows Firewall rules that block ``exe`` from being reached (Windows'
+    own first-run prompt, cancelled, leaves these; Block beats Allow). Empty on failure."""
+    if platform != "win32":
+        return []
+    try:
+        done = run(
+            ["powershell", "-NoProfile", "-NonInteractive", "-Command",
+             f"{_blocks(exe.replace(chr(39), chr(39) * 2))} | ForEach-Object DisplayName"],
+            capture_output=True,
+            text=True,
+            timeout=15,
+            check=False,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )  # fmt: skip
+    except (OSError, subprocess.SubprocessError):
+        return []
+    return [line.strip() for line in str(done.stdout or "").splitlines() if line.strip()][:8]
+
+
+def allow_command(exe: str, port: int, profile: str, unblock: bool = False) -> list[str]:
+    """PowerShell that asks Windows (one UAC prompt) to let other devices reach ``exe``
+    on ``profile`` ("Private" or "Public") networks: its TCP port and discovery only.
+    With ``unblock``, first removes the Block rules for ``exe`` (see ``block_rules``)."""
+    program = exe.replace("'", "''")
+    rules = "; ".join(
+        f"New-NetFirewallRule -DisplayName 'Open Transfer ({profile}, {proto})' -Direction Inbound "
+        f"-Program '{program}' -Profile {profile} -Protocol {proto} -LocalPort {int(local)} -Action Allow"
+        for proto, local in (("TCP", port), ("UDP", DISCOVERY_PORT))
+    )
+    # Stop at the first refusal, and pass the elevated copy's result back: Start-Process
+    # alone succeeds whatever happens inside, which would report a rule Windows refused.
+    if unblock:
+        rules = f"{_blocks(program)} | Remove-NetFirewallRule; {rules}"
+    script = f"$ErrorActionPreference = 'Stop'; {rules}"
+    encoded = base64.b64encode(script.encode("utf-16-le")).decode()
+    return [
+        "powershell",
+        "-NoProfile",
+        "-NonInteractive",
+        "-Command",
+        "$p = Start-Process powershell -Verb RunAs -WindowStyle Hidden -Wait -PassThru "
+        f"-ArgumentList '-NoProfile','-EncodedCommand','{encoded}'; exit $p.ExitCode",
+    ]
+
+
+def allow_firewall(
+    exe: str,
+    port: int,
+    profile: str,
+    run: Callable[..., Any] = subprocess.run,
+    unblock: bool = False,
+) -> str:
+    """``allowed``, ``cancelled`` (the person said no to the prompt) or ``failed``."""
+    try:
+        done = run(
+            allow_command(exe, port, profile, unblock),
+            capture_output=True,
+            text=True,
+            timeout=180,
+            check=False,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+    except (OSError, subprocess.SubprocessError):
+        return "failed"
+    if done.returncode == 0:
+        return "allowed"
+    return "cancelled" if "cancel" in str(done.stderr or "").lower() else "failed"
 
 
 PUBLIC_NETWORKS = (

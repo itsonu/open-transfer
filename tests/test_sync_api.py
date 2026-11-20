@@ -28,7 +28,7 @@ class Clip:
 
 
 def pair(a: Node, b: Node) -> None:
-    code = owner(b).state()["pairing"]["code"]
+    code = owner(b)("POST", "/api/pair/open")[1]["code"]
     status, data = owner(a)("POST", "/api/pair", {"code": code, "address": f"127.0.0.1:{b.port}"})
     assert status == 200, data
 
@@ -114,6 +114,20 @@ def test_revoking_a_device_reaches_the_whole_network(trio: tuple[Node, Node, Nod
     assert clip.writes == []
 
 
+def test_an_introduction_crossing_a_pairing_by_code_leaves_one_key(
+    trio: tuple[Node, Node, Node],
+) -> None:
+    # The Pixel (showing the code) keeps its key a round trip before Windows does. An
+    # introduction dated in between won on one side only: they never agreed (CI py3.10).
+    mac, win, pixel = trio
+    pair(win, pixel)
+    at = pixel.mesh.trust.get(win.mesh.id).paired_at + 1e-5
+    for dst, other in ((pixel, win), (win, pixel)):
+        intro = mac.mesh.sync._introduction(dst.mesh.id, other.mesh.id, key=b"k" * 32, at=at)
+        dst.mesh.sync.handle(mac.mesh.id, "sync", intro.body)
+    assert win.mesh.trust.get(pixel.mesh.id).key == pixel.mesh.trust.get(win.mesh.id).key
+
+
 def test_unsigned_or_forged_sync_requests_are_refused(trio: tuple[Node, Node, Node]) -> None:
     mac, win, _pixel = trio
     stranger = Client(win.local_url)
@@ -151,7 +165,9 @@ def test_paired_apps_sync_through_a_pin(make_node: NodeFactory) -> None:
     sync_on(a)
     b.mesh.sync.set_policy(enabled=True)
     status, data = owner(a)(
-        "POST", "/api/pair", {"code": b.mesh.pair_code, "address": f"127.0.0.1:{b.port}"}
+        "POST",
+        "/api/pair",
+        {"code": b.mesh.open_pairing()["code"], "address": f"127.0.0.1:{b.port}"},
     )
     assert status == 200, data
     clip = Clip(b)
@@ -171,3 +187,13 @@ def test_queued_clips_arrive_when_a_device_comes_back(make_node: NodeFactory) ->
     assert a.mesh.sync.copy("wait for me")["queued"] == [b.mesh.id]
     a.mesh.connect(f"127.0.0.1:{b.port}")  # back: delivered without another copy
     wait_for(lambda: clip.writes == ["wait for me"])
+
+
+def test_a_refused_request_is_answered_not_reset(make_node: NodeFactory) -> None:
+    # A client that closes after each request (urllib does) must still read the 403:
+    # closing with its body unread makes the OS reset the connection, and Windows
+    # then drops the answer (T1, a flaky ConnectionResetError on Windows CI).
+    a = make_node("Alpha", owner_loopback=False)
+    visitor = Client(a.local_url)
+    for _ in range(5):
+        assert visitor("PUT", "/api/sync/policy", {"pad": "x" * 900_000})[0] == 403

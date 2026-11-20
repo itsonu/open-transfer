@@ -15,6 +15,7 @@ from tests.test_mesh import (
     connect,
     device_id,
     incoming,
+    lan_ip,
     owner,
     send,
     send_in_chunks,
@@ -124,9 +125,14 @@ def sha(data: bytes) -> str:
 
 
 @pytest.mark.parametrize("chunked", [False, True])
-def test_each_file_is_checked_end_to_end(make_node: NodeFactory, chunked: bool) -> None:
-    a, b = make_node("Alpha"), make_node("Bravo")
-    connect(a, b)
+@pytest.mark.parametrize("pin", ["", "4821"])  # a PIN is for people, not for the sending app
+def test_each_file_is_checked_end_to_end(make_node: NodeFactory, chunked: bool, pin: str) -> None:
+    a, b = make_node("Alpha"), make_node("Bravo", pin=pin)
+    if pin:  # over the LAN, as between two devices (127.0.0.1 counts as Bravo's owner)
+        address = f"{lan_ip()}:{b.port}"
+        assert owner(a)("POST", "/api/devices", {"address": address})[0] == 200
+    else:
+        connect(a, b)
     alice, bob = owner(a), owner(b)
     payload = (b"0123456789abcdef" * 400_000) if chunked else b"hello, intact world"
     job, session = offer_and_accept(alice, bob, [("data.bin", payload)])

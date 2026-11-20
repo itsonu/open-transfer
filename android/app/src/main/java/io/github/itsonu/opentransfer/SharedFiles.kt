@@ -4,6 +4,7 @@ import android.content.ContentResolver
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
+import android.provider.MediaStore
 import android.provider.OpenableColumns
 import android.util.Log
 import android.webkit.MimeTypeMap
@@ -14,7 +15,9 @@ import org.json.JSONArray
 import org.json.JSONObject
 import java.io.ByteArrayInputStream
 import java.io.File
+import java.io.FilterInputStream
 import java.io.IOException
+import java.io.InputStream
 import java.security.SecureRandom
 import java.util.Locale
 
@@ -42,6 +45,7 @@ object SharedFiles {
 
     private val lock = Any()
     private var pending: List<Item> = emptyList()
+    private var pendingText: String? = null
 
     /** Shares the page took, by token, newest last (it may still be fetching them). */
     private val served = LinkedHashMap<String, List<Item>>()
@@ -58,9 +62,13 @@ object SharedFiles {
             .filter { SharePolicy.accepts(it.scheme, it.authority, own) }
             .take(MAX_ITEMS)
             .mapIndexed { index, uri -> describe(resolver, uri, type, index) }
-        offer(items)
-        return items.size
+        val text = text(intent, hasFiles = items.isNotEmpty())
+        offer(items, text)
+        return items.size + (if (text != null) 1 else 0)
     }
+
+    /** Text "Send to my devices" couldn't send itself: the page stages it to choose a device. */
+    fun offerText(text: String) = offer(emptyList(), SharePolicy.sharedText(null, listOf(text)))
 
     /**
      * A file shared as `text/plain` (a .txt from a file manager) lands in
@@ -80,7 +88,7 @@ object SharedFiles {
                 val item = describe(resolver, uri, intent.type, index)
                 val copy = File(dir, SharePolicy.newToken())
                 try {
-                    val stream = resolver.openInputStream(uri) ?: return@mapIndexedNotNull null
+                    val stream = open(resolver, uri) ?: return@mapIndexedNotNull null
                     var total = 0L
                     stream.use { input ->
                         copy.outputStream().use { output ->
@@ -105,25 +113,49 @@ object SharedFiles {
         return items.size
     }
 
-    private fun offer(items: List<Item>) {
-        if (items.isEmpty()) return
-        synchronized(lock) { pending = pending + items }
-        Log.i(LOG_TAG, "Shared ${items.size} file(s)") // never names: they're private
+    private fun offer(items: List<Item>, text: String? = null) {
+        if (items.isEmpty() && text == null) return
+        synchronized(lock) {
+            pending = pending + items
+            if (text != null) pendingText = listOfNotNull(pendingText, text).joinToString("\n\n")
+        }
+        Log.i(LOG_TAG, "Shared ${items.size} file(s)${if (text != null) " and text" else ""}") // never names
+    }
+
+    /**
+     * A copied image ([uri] from the clipboard), served like a share so the page fetches it
+     * from `/__shared/…`: JSON `{url, mime, size}`, or "" if it isn't another app's content.
+     */
+    fun copiedImage(context: Context, uri: Uri, mime: String): String {
+        if (!SharePolicy.accepts(uri.scheme, uri.authority, context.packageName)) return ""
+        val item = describe(context.contentResolver, uri, mime, 0)
+        val token = SharePolicy.newToken()
+        synchronized(lock) {
+            served[token] = listOf(item)
+            while (served.size > KEEP_TOKENS) served.remove(served.keys.first())
+        }
+        return JSONObject()
+            .put("url", SharePolicy.path(token, 0))
+            .put("mime", item.mime)
+            .put("size", item.size)
+            .toString()
     }
 
     /** For the page (bridge): what was shared since it last asked, as JSON; "" if nothing. */
     fun take(): String {
         val token = SharePolicy.newToken()
-        val items = synchronized(lock) {
+        val (items, text) = synchronized(lock) {
             val taken = pending
+            val words = pendingText
             pending = emptyList()
+            pendingText = null
             if (taken.isNotEmpty()) {
                 served[token] = taken
                 while (served.size > KEEP_TOKENS) served.remove(served.keys.first())
             }
-            taken
+            taken to words
         }
-        if (items.isEmpty()) return ""
+        if (items.isEmpty() && text == null) return ""
         val files = JSONArray()
         items.forEachIndexed { index, item ->
             files.put(
@@ -134,7 +166,7 @@ object SharedFiles {
                     .put("size", item.size),
             )
         }
-        return JSONObject().put("files", files).toString()
+        return JSONObject().put("files", files).apply { if (text != null) put("text", text) }.toString()
     }
 
     /**
@@ -149,12 +181,46 @@ object SharedFiles {
         val (token, index) = SharePolicy.parse(path) ?: return missing()
         val item = synchronized(lock) { served[token]?.getOrNull(index) } ?: return missing()
         val stream = try {
-            resolver.openInputStream(item.uri)
+            open(resolver, item.uri)
         } catch (e: Exception) {
             Log.w(LOG_TAG, "Couldn't open a shared file", e)
             null
         } ?: return missing()
-        return WebResourceResponse(item.mime, null, 200, "OK", mapOf("Cache-Control" to "no-store"), stream)
+        // A big file is read a range at a time as it's sent (the page asks for 1-2 MiB).
+        // WebView itself skips to the range's start (seen on Android 16), but reads on to
+        // the end of the file: stop the stream at the range's end.
+        val header = request?.requestHeaders?.entries?.firstOrNull { it.key.equals("Range", true) }?.value
+        val range = SharePolicy.range(header, item.size)
+        val headers = mutableMapOf("Cache-Control" to "no-store")
+        if (range == null) return WebResourceResponse(item.mime, null, 200, "OK", headers, stream)
+        headers["Content-Range"] = "bytes ${range.first}-${range.last}/${item.size}"
+        return WebResourceResponse(item.mime, null, 206, "Partial Content", headers, Limited(stream, range.last - range.first + 1))
+    }
+
+    /**
+     * The file as it was taken: a photo or video from the media store comes with its
+     * location blanked unless it's asked for whole (which needs ACCESS_MEDIA_LOCATION).
+     * Without that permission it's sent as Android hands it over.
+     */
+    private fun open(resolver: ContentResolver, uri: Uri): InputStream? {
+        if (uri.authority == MediaStore.AUTHORITY) {
+            try {
+                return resolver.openInputStream(MediaStore.setRequireOriginal(uri))
+            } catch (e: Exception) {
+                // Not allowed: as it comes.
+            }
+        }
+        return resolver.openInputStream(uri)
+    }
+
+    /** At most [left] bytes of [input] (skips, done by WebView, don't count). */
+    private class Limited(input: InputStream, private var left: Long) : FilterInputStream(input) {
+        override fun read(): Int = if (left <= 0) -1 else super.read().also { if (it >= 0) left-- }
+
+        override fun read(b: ByteArray, off: Int, len: Int): Int {
+            if (left <= 0) return -1
+            return super.read(b, off, minOf(len.toLong(), left).toInt()).also { if (it > 0) left -= it }
+        }
     }
 
     private fun missing() =
@@ -174,6 +240,16 @@ object SharedFiles {
             if (clip != null) for (i in 0 until clip.itemCount) clip.getItemAt(i).uri?.let { found += it }
         }
         return found.distinct()
+    }
+
+    /** EXTRA_TEXT (one or a list), ClipData text and EXTRA_SUBJECT: never dropped silently. */
+    private fun text(intent: Intent, hasFiles: Boolean): String? {
+        val texts = mutableListOf<String?>()
+        // A list or a single value, depending on the app: a mismatch just reads as null.
+        intent.getCharSequenceExtra(Intent.EXTRA_TEXT)?.let { texts += it.toString() }
+        intent.getCharSequenceArrayListExtra(Intent.EXTRA_TEXT)?.forEach { texts += it?.toString() }
+        intent.clipData?.let { clip -> for (i in 0 until clip.itemCount) texts += clip.getItemAt(i).text?.toString() }
+        return SharePolicy.sharedText(intent.getStringExtra(Intent.EXTRA_SUBJECT), texts, hasFiles)
     }
 
     private fun describe(resolver: ContentResolver, uri: Uri, given: String?, index: Int): Item {
@@ -208,6 +284,7 @@ object SharedFiles {
 /** The pure rules behind [SharedFiles] (no Android APIs, so they are unit tested). */
 object SharePolicy {
     const val PREFIX = "/__shared/"
+    const val MAX_TEXT = 1_000_000
     private const val MAX_NAME = 200
     private val PATH = Regex("^/__shared/([A-Za-z0-9_-]{1,64})/(\\d{1,6})$")
     private val random = SecureRandom()
@@ -222,6 +299,18 @@ object SharePolicy {
     }
 
     fun path(token: String, index: Int): String = "$PREFIX$token/$index"
+
+    /**
+     * `Range: bytes=a-b` (or `a-`) of a file of [size] bytes, for the response's
+     * Content-Range; null to send the whole file (no header, unknown size, anything else).
+     */
+    fun range(header: String?, size: Long): LongRange? {
+        val match = Regex("^bytes=(\\d{1,15})-(\\d{0,15})$").matchEntire(header?.trim() ?: return null) ?: return null
+        val start = match.groupValues[1].toLong()
+        val end = match.groupValues[2].toLongOrNull() ?: (size - 1)
+        if (size <= 0 || start >= size || end < start) return null
+        return start..minOf(end, size - 1)
+    }
 
     fun parse(path: String?): Pair<String, Int>? {
         val match = PATH.matchEntire(path ?: return null) ?: return null
@@ -244,6 +333,24 @@ object SharePolicy {
         }
         return name.take(MAX_NAME)
     }
+
+    /**
+     * What a share says in words: each text once (EXTRA_TEXT and ClipData often repeat
+     * it), after the subject (a page's title) unless the text already has it. A subject
+     * alone counts only when no file came with it: file managers put the name there.
+     */
+    fun sharedText(subject: String?, texts: List<String?>, hasFiles: Boolean = false): String? {
+        val parts = texts.mapNotNull { it?.trim()?.takeIf(String::isNotEmpty) }.distinct()
+        val title = subject?.trim()?.takeIf { s ->
+            s.isNotEmpty() && parts.none { s in it } && (parts.isNotEmpty() || !hasFiles)
+        }
+        val body = parts.joinToString("\n\n")
+        val all = listOfNotNull(title, body.takeIf(String::isNotEmpty)).joinToString("\n")
+        return all.takeIf(String::isNotEmpty)?.take(MAX_TEXT)
+    }
+
+    /** "Send to my devices" couldn't send: clipboard sync off, paused, or nobody to send to. */
+    fun opensAppInstead(reason: String): Boolean = reason in setOf("off", "paused", "no_devices")
 
     /** Is this a file shared as text (only a stream, no text)? Then it isn't a clip. */
     fun isFileShare(action: String?, hasStream: Boolean, hasText: Boolean): Boolean =

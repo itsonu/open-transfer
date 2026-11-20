@@ -29,6 +29,13 @@ const clip = {
  */
 export async function readClipboard({ quiet = false } = {}) {
   try {
+    // The Android app serves a copied image like a share (on /__shared/…).
+    const copied = window.OpenTransferAndroid?.readClipboardImage?.();
+    const image = copied && JSON.parse(copied);
+    if (image?.mime in IMAGE_EXT) {
+      const blob = await (await fetch(image.url)).blob();
+      return { file: new File([blob], `Clipboard image ${stamp()}.${IMAGE_EXT[image.mime]}`, { type: image.mime }) };
+    }
     if (navigator.clipboard?.read) {
       for (const item of await navigator.clipboard.read()) {
         const type = item.types.find((t) => t in IMAGE_EXT);
@@ -42,7 +49,9 @@ export async function readClipboard({ quiet = false } = {}) {
     /* no image access: try text */
   }
   try {
-    const text = await navigator.clipboard.readText();
+    // Android's WebView never grants clipboard access; the app reads it for us.
+    const native = window.OpenTransferAndroid;
+    const text = native?.readClipboard ? native.readClipboard() : await navigator.clipboard.readText();
     if (text.trim()) return { text };
     if (!quiet) toast("The clipboard is empty.", { icon: "copy" });
   } catch {

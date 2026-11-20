@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import http.client
+import os
 import random
+from collections import defaultdict
 from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any
@@ -15,6 +18,18 @@ from open_transfer.node import Node
 
 AppFactory = Callable[..., Flask]
 
+# Never the real Keychain / DPAPI / keyring from tests (servers started by session
+# fixtures too); tests/test_keystore.py tests those on purpose.
+os.environ.setdefault("OPEN_TRANSFER_KEYSTORE", "file")
+
+
+@pytest.fixture(autouse=True)
+def _no_sweeping_real_networks(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A paired test app that is away would make another sweep the machine's real /24."""
+    from open_transfer import network
+
+    monkeypatch.setattr(network, "neighbours", lambda ips: [])
+
 
 @pytest.fixture
 def make_app(tmp_path: Path) -> AppFactory:
@@ -24,6 +39,7 @@ def make_app(tmp_path: Path) -> AppFactory:
         # The classic suite tests the shared-folder mode as seen by a visitor;
         # tests/test_mesh*.py cover the owner and nearby devices.
         overrides.setdefault("share_folder", True)
+        overrides.setdefault("allow_delete", True)  # opt-in since 2026-10-31; tested here
         overrides.setdefault("owner_loopback", False)
         overrides.setdefault("discovery", False)
         app = create_app(Config(**overrides))  # type: ignore[arg-type]
@@ -85,3 +101,31 @@ def make_node(tmp_path: Path) -> Iterator[NodeFactory]:
     yield factory
     for node in nodes:
         node.stop()
+
+
+# A wiretap on ``http.client``: every byte an app sends to another app's port,
+# what anyone on the Wi-Fi would see.
+class Tap:
+    def __init__(self) -> None:
+        self.sent: dict[int, bytearray] = defaultdict(bytearray)
+        self.flip_at: dict[int, int] = {}  # port → byte offset (in big bodies) to corrupt
+
+    def to(self, node: Node) -> bytes:
+        return bytes(self.sent[node.port])
+
+
+@pytest.fixture
+def tap(monkeypatch: pytest.MonkeyPatch) -> Tap:
+    tap = Tap()
+    real = http.client.HTTPConnection.send
+
+    def send(conn: http.client.HTTPConnection, data: Any) -> None:
+        if isinstance(data, (bytes, bytearray)):
+            if conn.port in tap.flip_at and len(data) > 60_000:  # a body block, not headers
+                at = min(tap.flip_at.pop(conn.port), len(data) - 1)
+                data = bytes(data[:at]) + bytes([data[at] ^ 1]) + bytes(data[at + 1 :])
+            tap.sent[conn.port] += data
+        real(conn, data)
+
+    monkeypatch.setattr(http.client.HTTPConnection, "send", send)
+    return tap

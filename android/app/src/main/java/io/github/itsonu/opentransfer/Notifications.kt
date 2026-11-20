@@ -103,6 +103,8 @@ object Notifications {
                 context.resources.getQuantityString(R.plurals.offer_text, count, count, size),
             )
             .setContentIntent(openApp(context))
+            .addAction(0, context.getString(R.string.action_decline), decision(context, offer, id, false))
+            .addAction(0, context.getString(R.string.action_accept), decision(context, offer, id, true))
             .setAutoCancel(true)
             .setTimeoutAfter(OFFER_TIMEOUT_MS)
             .setCategory(NotificationCompat.CATEGORY_MESSAGE)
@@ -110,6 +112,19 @@ object Notifications {
             .build()
         NotificationManagerCompat.from(context).notify(id, notification)
         shownOffers.add(id)
+    }
+
+    private fun decision(context: Context, offer: JSONObject, id: Int, accept: Boolean): PendingIntent {
+        val intent = Intent(context, OfferActionReceiver::class.java)
+            .setAction(if (accept) OfferActionReceiver.ACTION_ACCEPT else OfferActionReceiver.ACTION_DECLINE)
+            .putExtra(OfferActionReceiver.EXTRA_OFFER, offer.optString("id"))
+            .putExtra(OfferActionReceiver.EXTRA_NOTIFICATION, id)
+        return PendingIntent.getBroadcast(
+            context,
+            id * 2 + (if (accept) 1 else 0), // one per offer and button
+            intent,
+            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
+        )
     }
 
     /** The app is on screen now: the web UI shows the offers itself. */

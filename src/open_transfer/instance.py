@@ -226,7 +226,10 @@ class FocusRequests:
         return self
 
     def stop(self) -> None:
+        """No request is answered after this returns (it waits out a poll under way)."""
         self._stop.set()
+        if self._thread.is_alive() and self._thread is not threading.current_thread():
+            self._thread.join()
 
     def poll(self) -> bool:
         """Handle a pending request, if any. True if one was handled."""

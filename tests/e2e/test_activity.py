@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pytest
 
+from tests.e2e.test_clipboard import pair_of_apps  # noqa: F401 - fixture
 from tests.e2e.test_devices_ui import tile
 from tests.e2e.test_ui import Server, sync_api
 
@@ -100,6 +101,34 @@ def test_new_sends_wait_their_turn(
     assert not (bravo.root / "file-3.txt").exists()
 
 
+def test_the_connection_dot_shows_only_when_slow(devices: list[Server], page) -> None:  # type: ignore[no-untyped-def]
+    """A normal connection gets no dot; only a slow one earns a warning colour."""
+    page.goto(devices[0].url)
+    signal = tile(page, "Bravo").locator(".device-signal")
+    expect(signal).to_have_attribute("aria-label", re.compile(r"^Connection: "), timeout=20_000)
+    expect(signal).to_be_hidden()  # 127.0.0.1: a few ms
+
+    def bravo_at(rtt: int):  # type: ignore[no-untyped-def]
+        def handle(route, _request) -> None:  # type: ignore[no-untyped-def]
+            fresh = {k: v for k, v in route.request.headers.items() if k != "if-none-match"}
+            res = route.fetch(headers=fresh)  # a full answer, never a 304
+            data = res.json()
+            for d in data.get("devices", []):
+                if d.get("name") == "Bravo":
+                    d["rtt"] = rtt
+            route.fulfill(response=res, json=data, headers={**res.headers, "etag": f"rtt-{rtt}"})
+
+        return handle
+
+    page.route("**/api/state*", bravo_at(90))  # a phone on Wi-Fi: normal
+    expect(signal).to_have_attribute("aria-label", "Connection: fair (90 ms)")
+    expect(signal).to_be_hidden()
+    page.unroute("**/api/state*")
+    page.route("**/api/state*", bravo_at(400))  # really slow
+    expect(signal).to_have_attribute("aria-label", "Connection: slow (400 ms)")
+    expect(signal).to_be_visible()
+
+
 def test_devices_and_transfers_show_their_connection(
     devices: list[Server], page, second_page, tmp_path: Path
 ) -> None:  # type: ignore[no-untyped-def]
@@ -115,4 +144,122 @@ def test_devices_and_transfers_show_their_connection(
     send_file(page, "Bravo", path)
     target = page.locator(".job", has_text="path.txt").locator(".job-target")
     expect(target).to_have_attribute("data-path", "app")
-    expect(target.locator(".job-target-path")).to_have_text("Direct")
+    # Unpaired: a one-off key hides it from the Wi-Fi, but nobody vouched for Bravo.
+    path_label = target.locator(".job-target-path")
+    expect(path_label).to_have_text("Direct · encrypted, not verified")
+    expect(path_label).to_have_attribute("title", re.compile("Pair"))
+
+
+def test_a_send_between_paired_apps_says_it_is_encrypted(
+    pair_of_apps: tuple[Server, Server],  # noqa: F811 - the fixture imported above
+    page,
+    tmp_path: Path,
+) -> None:  # type: ignore[no-untyped-def]
+    alpha, bravo = pair_of_apps
+    page.goto(alpha.url)
+    expect(tile(page, "Bravo")).to_be_visible(timeout=10_000)
+    path = tmp_path / "sealed.txt"
+    path.write_text("between paired apps")
+    send_file(page, "Bravo", path)
+    target = page.locator(".job", has_text="sealed.txt").locator(".job-target")
+    expect(target.locator(".job-target-path")).to_have_text("Direct · encrypted")
+    expect(target).to_have_attribute("data-state", "done", timeout=15_000)
+    assert (bravo.root / "sealed.txt").read_text() == "between paired apps"
+
+
+def test_the_badge_says_what_happened_not_only_which_way(tmp_path: Path, page) -> None:  # type: ignore[no-untyped-def]
+    import json
+    import time
+
+    from tests.e2e.test_ui import _start
+
+    state = tmp_path / "Tab" / ".open-transfer"
+    state.mkdir(parents=True)
+    now = time.time()
+    entries = [
+        ("got.txt", "received", "done"),
+        ("never.txt", "received", "expired"),
+        ("broke.bin", "received", "failed"),
+        ("sent.txt", "sent", "done"),
+        ("refused.txt", "sent", "declined"),
+    ]
+    (state / "history.jsonl").write_text(
+        "".join(
+            json.dumps({"id": f"h-{i}", "at": now - i, "kind": "transfer", "direction": d,
+                        "title": t, "files": 1, "size": 10, "status": s,
+                        "devices": [{"id": "d-x", "name": "Studio Mac", "status": s}]}) + "\n"
+            for i, (t, d, s) in enumerate(entries)
+        )
+    )  # fmt: skip
+    gen = _start(tmp_path, name="Tab", owner=True)
+    server = next(gen)
+    try:
+        page.goto(server.url)
+        badge = lambda title: page.locator(".history-row", has_text=title).locator(".history-dir")  # noqa: E731
+        expect(badge("got.txt")).to_have_text("Received")
+        expect(badge("sent.txt")).to_have_text("Sent")
+        expect(badge("never.txt")).to_have_text("Not received")  # not a green "Received"
+        expect(badge("broke.bin")).to_have_text("Failed")
+        expect(badge("broke.bin")).to_have_attribute("data-dir", "failed")
+        expect(badge("refused.txt")).to_have_text("Declined")
+    finally:
+        for _ in gen:
+            pass
+
+
+def test_activity_says_who_didnt_get_it_and_why(tmp_path: Path, page) -> None:  # type: ignore[no-untyped-def]
+    import json
+    import time
+
+    from tests.e2e.test_ui import _start
+
+    state = tmp_path / "Mac" / ".open-transfer"
+    state.mkdir(parents=True)
+    now = time.time()
+    group = {"id": "h-1", "at": now, "kind": "transfer", "direction": "sent", "title": "2 files",
+             "files": 2, "size": 10, "status": "partial", "names": ["Sunset.png", "Boarding pass.pdf"],
+             "devices": [
+                 {"id": "d-b", "name": "Pixel", "status": "done"},
+                 {"id": "d-c", "name": "Galaxy Tab", "status": "declined", "reason": "Declined"},
+                 {"id": "d-d", "name": "PC", "status": "failed",
+                  "reason": "Nothing was sent: the window sending it closed. Choose the files again to send them."},
+             ]}  # fmt: skip
+    whole = {"id": "h-2", "at": now - 5, "kind": "transfer", "direction": "sent", "title": "ok.txt",
+             "files": 1, "size": 10, "status": "done",
+             "devices": [{"id": "d-b", "name": "Pixel", "status": "done"}]}  # fmt: skip
+    late = {"id": "h-3", "at": now - 9, "kind": "transfer", "direction": "received", "title": "late.txt",
+            "files": 1, "size": 10, "status": "expired", "devices": [
+                {"id": "d-m", "name": "Studio Mac", "status": "expired",
+                 "reason": "Studio Mac didn’t start sending."}]}  # fmt: skip
+    lost = {**late, "id": "h-4", "direction": "sent", "title": "lost.txt", "status": "failed",
+            "devices": [{"id": "d-p", "name": "Office PC", "status": "failed",
+                         "reason": "Couldn’t reach Office PC."}]}  # fmt: skip
+    (state / "history.jsonl").write_text(
+        "".join(json.dumps(e) + "\n" for e in (late, lost, whole, group))
+    )
+    gen = _start(tmp_path, name="Mac", owner=True)
+    server = next(gen)
+    try:
+        page.goto(server.url)
+        row = page.locator(".history-row", has_text="2 files")
+        expect(row.locator(".history-dir")).to_have_text("Partly sent")
+        expect(row.locator(".history-names")).to_have_text("Sunset.png, Boarding pass.pdf")
+        page.fill("#history-search", "boarding")  # a file inside it finds it
+        expect(page.locator(".history-row")).to_have_count(1)
+        page.fill("#history-search", "")
+        why = row.locator(".history-why")
+        expect(why).to_contain_text("Galaxy Tab: Declined")
+        expect(why).to_contain_text(
+            "PC: Nothing was sent: the window sending it closed. Choose the files again"
+        )
+        expect(why).not_to_contain_text("Pixel")  # it got them
+        mine = page.locator(".history-row", has_text="late.txt").locator(".history-why")
+        expect(mine).to_have_text("Studio Mac didn’t start sending.")  # its name once
+        lost = page.locator(".history-row", has_text="lost.txt").locator(".history-why")
+        expect(lost).to_have_text("Couldn’t reach Office PC.")
+        expect(
+            page.locator(".history-row", has_text="ok.txt").locator(".history-why")
+        ).to_have_count(0)
+    finally:
+        for _ in gen:
+            pass

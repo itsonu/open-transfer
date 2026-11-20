@@ -44,6 +44,11 @@ dependencies = [
   "flask>=3.0,<4",
   "cheroot>=10.0",
   "segno>=1.6",
+  # AES-GCM and HKDF for file transfers between paired apps (docs/encryption.md).
+  # 42 is the newest Chaquopy builds for Android. 48 is the last with an Intel
+  # Mac wheel; built from source there, it clashes with Python's own OpenSSL.
+  "cryptography>=42; sys_platform != 'darwin' or platform_machine != 'x86_64'",
+  "cryptography>=42,<49; sys_platform == 'darwin' and platform_machine == 'x86_64'",
 ]
 
 [project.optional-dependencies]

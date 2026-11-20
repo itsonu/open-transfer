@@ -208,3 +208,27 @@ def test_each_target_says_which_way_it_goes(make_node: NodeFactory, to_browser: 
     job = send(alice, [target], [("x.txt", b"x")])
     view = next(j for j in alice.state()["outgoing"] if j["id"] == job)
     assert view["targets"][0]["path"] == ("via" if to_browser else "app")
+
+
+def test_a_file_inside_a_multi_file_transfer_can_be_found(tmp_path: Path) -> None:
+    h = History(tmp_path)
+    h.add({"kind": "transfer", "direction": "received", "title": "3 files",
+           "names": ["Sunset.png", "Boarding pass.pdf", "Trip notes.txt"], "status": "done"})  # fmt: skip
+    h.add({"kind": "transfer", "direction": "sent", "title": "other.txt", "status": "done"})
+    assert [e["title"] for e in h.query(q="boarding")] == ["3 files"]
+
+
+def test_both_ends_keep_the_names_of_a_multi_file_transfer(make_node: NodeFactory) -> None:
+    from tests.test_mesh import connect, incoming, owner, send, target_states, upload, wait_for
+
+    a, b = make_node("Alpha"), make_node("Bravo")
+    connect(a, b)
+    files = [("Sunset.png", b"s"), ("Boarding pass.pdf", b"b")]
+    job = send(owner(a), [b.mesh.id], files)
+    owner(b)("POST", f"/api/incoming/{incoming(owner(b))['id']}/accept")
+    wait_for(lambda: target_states(owner(a), job) == {"Bravo": "accepted"})
+    for i, (_, data) in enumerate(files):
+        upload(owner(a), job, i, data)
+    for node in (a, b):
+        entry = wait_for(lambda node=node: next(iter(node.mesh.history.query(q="boarding")), None))
+        assert entry["names"] == ["Sunset.png", "Boarding pass.pdf"]

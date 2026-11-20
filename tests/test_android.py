@@ -67,7 +67,7 @@ def test_sending_from_the_tile_or_share_sheet(phone: Listener, make_node: NodeFa
 
     mac = make_node("Mac")
     owner(mac)("PUT", "/api/sync/policy", {"enabled": True})
-    code = owner(mac).state()["pairing"]["code"]
+    code = owner(mac)("POST", "/api/pair/open")[1]["code"]
     android._node.mesh.pair_with(code, f"127.0.0.1:{mac.port}")
     got: list[str] = []
     mac.mesh.sync.set_writer(lambda text, info: got.append(text) or True)
@@ -87,3 +87,40 @@ def test_nothing_happens_when_stopped() -> None:
     assert android._node is None
     assert json.loads(android.sync_copy("x"))["reason"] == "stopped"
     assert json.loads(android.sync_state())["active"] is False
+
+
+def offer_from_the_mac(phone: Listener, make_node: NodeFactory) -> tuple[Any, str, str]:
+    """The Mac offers a file to the phone; returns (the Mac's client, job, offer id)."""
+    from tests.test_mesh import connect, send, wait_for
+
+    assert android._node is not None
+    mac = make_node("Mac", encrypted_only=False)
+    connect(mac, android._node)
+    alice = owner(mac)
+    job = send(alice, [android._node.mesh.id], [("note.txt", b"hi")])
+    offer = wait_for(lambda: next((d for n, d in phone.events if n == "offer"), None))
+    return alice, job, offer["id"]
+
+
+@pytest.mark.parametrize(("accept", "state"), [(True, "accepted"), (False, "declined")])
+def test_the_notification_accepts_or_declines(
+    phone: Listener, make_node: NodeFactory, accept: bool, state: str
+) -> None:
+    from tests.test_mesh import target_states, wait_for
+
+    alice, job, offer_id = offer_from_the_mac(phone, make_node)
+    assert json.loads(android.decide(offer_id, accept)) == {"state": state}
+    wait_for(lambda: target_states(alice, job) == {"Pixel": state})
+
+
+def test_a_second_answer_or_an_unknown_offer_says_why(
+    phone: Listener, make_node: NodeFactory
+) -> None:
+    _, _, offer_id = offer_from_the_mac(phone, make_node)
+    android.decide(offer_id, True)
+    assert json.loads(android.decide(offer_id, False))["error"] == "already_decided"
+    assert "error" in json.loads(android.decide("nope", True))
+
+
+def test_deciding_when_stopped() -> None:
+    assert json.loads(android.decide("x", True))["error"] == "stopped"

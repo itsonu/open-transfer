@@ -7,6 +7,7 @@ import contextlib
 import logging
 import os
 import secrets
+import signal
 import sys
 import threading
 import webbrowser
@@ -87,6 +88,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="visitors can download but not upload",
     )
     parser.add_argument(
+        "--allow-delete",
+        action="store_true",
+        default=None,
+        help="shared-folder mode: visitors can delete files (off by default)",
+    )
+    parser.add_argument(
         "--no-delete", action="store_true", default=None, help="visitors cannot delete files"
     )
     parser.add_argument(
@@ -140,6 +147,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="only accept files from paired devices",
     )
     nearby.add_argument(
+        "--encrypted-only",
+        action="store_true",
+        default=None,
+        help="refuse transfers to and from apps that can't encrypt (older versions)",
+    )
+    nearby.add_argument(
         "--clipboard",
         action="store_true",
         default=None,
@@ -155,6 +168,20 @@ def build_parser() -> argparse.ArgumentParser:
         "--no-browser", action="store_true", default=None, help="don't open a browser"
     )
     parser.add_argument("--no-qr", action="store_true", default=None, help="don't print a QR code")
+    parser.add_argument(
+        "--https",
+        action="store_true",
+        default=None,
+        help="also serve browsers over HTTPS (self-signed: they warn once), on the next port",
+    )
+    parser.add_argument(
+        "--keys", action="store_true", help="say where pairing keys are kept, then exit"
+    )
+    parser.add_argument(
+        "--rotate-keys",
+        action="store_true",
+        help="reseal pairing keys with a new vault key, then exit (Open Transfer must be stopped)",
+    )
     parser.add_argument("-v", "--verbose", action="store_true", help="log every request")
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     return parser
@@ -198,11 +225,13 @@ def config_from_args(args: argparse.Namespace) -> Config:
         pin=str(pin) if pin else None,
         max_upload_size=parse_size(str(_pick(args.max_size, "MAX_SIZE", "0"))),
         allow_upload=not read_only,
-        allow_delete=not (read_only or bool(args.no_delete) or env_bool("NO_DELETE")),
+        allow_delete=(bool(args.allow_delete) or env_bool("ALLOW_DELETE"))
+        and not (read_only or bool(args.no_delete) or env_bool("NO_DELETE")),
         allow_browse=not (bool(args.receive_only) or env_bool("RECEIVE_ONLY")),
         public_url=_pick(args.public_url, "PUBLIC_URL"),  # type: ignore[arg-type]
         allowed_hosts=tuple(allowed),
         trust_proxy=bool(args.behind_proxy) or env_bool("BEHIND_PROXY"),
+        https=bool(args.https) or env_bool("HTTPS"),
         device_name=_pick(args.name, "NAME"),  # type: ignore[arg-type]
         device_form=str(_pick(args.form, "FORM", "computer")),
         state_dir=Path(str(env("STATE_DIR"))) if env("STATE_DIR") else None,
@@ -211,6 +240,7 @@ def config_from_args(args: argparse.Namespace) -> Config:
         peers=tuple(args.peer or [p for p in (env("PEERS") or "").split(",") if p]),
         auto_accept=bool(args.auto_accept) or env_bool("AUTO_ACCEPT"),
         paired_only=bool(args.paired_only) or env_bool("PAIRED_ONLY"),
+        encrypted_only=True if args.encrypted_only or env_bool("ENCRYPTED_ONLY") else None,
         share_folder=bool(args.share_folder) or env_bool("SHARE_FOLDER"),
         owner_loopback=env_bool("OWNER_LOOPBACK", True),
         clipboard=bool(args.clipboard) or env_bool("CLIPBOARD"),
@@ -243,7 +273,7 @@ def _print_banner(
         out.write(f"  {style.dim('PIN')}                {style.bold(config.pin)}\n")
     out.write(f"  {style.dim('Saving files to')}    {config.storage_dir}\n")
     if show_qr and (ips or config.public_url):
-        qr_url = share + (f"/?pin={config.pin}" if config.pin else "")
+        qr_url = share  # never the PIN: people type it (it's printed just above)
         try:
             import segno
 
@@ -266,6 +296,21 @@ def _configure_logging(verbose: bool, style: _Style) -> None:
     root.handlers[:] = [handler]
     root.setLevel(logging.DEBUG if verbose else logging.INFO)
     root.propagate = False
+
+
+def _show_keys(state: Path) -> int:
+    from open_transfer import keystore
+    from open_transfer.devices import TrustStore
+
+    trust = TrustStore(state)
+    vault = trust.vault
+    print(f"Pairing keys are kept in {keystore.LABELS.get(vault.store, vault.store)}.")
+    if not vault.protected:
+        print("They're in an owner-only file, not protected by the operating system.")
+    print(f"Paired devices: {len(trust.all())}")
+    if trust.locked_names():
+        print(f"Locked (pair again): {', '.join(trust.locked_names())}")
+    return 0
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -293,6 +338,9 @@ def _run(argv: Sequence[str] | None) -> int:
     from open_transfer.instance import InstanceLock
     from open_transfer.node import Node
 
+    if args.keys and not args.rotate_keys:
+        return _show_keys(config.state_path)
+
     # Two copies on one state folder would announce the same device id.
     lock = InstanceLock(config.state_path)
     if not lock.acquire():
@@ -303,6 +351,13 @@ def _run(argv: Sequence[str] | None) -> int:
             file=sys.stderr,
         )
         return 1
+    if args.rotate_keys:
+        from open_transfer import keystore
+
+        keystore.rotate(config.state_path)
+        lock.release()
+        print("New vault key: pairing keys and browser sign-ins resealed with it.")
+        return _show_keys(config.state_path)
     try:
         node = Node(config)
     except OSError as exc:
@@ -316,21 +371,23 @@ def _run(argv: Sequence[str] | None) -> int:
     if port != config.port and config.port:
         print(style.yellow(f"\n  Port {config.port} is busy, using {port} instead."))
     node.start_mesh()
-
-    _print_banner(
-        config,
-        port,
-        style,
-        show_qr=not (args.no_qr or env_bool("NO_QR")),
-        name=node.mesh.identity.name,
-        discovery=bool(node.mesh.discovery and node.mesh.discovery.working),
-    )
-    if not (args.no_browser or env_bool("NO_BROWSER")):
-        threading.Timer(0.4, webbrowser.open, args=(f"http://localhost:{port}",)).start()
-
-    lock.write_info(port)
+    signal.signal(signal.SIGTERM, signal.default_int_handler)  # kill, docker stop: as Ctrl+C
     with contextlib.suppress(KeyboardInterrupt):  # Ctrl+C is the normal way to stop
-        node.serve_forever()
+        try:
+            _print_banner(
+                config,
+                port,
+                style,
+                show_qr=not (args.no_qr or env_bool("NO_QR")),
+                name=node.mesh.identity.name,
+                discovery=bool(node.mesh.discovery and node.mesh.discovery.working),
+            )
+            if not (args.no_browser or env_bool("NO_BROWSER")):
+                threading.Timer(0.4, webbrowser.open, args=(f"http://localhost:{port}",)).start()
+            lock.write_info(port)
+            node.serve_forever()
+        finally:
+            node.stop()  # also when stopped before it began serving
     lock.release()
     print("\n  " + style.dim("Stopped sharing. Your files are still in ") + str(config.storage_dir))
     return 0

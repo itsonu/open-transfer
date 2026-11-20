@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import io
 import json
+import sys
 import time
 from collections.abc import Callable
 from typing import Any
@@ -27,6 +28,7 @@ from flask import (
 )
 from werkzeug.exceptions import ClientDisconnected
 
+from open_transfer import filecrypt, network
 from open_transfer.archive import zip_stream
 from open_transfer.clipboard import MAX_IMAGE_BYTES as CLIP_MAX_IMAGE
 from open_transfer.devices import clean_form, clean_name, clean_platform, valid_id
@@ -46,10 +48,12 @@ PUBLIC_P2P_ENDPOINTS = {
     "p2p_offer_status",
     "p2p_offer_upload",
     "p2p_offer_file_status",
+    "p2p_offer_verify",
     "p2p_offer_cancel",
-    "p2p_pair",
-    "p2p_pair_confirm",
+    "p2p_pair_begin",
+    "p2p_pair_prove",
     "p2p_signal",
+    "p2p_unpaired",
     # These check the sender's signature themselves (a PIN is for people, not paired apps).
     "p2p_clip",
     "p2p_sync",
@@ -90,6 +94,7 @@ def register(
     client: Callable[[], str],
     file_csp: str,
     share_url: Callable[[], str],
+    join_token: Callable[[], str],
 ) -> None:
     config = mesh.config
 
@@ -141,8 +146,12 @@ def register(
     @app.post(f"{P2P}/hello")
     def p2p_hello() -> Response:
         info = body_json()
-        reply = mesh.handle_hello(info, client())
-        if config.pin and not signed_by(str(info.get("id", ""))):
+        sender = str(info.get("id", ""))
+        signed = request.headers.get("X-OT-From") == sender and signed_by(
+            sender
+        )  # once: no replays
+        reply = mesh.handle_hello(info, client(), signed=signed)
+        if config.pin and not signed:
             reply.pop("visitors", None)
         return jsonify(reply)
 
@@ -155,18 +164,40 @@ def register(
             raise MeshError(400, "bad_request", "Missing sender.")
         sender_id = str(sender.get("id", ""))
         verified = request.headers.get("X-OT-From") == sender_id and signed_by(sender_id)
+        if request.headers.get("X-OT-Auth") and mesh.trust.get(sender_id) is None:
+            # It still thinks we're paired; we unpaired it (or never were): say so.
+            raise MeshError(
+                403,
+                "peer_unpaired",
+                f"{mesh.identity.name} isn’t paired with this device any more. "
+                "Pair again to send to it.",
+            )
         mesh.handle_hello(sender, client())
         if mesh.pending_from(client()) >= MAX_PENDING_PER_CLIENT:
             raise MeshError(429, "busy", "Too many unanswered transfers. Try again shortly.")
         target = str(data.get("to", ""))
+        files = data.get("files")
+        # ot-file/2: a handshake, authenticated by the pairing if the paired app signed this.
+        job = str(data.get("job") or "")
+        salt, meta, base, answer = mesh.open_offer(
+            sender_id, target, job, data.get("enc"), signed=verified
+        )
+        if meta is not None:  # names and who's sending were sealed
+            origin, files = meta.get("origin"), meta.get("files")
+            if not isinstance(origin, dict):
+                raise MeshError(400, "bad_request", "Missing sender.")
         session = mesh.create_offer(
             origin=_clean_origin(origin, sender),
             target=target,
-            files=data.get("files"),  # type: ignore[arg-type]
+            files=files,  # type: ignore[arg-type]
             paired=verified and origin.get("id") == sender_id,
             source=client(),
-            job=str(data.get("job") or ""),
+            job=job,
             sender_node=sender_id,
+            enc_salt=salt,
+            enc_base=base,
+            enc_auth=bool(salt) and verified,
+            retry=data.get("retry") is True,
         )
         return jsonify(
             {
@@ -174,6 +205,7 @@ def register(
                 "secret": session.secret,
                 "state": session.state,
                 "reason": session.reason,
+                **({"enc": filecrypt.VERSION, **answer} if session.enc_salt else {}),
             }
         ), 201
 
@@ -197,8 +229,6 @@ def register(
                 data = request.get_data(cache=False)
             except (ClientDisconnected, ConnectionError) as exc:
                 raise IncompleteUpload("The transfer was interrupted before it finished.") from exc
-            if len(data) != end - start + 1:
-                raise MeshError(400, "bad_range", "Chunk size doesn’t match Content-Range.")
             try:
                 result = mesh.receive_chunk(
                     session_id,
@@ -207,6 +237,7 @@ def register(
                     data,
                     total,
                     secret=request.headers.get("X-OT-Secret", ""),
+                    length=end - start + 1,
                 )
             except (MeshError, StorageError):
                 _drain_body()
@@ -229,7 +260,8 @@ def register(
 
     @app.post(f"{P2P}/offers/<session_id>/files/<int:index>/verify")
     def p2p_offer_verify(session_id: str, index: int) -> Response:
-        claimed = body_json().get("sha256")
+        body = body_json()
+        claimed = body.get("mac") or body.get("sha256")  # mac: ot-file/2 transfers
         if not isinstance(claimed, str) or len(claimed) != 64:
             raise MeshError(400, "bad_request", "Expected a SHA-256 checksum.")
         return jsonify(
@@ -280,24 +312,34 @@ def register(
     def p2p_sync_forward() -> Response:
         return sync_request("forward")
 
+    @app.post(f"{P2P}/unpaired")
+    def p2p_unpaired() -> Response:
+        sender = request.headers.get("X-OT-From")
+        if not signed_by(sender):  # only that device itself, with the key being dropped
+            raise MeshError(403, "not_signed", "Not signed by that device.")
+        mesh.unpaired_by(str(sender))
+        return jsonify({"ok": True})
+
     @app.post(f"{P2P}/signal")
     def p2p_signal() -> Response:
         mesh.handle_signal(body_json())
         return jsonify({"ok": True})
 
-    @app.post(f"{P2P}/pair")
-    def p2p_pair() -> Response:
+    @app.post(f"{P2P}/pair/begin")
+    def p2p_pair_begin() -> Response:
         data = body_json()
         device = data.get("device")
         if not isinstance(device, dict):
             raise MeshError(400, "bad_request", "Missing device.")
-        return jsonify(mesh.pair_begin(device, str(data.get("nonce", "")), client()))
+        return jsonify(mesh.pair_begin(device, client()))
 
-    @app.post(f"{P2P}/pair/confirm")
-    def p2p_pair_confirm() -> Response:
+    @app.post(f"{P2P}/pair/prove")
+    def p2p_pair_prove() -> Response:
         data = body_json()
         return jsonify(
-            mesh.pair_confirm(str(data.get("id", "")), str(data.get("proof", "")), client())
+            mesh.pair_prove(
+                str(data.get("id", "")), str(data.get("a", "")), str(data.get("m1", "")), client()
+            )
         )
 
     # ================================================================ web UI
@@ -576,6 +618,12 @@ def register(
             }
         )
 
+    @app.put("/api/settings")
+    def ui_settings() -> Response:
+        owner_only()
+        settings = mesh.set_settings(encrypted_only=body_json().get("encrypted_only"))
+        return jsonify({"settings": settings})
+
     @app.put("/api/clipboard/settings")
     def ui_clipboard_settings() -> Response:
         owner_only()
@@ -850,6 +898,32 @@ def register(
         peer = mesh.pair_with(str(data.get("code", "")), address)
         return jsonify({"device": {"id": peer.id, "name": peer.name}})
 
+    @app.post("/api/pair/open")
+    def ui_pair_open() -> Response:
+        owner_only()
+        return jsonify(mesh.open_pairing())
+
+    @app.post("/api/network/allow")
+    def ui_network_allow() -> Response:
+        """Let other devices reach this PC on this kind of network (one UAC prompt)."""
+        owner_only()
+        if not network.can_allow_firewall():
+            raise MeshError(
+                501, "unsupported", "Only the Windows app can change its firewall rule."
+            )
+        profile = "Public" if mesh.public_networks else "Private"
+        unblock = bool(mesh.blocking_rules)  # shown to the owner, who chose to allow
+        result = network.allow_firewall(sys.executable, mesh.port, profile, unblock=unblock)
+        if result == "allowed":
+            mesh.check_network()
+        return jsonify({"result": result})
+
+    @app.post("/api/pair/close")
+    def ui_pair_close() -> Response:
+        owner_only()
+        mesh.close_pairing()
+        return jsonify({"ok": True})
+
     @app.post("/api/pair/new-code")
     def ui_new_code() -> Response:
         owner_only()
@@ -868,7 +942,7 @@ def register(
         owner_only()
         url = f"{share_url()}/?pair={mesh.pair_code}"
         if config.pin:
-            url += f"&pin={quote(config.pin)}"
+            url += f"&join={join_token()}"  # never the PIN itself
         buffer = io.BytesIO()
         segno.make(url, error="m").save(
             buffer, kind="svg", scale=8, border=0, dark="#000", light=None
@@ -911,4 +985,5 @@ def _clean_origin(origin: dict[str, Any], sender: dict[str, Any]) -> dict[str, A
     }
     if clean["id"] != sender.get("id"):
         clean["via_name"] = clean_name(sender.get("name"))
+        clean["secure"] = origin.get("secure") is True  # that browser's own hop, as its app says
     return clean

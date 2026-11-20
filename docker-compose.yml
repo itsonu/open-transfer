@@ -11,6 +11,7 @@ services:
     network_mode: host
     # ports:                # use these instead of network_mode on Docker Desktop
     #   - "5000:5000"
+    #   - "5001:5001"       # browsers over TLS, with OPEN_TRANSFER_HTTPS: "1"
     #   - "47823:47823/udp"
     volumes:
       - ./uploads:/data

@@ -10,7 +10,7 @@ run exactly the same server, discovery and transfer code as desktops::
 
 ``listener`` is any Java/Kotlin object with ``onEvent(name: String, json: String)``;
 it's told about ``"offer"`` (someone wants to send files — show a
-notification), ``"received"`` (a file was saved — run the media scanner) and
+notification, whose Accept / Decline call :func:`decide`), ``"received"`` (a file was saved — run the media scanner) and
 ``"clipboard"`` (a clip from another of your devices — put it on the
 clipboard; Android allows that from the background).
 
@@ -29,6 +29,7 @@ from pathlib import Path
 from typing import Any
 
 from open_transfer.config import Config
+from open_transfer.mesh import MeshError, Viewer
 from open_transfer.node import Node
 from open_transfer.sync.protocol import SyncError
 
@@ -130,6 +131,20 @@ def sync_copy(text: str, manual: bool = False, confirm: bool = False) -> str:
         for key in ("delivered", "queued", "refused")
     }
     return json.dumps(result)
+
+
+def decide(session_id: str, accept: bool) -> str:
+    """Accept or decline an offer from its notification, as the owner (JSON)."""
+    node = _node
+    if node is None:
+        return json.dumps({"error": "stopped"})
+    ident = node.mesh.identity
+    me = Viewer("owner", ident.id, ident.name, ident.form, ident.platform, True)
+    try:
+        session = node.mesh.decide(str(session_id), me, bool(accept))
+    except MeshError as exc:
+        return json.dumps({"error": exc.code, "message": str(exc)})
+    return json.dumps({"state": session.state})
 
 
 def is_running() -> bool:

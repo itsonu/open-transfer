@@ -15,6 +15,9 @@
     <string name="service_title">Open Transfer — visible to nearby devices</string>
     <string name="service_text">Received files are saved to Download/Open Transfer.</string>
     <string name="action_stop">Stop</string>
+    <string name="action_accept">Accept</string>
+    <string name="action_decline">Decline</string>
+    <string name="offer_gone">That offer was already answered or has expired.</string>
 
     <string name="offer_title">%1$s wants to send you files</string>
     <plurals name="offer_text">

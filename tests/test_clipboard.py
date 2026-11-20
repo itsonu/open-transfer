@@ -156,7 +156,7 @@ def test_settings_are_validated(tmp_path: Path) -> None:
 
 
 def pair(a_client: Client, b_client: Client, b_port: int) -> None:
-    code = b_client.state()["pairing"]["code"]
+    code = b_client("POST", "/api/pair/open")[1]["code"]
     status, data = a_client("POST", "/api/pair", {"code": code, "address": f"127.0.0.1:{b_port}"})
     assert status == 200, data
 

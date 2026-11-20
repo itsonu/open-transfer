@@ -12,7 +12,7 @@ iPhone/iPad is a bonus for the browser-only path.
 
 **Install** from the [latest release](https://github.com/itsonu/open-transfer/releases/latest)
 — or, before a release exists, from a green CI run's **Artifacts** (bottom of the
-run page, signed in to GitHub; each download is a .zip): `open-transfer-windows-x64.exe`,
+run page, signed in to GitHub; each download is a .zip): `open-transfer-windows-x64-setup.exe` (or the portable `open-transfer-windows-x64.exe`),
 `open-transfer-macos-<arch>.dmg`, `open-transfer-android.apk` on both Android
 devices. First launch: allow **Private networks** (Windows firewall), **Local
 Network** (macOS), notifications (Android).
@@ -61,6 +61,62 @@ Then do the rest by hand: everything marked 👤 in the results file, which are 
 on-screen parts below (prompts, the 🔗 badge, the QR camera, drag and drop,
 confirmation dialog, notifications, Wi‑Fi off/on, browsers, Windows ↔ Mac).
 
+## Run on real hardware by automation (2026-11-07)
+
+Real devices on one home Wi‑Fi, driven by a script (no person at the screens). It
+fills in some rows below but **is not a substitute for them**: nobody looked at a
+desktop window, a firewall prompt or the phone while it ran (the phone's screen was
+read back with `uiautomator` and screenshots).
+
+**Devices:** Mac (Python app from this branch, 3f76631; 4cc2999 for the Windows-sender runs) · Windows 11 laptop
+(`open-transfer-windows-x64-cli.exe` from CI 52fcf8e, driven over SSH; firewall
+rules for TCP 5000 / UDP 47823 added by hand) · Android phone (APK from CI 52fcf8e,
+over adb) · second phone, a Redmi 6A on Android 9 (32-bit), which can't install the app
+(it needs Android 10 and 64-bit), so it ran the **browser path**: Chrome 138 driven over adb
+and its DevTools socket.
+
+| Workflow | Result |
+|---|---|
+| Mac → phone (5 MB); phone → Windows (30 MB); Mac → Windows + phone (group, 150 MB) | ✅ byte for byte; phone memory 238–268 MB during the group send |
+| Phone declines; offer left for 2 min | ✅ both sides *Declined*; phone shows *No answer* |
+| Group with one decline, then **Retry** | ✅ the retry asks only the device that didn't get it |
+| Link/text to the phone | ✅ saved as “Gate code 4411, see.txt” |
+| **Accept** on the Android notification | ✅ transfer starts without opening the app |
+| Windows app killed mid-receive, then Retry | ✅ Mac: *Lost connection to Maya laptop.* within 1 s; retry delivers |
+| Phone app force-stopped mid-receive | ✅ Mac: *Lost connection to Nirakara.* within 0.5 s |
+| Phone app force-stopped mid-send | ✅ Mac names it at once |
+| Mac app stopped (SIGTERM) mid-send to Windows + phone | ❌ → fixed in 3f76631 (it died without telling anyone); now both: *Canceled by the sender* within 1.3 s, Mac history *Canceled* |
+| Pair by code, then send | ✅ encrypted, *verified*, in the phone's history |
+| 2 of 3 photos arrive, then Retry | ✅ only the third is sent again (*Skip* offered) |
+| 1 GB Mac → phone | ✅ 18 MB/s, phone memory 252–278 MB, progress every 3 s |
+| Phone Activity list (screenshots) | ✅ every ending above shown with its reason; received multi-file sends list their names |
+| Windows installer (`/S`) | ✅ installs silently |
+| **Phone 2's browser** opens the Mac's address (5.1 without the camera) | ✅ the page loads in about 10 s the first time; lists the Mac and phone 1; it's shown as *Android phone · Connected through Studio Mac (test)* |
+| Mac → phone 2's browser (3 MB) | ✅ prompt *Studio Mac (test) wants to send you a file*, **Accept** → *Received … Save*; still under **Sent to you** after Chrome reloaded the tab. **Save** not tapped: Chrome would ask Android for storage access |
+| Phone 2's browser → Mac (2 MB; the file given to the page as the picker would, so the Android picker itself wasn't used) | ✅ byte for byte in 4 s, *Via this device · Delivered* |
+| Phone 2's browser → a browser on the Mac (5.3) | ✅ went straight between the browsers (*in this browser — save it* on the receiver). ❌→✅ The sender's Activity didn't list it: fixed, re-run on the phone after the fix and listed |
+| **Windows as sender** (CLI): to phone, to Mac (30 MB each), to both with the phone declining | ✅ byte for byte; group recorded *Partly sent* with “Nirakara: Declined” |
+| **Windows desktop app** (installed build, opened in the logged-in session, screen captured) | ✅ window shows the device and nearby devices; sends to the phone, receives from it (paired: no prompt) and from the Mac (prompt *wants to send you a file … Expires in 1:54*, accepted); Activity lists all three. No firewall prompt (already allowed). ⚠️ On this 1080p screen at 125 % the window (1400×1000 px) opens at (192, 192), so its bottom 172 px sit behind the taskbar; everything is reachable by scrolling |
+| **Android share sheet**: a photo, then text | ✅ Open Transfer is in the sheet; the app opens with the photo ready (“Tap the devices to send to”); tap the Mac, **Send** → arrives byte for byte. Text: **Open Transfer** and **Send to my devices** both listed; via Open Transfer it arrives as “Shared text 2026-11-07 09.23.15.txt” with the text intact |
+
+**Still for a person:** answering a Windows firewall prompt on a PC that never allowed the app,
+the tablet, real Wi‑Fi off/on (6.1, 11.5), hotspots (§8), sharing from
+Photos/Files themselves (the sheet was opened with a test share), lock-screen and Doze
+behaviour, iPhone (§5), and the three Android checks below.
+
+**Android: evidence so far (as of V1 closure, 2026-11-12).** None of these three was done on
+a physical Android device. Each stays open as a post-closure check ([v1.md](v1.md#post-closure-verification)).
+
+| Check | Automated / emulator evidence | Real hardware | Status |
+|---|---|---|---|
+| **Save** a received file to Downloads | Browser: `e2e/test_ui.py` and `e2e/test_devices_ui.py` click **Download** / **Save** and compare the saved bytes, in desktop Chromium (phone-sized window), not Android Chrome. App: `MainActivity.onDownload` hands the file to Android's DownloadManager (`Download/`); the unit test `LocalPolicyTest` checks only that the app's own files are recognised, and the emulator smoke test doesn't save anything | Phone 2 received the file (*Received … Save*) but **Save** wasn't tapped: Chrome would have asked Android for storage access | Physical-device verification outstanding |
+| Android **system file picker** | Every browser test gives files to `#file-input` directly (Playwright), which skips the OS picker. The app's `onShowFileChooser` has no automated test; the emulator smoke test doesn't open it | Phone 2's file was put on `#file-input` by script (a DataTransfer), so the picker never opened | Physical-device verification outstanding |
+| **Camera QR scan** | `e2e/test_scan_ui.py` (8 tests) scans with a fake camera, with and without `BarcodeDetector`. The app's ML Kit scanner (`startQrScan`) has no automated test | Phone 2 opened the Mac's address without the camera (5.1). Elsewhere, a real camera scanned a QR twice in the audit: phone 1's camera opened the Mac's share QR in its browser, and Safari on the Mac scanned the phone's Add device QR (2026-10-27, D2 and C3). Neither used the Android app's own scanner or phone 2 | Physical-device verification outstanding |
+
+The phone build predates 3f76631, so it still says “1 file(s) failed” where the next
+build says *Lost connection to …*. A killed app has no history row of its own
+(nothing ran to write it); the other side records it.
+
 ## By hand
 
 Copy the tables into an issue and fill in ✅ / ❌ (+ a note or screenshot for ❌).
@@ -74,6 +130,7 @@ Copy the tables into an issue and fill in ✅ / ❌ (+ a note or screenshot for 
 | 1.3 | Rename a device (✎ next to its name) → others show the new name within ~10 s | | | | |
 | 1.4 | Close the app on one device → it disappears (or shows *Not nearby* if paired) on the others | | | | |
 | 1.5 | Reopen it → it comes back without restarting the others | | | | |
+| 1.6 | ⋯ on a paired device → **Remove pairing** → the other device says “… unpaired this device”; ⋯ → **Pair…** pairs again | | | | |
 
 ## 2. Pairing (QR and code)
 
@@ -111,7 +168,7 @@ sides, the file opens correctly afterwards, and it's in **Downloads/Open Transfe
 several photos and a video together, then a PDF from Files: **Open Transfer** is in
 the list each time; the app opens with them ready to send ("N files ready — choose
 who to send to"); tap a device and **Send**; they arrive intact. Sharing *text*
-shows only **Send to my devices** (not Open Transfer twice). Sharing a `.txt` file
+shows **Open Transfer** (choose who gets it) and **Send to my devices** (every device). Sharing a `.txt` file
 from Files sends the file, not the clipboard.
 
 ## 4. One-to-one, one-to-many, everyone
@@ -125,6 +182,7 @@ from Files sends the file, not the clipboard.
 | 4.5 | Drop a file **onto a device tile** (desktop) → goes only to that device | |
 | 4.6 | One receiver leaves (close app / Wi‑Fi off) mid-transfer → others still finish; that one shows *Failed* with **Retry** | |
 | 4.7 | **Send now** while one device hasn't answered → the accepted ones get it | |
+| 4.8 | Send bar → **Text** → paste a link → send: the receiver's Received list shows the address with **Open link**, which opens the browser (Android: the system browser) | |
 
 ## 5. Browsers without the app (iPhone / iPad / any browser)
 
@@ -145,7 +203,7 @@ from Files sends the file, not the clipboard.
 | 6.3 | Cancel from the sender mid-transfer → receiver shows it stopped; no half file in the folder | |
 | 6.4 | Not enough space / file too big → declined up front with a reason | |
 | 6.5 | Android: switch apps during a transfer → it keeps going (notification shown) | |
-| 6.6 | Android: incoming offer while the app is in the background → notification | |
+| 6.6 | Android: incoming offer while the app is in the background → notification; **Accept** on it starts the transfer, **Decline** tells the sender, without opening the app | |
 
 ## 7. Clipboard sync network
 
@@ -173,7 +231,91 @@ It pairs this computer with each Android device if needed, turns sync on, and ch
 | 7.9 | Android locked for an hour+ → clips still arrive (else: battery → Unrestricted; note the brand) | |
 | 7.10 | Battery after a day (Android settings → Battery) | |
 
-## If devices don't see each other
+## 8. Phone hotspots and switching networks (no internet needed)
+
+Turn **mobile data off** on the hotspot phone for at least one run, to prove
+nothing needs the internet. Pair the devices once on ordinary Wi‑Fi first;
+Use *paired* devices so transfers are encrypted (§3 should show
+**encrypted** next to *Direct*).
+
+| # | Check | Result |
+|---|-------|--------|
+| 8.1 | Android phone hotspot → **Mac** joins it: they see each other, pair (QR and code), send a file both ways | |
+| 8.2 | Android phone hotspot → **Windows PC** joins: same as 8.1 (Windows will ask Public/Private: choose Private, or allow when Open Transfer warns) | |
+| 8.3 | Android phone hotspot → **another Android phone or a Samsung Tab** joins: same as 8.1 | |
+| 8.4 | **Mac** shares its connection (Internet Sharing over Wi‑Fi) → Android phone/Tab joins: same as 8.1. The Mac's QR code shows its 192.168.2.x address | |
+| 8.5 | **Windows Mobile Hotspot** → Android phone/Tab joins: same as 8.1. The PC's QR code shows 192.168.137.1 | |
+| 8.6 | Ordinary Wi‑Fi router → every device: same as 8.1 | |
+| 8.7 | Paired Mac and phone on home Wi‑Fi → Mac switches to the phone's hotspot **without restarting either app** → within about 20 s both show each other online again; one tile each, no duplicates | |
+| 8.8 | Turn the hotspot off and on again (new DHCP lease) → both come back online by themselves | |
+| 8.9 | Two clients on one hotspot that can't reach each other: Add device → Enter its address says **"Nothing answered … client isolation"**; the device *sharing* the hotspot still reaches both | |
+
+What makes this work, and the limits:
+* A device that **is** the hotspot announces itself on the hotspot
+  interface. Before H7 it used only the route out (mobile data), so its QR
+  code and announcements pointed nowhere.
+* Where the hotspot drops multicast, an app whose network changed while a
+  paired device is away asks every address of its /24 for `/info` (about 250
+  short requests, once per network change). Entering a code with nothing
+  found does the same. Paired devices found that way must still prove it's
+  them (N2) before anything goes to the new address.
+* **Client isolation** (clients can't reach each other) is the network's
+  doing, not Open Transfer's. The device sharing the hotspot can still reach
+  everyone.
+
+## 9. Android share sheet (into and out of Open Transfer)
+
+Each row: share from the named app → pick **Open Transfer** → the items are staged → choose one device, then two devices → **Send** → the receiver gets exactly what was shared (names, contents) and the sender shows *Delivered*.
+
+| # | Check | Result |
+|---|-------|--------|
+| 9.1 | One photo from Photos/Gallery | |
+| 9.2 | Five photos and a video at once (SEND_MULTIPLE) | |
+| 9.3 | A PDF and a .docx from Files / Drive | |
+| 9.4 | A 2 GB video: staged without the app slowing down; progress shown; arrives intact | |
+| 9.5 | Plain text from Keep/Notes → arrives as *Shared text ….txt* | |
+| 9.6 | A link from Chrome → arrives as *Link ….txt* with the page title and the address | |
+| 9.7 | Photos with a caption (e.g. from a messaging app) → the photos **and** a .txt with the caption | |
+| 9.8 | Copy text → share it via the clipboard tile / *Send to my devices* with clipboard sync **off** → the app opens with the text ready to send | |
+| 9.9 | The same photo shared twice in one go → staged once | |
+| 9.10 | Share, then press Home before sending; reopen → still staged, sends fine | |
+| 9.11 | Share from an app, then cancel in Open Transfer → nothing is sent | |
+| 9.12 | A received file → ⋯ → **Share…** → the system share sheet → send it to another app (Gmail, Drive) | |
+| 9.13 | A paired receiver: the transfer shows **encrypted** (§3) | |
+| 9.14 | Copy a photo (Photos → Copy) → Open Transfer → **Send what you copied** → it arrives as an image, not as a `content://` line; with clipboard sync on, copying a photo syncs nothing | |
+
+## 10. Keys at rest, unpaired encryption and `--https`
+
+1. **Mac, after an update** of an ad-hoc signed build: macOS asks once to let
+   Open Transfer use its Keychain item → **Always Allow** → paired devices are
+   still paired (`open-transfer --keys` from source, or Add device shows them).
+   Click **Deny** instead on a second update → the status line names the
+   locked pairings (“Couldn’t unlock the pairing with …”); allow it again →
+   they're back after a restart.
+2. **Windows, after replacing the .exe:** paired devices still paired
+   (DPAPI is per user, not per build).
+3. **Android, after an in-place update** (same signing key): still paired.
+4. **Unpaired send** Mac ↔ phone: the sender shows **Direct · encrypted, not
+   verified**; hovering says to pair to be sure.
+5. **`--https`:** start the Mac with `--https`, scan its QR code with the
+   phone's browser → one certificate warning → its fingerprint (browser's
+   certificate details) matches the one under the QR code → proceed → the
+   page says **encrypted (HTTPS)**; send a photo from that page.
+
+## 11. When things go wrong (one round per platform pair)
+
+Automated in CI with real app processes; these check the real windows, apps and networks.
+
+| # | Check | Result |
+|---|-------|--------|
+| 11.1 | Start a send from the **desktop app**, close its window before the other device accepts, accept there → within ~4 min both say it didn't happen (sender: *Failed — the window sending it closed*; receiver: *… didn't start sending*), and both Activity lists show it | |
+| 11.2 | Close the desktop window **partway** through a 1 GB send → the receiver says it stopped (at once if the app quit; otherwise within 10 min); no half file in Downloads/Open Transfer | |
+| 11.3 | Quit the **receiving** app (Cmd+Q / Quit) mid-transfer → its Activity says *Canceled — Open Transfer was closed*; the sender shows the failure; reopening leaves no partial file | |
+| 11.4 | Force-stop the Android app mid-transfer (Settings → Apps → Force stop) → the sender fails it with a reason; Android's Download/Open Transfer has no partial file after reopening | |
+| 11.5 | A paired device gets 2 of 5 photos, then Wi‑Fi drops; **Retry** when it's back → only the missing 3 arrive (no “photo (1).jpg”) | |
+| 11.6 | Send 5 files to two devices; one declines → Activity shows *Partly sent*, the names, and “*device*: Declined”; searching one file's name finds it | |
+| 11.7 | Choose files, then close the browser tab before sending → the browser asks before leaving | |
+
 
 1. Same Wi‑Fi? Guest networks and many routers isolate devices.
 2. Firewall: Windows → allow *Open Transfer* on **Private** networks; macOS →

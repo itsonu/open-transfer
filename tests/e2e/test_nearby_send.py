@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import re
+import time
 from pathlib import Path
 
 import pytest
@@ -199,8 +200,8 @@ def test_quick_send_to_a_favorite_skips_the_send_bar(
 
 @pytest.mark.parametrize(
     ("width", "height", "touch"),
-    [(390, 844, True), (800, 1280, True), (1280, 800, False)],
-    ids=["phone", "tablet", "desktop"],
+    [(360, 740, True), (390, 844, True), (800, 1280, True), (1280, 800, False)],
+    ids=["small-phone", "phone", "tablet", "desktop"],
 )
 def test_device_grid_fits_phones_tablets_and_desktops(
     devices: list[Server], browser, width: int, height: int, touch: bool, tmp_path: Path
@@ -235,6 +236,12 @@ def test_device_grid_fits_phones_tablets_and_desktops(
         bar_top = pg.locator("#send-bar").bounding_box()["y"]
         last = pg.locator("main .view:not([hidden]) > section:not([hidden])").last.bounding_box()
         assert last["y"] + last["height"] <= bar_top + 1, (last, bar_top)
+        # Every send-bar button fits: the bar is fixed, so one past the edge doesn't scroll.
+        for button in pg.locator("#send-bar button:visible").all():
+            box = button.bounding_box()
+            assert box, button
+            assert box["x"] >= 0, box
+            assert box["x"] + box["width"] <= width, box
     finally:
         context.close()
 
@@ -249,3 +256,115 @@ def test_device_controls_have_names(devices: list[Server], page) -> None:  # typ
             .map((b) => b.outerHTML.slice(0, 80))"""
     )
     assert unnamed == []
+
+
+def test_progress_is_what_the_device_has_received(
+    devices: list[Server], page, second_page, tmp_path: Path
+) -> None:  # type: ignore[no-untyped-def]
+    """The app takes the bytes far faster than slow Wi-Fi delivers them (an Android
+    phone's own engine at 84 MB/s, its hotspot at 9): the headline counts delivery."""
+    _alpha, bravo, _charlie = devices
+
+    def slow_wifi(route) -> None:  # type: ignore[no-untyped-def]
+        response = route.fetch()
+        if response.status != 200:
+            route.fulfill(response=response)
+            return
+        body = response.json()
+        for job in body["outgoing"]:
+            for target in job["targets"]:
+                if target["state"] in ("sending", "done"):
+                    target.update(state="sending", sent=1000)
+        route.fulfill(response=response, json=body)
+
+    page.route("**/api/state", slow_wifi)
+    page.goto(devices[0].url)
+    second_page.goto(bravo.url)
+    sample = tmp_path / "video.mp4"
+    sample.write_bytes(b"v" * 300_000)
+    tile(page, "Bravo").locator(".device-button").click()
+    page.set_input_files("#file-input", str(sample))
+    page.click("#send-go")
+    second_page.locator("#incoming-accept").click(timeout=10_000)
+    expect(page.locator(".job .row-sub")).to_contain_text("1.0 KB of 300 KB", timeout=10_000)
+    page.unroute_all(behavior="ignoreErrors")  # polls still in flight when the page closes
+
+
+def test_a_long_hand_off_doesnt_stop_the_send(devices: list[Server], page) -> None:  # type: ignore[no-untyped-def]
+    """The piece that completes a file is answered only once this app has passed the
+    whole file on (593 MB over a phone hotspot: 66 s). That wait isn't a stall."""
+    total = 5_000_000
+    got = {"bytes": 0}
+
+    def app(route) -> None:  # type: ignore[no-untyped-def]
+        got["bytes"] += len(route.request.post_data_buffer or b"")
+        if got["bytes"] < total:
+            route.fulfill(status=308, json={"received": got["bytes"], "done": False})
+            return
+        time.sleep(1.5)  # handing the file on, three times the page's patience below
+        route.fulfill(status=201, json={"received": total, "done": True})
+
+    page.goto(devices[0].url)
+    page.route("**/relay-test/**", app)
+    data = page.evaluate(
+        """async (total) => {
+            const m = await import('/static/lib.js');
+            const file = new Blob([new Uint8Array(total)]);
+            const { data } = await m.uploadParallel('/relay-test/0', { file, uploadId: 'u1', timeout: 500 });
+            return data;
+        }""",
+        total,
+    )
+    assert data == {"received": total, "done": True}
+    assert got["bytes"] == total  # and nothing was sent twice
+
+
+def test_the_owner_sees_a_browsers_big_file_arriving(page, devices: list[Server]) -> None:  # type: ignore[no-untyped-def]
+    # A 35 GB file from a Windows browser read "Waiting for Windows PC…" on the Mac
+    # for its whole upload.
+    from tests.test_mesh import Client, lan_ip, send
+
+    alpha = devices[0]
+    me = Client(alpha.url)
+    pc = Client(f"http://{lan_ip()}:{alpha.url.rsplit(':', 1)[1]}")
+    assert (
+        pc("POST", "/api/me", {"name": "Windows PC", "form": "computer", "platform": "windows"})[0]
+        == 200
+    )
+    total = 5_000_000
+    job = send(pc, [me.state()["me"]["id"]], [("film.mkv", b"x" * total)])
+    page.goto(alpha.url)
+    offer = next(s for s in me.state()["incoming"] if s["state"] == "pending")
+    assert me("POST", f"/api/incoming/{offer['id']}/accept")[0] == 200
+    piece = b"x" * (2 * 1024 * 1024)
+    headers = {"Content-Range": f"bytes 0-{len(piece) - 1}/{total}", "X-Upload-Id": "u-pc"}
+    assert pc("PUT", f"/api/send/{job}/files/0", data=piece, headers=headers)[0] == 308
+    expect(page.locator(".job", has_text="film.mkv")).to_contain_text(
+        "of 5.0 MB from Windows PC", timeout=10_000
+    )
+
+
+def test_a_chosen_video_can_be_looked_at_before_it_is_sent(
+    devices: list[Server], page, tmp_path: Path
+) -> None:  # type: ignore[no-untyped-def]
+    page.goto(devices[0].url)
+    film = tmp_path / "Holiday in Goa.mp4"
+    film.write_bytes(b"v" * 50_000)
+    note = tmp_path / "notes.txt"
+    note.write_text("hello")
+
+    page.set_input_files("#file-input", str(note))
+    expect(page.locator("#send-bar")).to_be_visible()
+    expect(page.locator("#send-preview")).to_be_hidden()  # nothing to look at in a text file
+
+    page.set_input_files("#file-input", str(film))
+    expect(page.locator("#send-bar-thumbs .staged-video")).to_have_count(1)
+    page.get_by_role("button", name="Preview").click()
+    expect(page.locator("#preview-dialog")).to_be_visible()
+    expect(page.locator("#preview-title")).to_have_text("Holiday in Goa.mp4")
+    page.keyboard.press("Escape")
+    expect(page.locator("#preview-dialog")).to_be_hidden()
+    expect(page.locator("#send-bar")).to_be_visible()  # still ready to send
+
+    page.click("#send-clear")
+    expect(page.locator("#send-preview")).to_be_hidden()

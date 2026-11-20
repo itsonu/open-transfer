@@ -3,7 +3,7 @@
 // file list · shared-folder uploads · drag/drop/paste · PIN · boot.
 // lib.js has the helpers, nearby.js the devices, sending and pairing.
 
-import { $, addHistory, api, can, chunkLimits, copyText, formatBytes, formatDuration, guessKind, h, icon, newUploadId, plural, pushSample, relativeTime, setLockHandler, shouldChunk, sparklineSVG, stamp, state, toast, uploadParallel } from "./lib.js";
+import { $, addHistory, api, can, chunkLimits, copyText, formatBytes, forgetUpload, formatDuration, guessKind, h, icon, plural, pushSample, relativeTime, resumableId, setLockHandler, shouldChunk, sparklineSVG, stamp, state, toast, uploadParallel } from "./lib.js";
 import { initActivity } from "./activity.js";
 import { initClipboard, readClipboard } from "./clipboard.js";
 import { initSync } from "./sync.js";
@@ -51,6 +51,8 @@ Object.assign(state, {
   started: false,
   library: loadLibraryPrefs(), // { view: "list" | "grid", filter, sort }
   visible: [], // files in the list right now, in order (the preview steps through them)
+  inbox: [], // a visitor's: files sent to this browser
+  watching: [], // videos the owner shares to watch: { id, name, url, … }
 });
 
 function loadLibraryPrefs() {
@@ -112,6 +114,8 @@ function applyInfo(info) {
   const max = info.limits?.max_upload_size;
   if (max) hints.push(`Up to ${formatBytes(max)} per file.`);
   $("#drop-hint").textContent = hints.join(" ");
+  showKeepPlace();
+  renderWatch();
   $("#overlay-text").textContent = deviceMode ? "Drop to send" : `Drop to share with everyone`;
   $("#library-title").textContent = { owner: "Received", shared: "Shared files", inbox: "Sent to you" }[mode];
   $("#empty-title").textContent = mode === "shared" ? "No files yet" : "Nothing received yet";
@@ -137,6 +141,16 @@ function showLock() {
   requestAnimationFrame(() => $("#pin-input").focus());
 }
 
+/** Android blanks where a photo or video was taken unless the app may keep it. */
+function showKeepPlace(answered = false) {
+  const native = nativeApp();
+  const row = $("#keep-place-row");
+  row.hidden = !native?.mediaLocation || !isDeviceMode();
+  if (row.hidden) return;
+  $("#keep-place").checked = native.mediaLocation();
+  if (answered && !native.mediaLocation()) toast("Android keeps them only with “Allow all”", { icon: "image" });
+}
+
 function enterMain() {
   state.locked = false;
   showView("main");
@@ -148,9 +162,20 @@ function enterMain() {
     state.started = true;
     document.addEventListener("visibilitychange", () => {
       if (!document.hidden) poll(true);
+      if (!document.hidden) showKeepPlace(); // back from Android's settings
     });
     setInterval(updateRelativeTimes, 30_000);
     window.addEventListener("ot-native-share", () => takeShared());
+    window.addEventListener("ot-media-location", () => showKeepPlace(true));
+    $("#keep-place").addEventListener("change", (event) => {
+      // On: Android asks (answering with "ot-media-location"). Off: only Android's settings can.
+      if (event.target.checked) nativeApp().askMediaLocation();
+      else nativeApp().openAppSettings();
+      event.target.checked = nativeApp().mediaLocation();
+    });
+    $("#watch-pick").addEventListener("click", pickWatch);
+    $("#watch-share").addEventListener("click", shareWatchPick);
+    $("#watch-cancel").addEventListener("click", dropWatchPick);
     announceSelf()
       .then(() => poll(true))
       .finally(() => takeShared());
@@ -215,6 +240,13 @@ async function refresh() {
         renderFiles();
       }
     }
+    const watch = (await api("/api/watch")).data.files;
+    if (JSON.stringify(watch) !== JSON.stringify(state.watching)) {
+      state.watching = watch;
+      if (inInbox()) showInbox();
+      else renderFiles();
+      renderWatch();
+    }
     markOnline(true);
     if (!$("#fatal-view").hidden) showView("main");
   } catch (err) {
@@ -234,8 +266,121 @@ async function refresh() {
 
 const rows = new Map(); // name -> { el, sig }
 
-// Files received straight from another browser live in this page (a blob: URL).
+// Files received straight from another browser live in this page (a blob: URL);
+// videos shared to watch come with theirs.
 const urlFor = (file, inline = false) => file.url || fileUrl(file.name, inline);
+const watchOf = (file) => state.watching.find((w) => w.name === file.name);
+
+/** A visitor's list: files sent to this browser, then videos shared to watch. */
+function showInbox() {
+  const names = new Set(state.inbox.map((f) => f.name));
+  const files = [...state.inbox, ...state.watching.filter((f) => !names.has(f.name)).map((f) => ({ ...f, watch: true }))];
+  const sig = JSON.stringify(files.map((f) => [f.name, f.size, f.modified, f.url]));
+  if (sig === state.inboxSig) return;
+  state.inboxSig = sig;
+  state.files = files;
+  renderFiles();
+}
+
+async function toggleWatch(file) {
+  const shared = watchOf(file);
+  try {
+    if (shared) await api(`/api/watch/${shared.id}`, { method: "DELETE" });
+    else await api("/api/watch", { method: "POST", json: { name: file.name } });
+    const who = `Browsers that open ${state.info.share_url || "this device"}${state.info.auth?.required ? " with the PIN" : ""}`;
+    toast(shared ? `Stopped sharing “${file.name}”` : `${who} can now watch “${file.name}”`, { icon: "eye" });
+    poll(true);
+  } catch (err) {
+    toast(err.message, { tone: "error", icon: "alert" });
+  }
+}
+
+// ----------------------------------------- watch on another device (owner)
+
+const watchAddress = () => `${state.info.share_url || "this device’s address"}${state.info.auth?.required ? " with the PIN" : ""}`;
+
+/** The videos shared to watch, and the picker for one from anywhere on this computer. */
+function renderWatch() {
+  const section = $("#watch-section");
+  section.hidden = !(state.info.owner && (state.info.local_pick || state.watching.length));
+  if (section.hidden) return;
+  $("#watch-pick").hidden = !state.info.local_pick;
+  $("#watch-meta").textContent = state.watching.length ? plural(state.watching.length, "video") : "";
+  $("#watch-hint").hidden = $("#watch-list").hidden = !state.watching.length;
+  $("#watch-hint").textContent = `On another device, open ${watchAddress()} to watch.`;
+  $("#watch-list").replaceChildren(...state.watching.map(watchRow));
+}
+
+function watchRow(file) {
+  const link = new URL(file.url, state.info.share_url || location.origin).href;
+  const thumb = h("span", { class: "thumb thumb-link", "aria-hidden": "true" }, icon("video"), videoThumb(file.url));
+  thumb.style.setProperty("--kind", "var(--k-video)");
+  thumb.addEventListener("click", () => openPreview([file], 0, { urlFor: (f) => f.url }));
+  const button = (label, iconName, onclick, extra = "") =>
+    h("button", { class: `icon-btn${extra}`, type: "button", "aria-label": `${label}: ${file.name}`, title: label, onclick }, icon(iconName));
+  return h(
+    "li",
+    { class: "row", dataset: { name: file.name } },
+    thumb,
+    h("div", { class: "row-main" }, h("span", { class: "row-title", title: file.name }, file.name), h("span", { class: "row-sub" }, `${formatBytes(file.size)} · shared to watch`)),
+    h(
+      "div",
+      { class: "row-actions" },
+      button("Copy link", "link", async () => toast((await copyText(link)) ? "Link copied" : "Couldn’t copy the link", { icon: "link" })),
+      button("Stop sharing", "x", () => toggleWatch(file), " is-danger"),
+    ),
+  );
+}
+
+/** Choose a video in the system's own dialog, then watch it here before anyone else can. */
+async function pickWatch() {
+  const button = $("#watch-pick");
+  button.disabled = true;
+  try {
+    await dropWatchPick();
+    const { data } = await api("/api/watch/pick", { method: "POST" });
+    if (data.canceled) return;
+    state.picked = data;
+    const player = $("#watch-player");
+    player.src = data.url;
+    $("#watch-card-name").textContent = `${data.name} · ${formatBytes(data.size)}`;
+    $("#watch-card-note").textContent = `Only you can see it until you share it. Browsers that open ${watchAddress()} can then watch it.`;
+    $("#watch-card").hidden = false;
+    $("#watch-card").scrollIntoView({ block: "nearest" });
+    $("#watch-share").focus({ preventScroll: true });
+  } catch (err) {
+    toast(err.message, { tone: "error", icon: "alert" });
+  } finally {
+    button.disabled = false;
+  }
+}
+
+/** Close the preview, and forget a video that was chosen but never shared. */
+async function dropWatchPick() {
+  const picked = state.picked;
+  state.picked = null;
+  const player = $("#watch-player");
+  player.pause();
+  player.removeAttribute("src");
+  player.load();
+  $("#watch-card").hidden = true;
+  if (picked) await api(`/api/watch/${picked.id}`, { method: "DELETE" }).catch(() => {});
+}
+
+async function shareWatchPick() {
+  const picked = state.picked;
+  if (!picked) return;
+  try {
+    await api(`/api/watch/${picked.id}/share`, { method: "POST" });
+  } catch (err) {
+    toast(err.message, { tone: "error", icon: "alert" });
+    return;
+  }
+  state.picked = null;
+  await dropWatchPick();
+  toast(`Browsers that open ${watchAddress()} can now watch “${picked.name}”`, { icon: "eye" });
+  poll(true);
+}
 
 function buildFileRow(file) {
   const href = urlFor(file);
@@ -278,7 +423,7 @@ function buildFileRow(file) {
     openNative
       ? h("button", { class: "icon-btn is-accent", type: "button", "aria-label": `Open ${file.name}`, title: "Open", onclick: () => nativeApp().openFile(file.name) }, icon("download"))
       : h("a", { class: "icon-btn is-accent", href, download: file.name, "aria-label": `Download ${file.name}`, title: "Download" }, icon("download")),
-    (can("delete") || inInbox()) &&
+    (can("delete") || (inInbox() && !file.watch)) &&
       h(
         "button",
         { class: "icon-btn is-danger", type: "button", "aria-label": `Delete ${file.name}`, title: "Delete", onclick: () => deleteFile(file, row) },
@@ -326,7 +471,39 @@ function buildFileRow(file) {
   });
   row._file = file;
   updateRowTime(row);
+  if (file.mime === "text/plain" && file.size <= TEXT_PEEK_BYTES && file.name.toLowerCase().endsWith(".txt")) peekText(file, row);
   return row;
+}
+
+/** A short text someone sent: its first line under the name, and Open link when it holds one. */
+async function peekText(file, row) {
+  let text;
+  try {
+    text = await (await fetch(urlFor(file))).text();
+  } catch {
+    return;
+  }
+  const first = text.split("\n").map((line) => line.trim()).find(Boolean);
+  if (!first) return;
+  row.querySelector(".row-sub").before(h("span", { class: "row-text", title: first }, first));
+  const url = webLink(text);
+  if (url) {
+    const open = h("a", { class: "icon-btn is-accent", href: url, target: "_blank", rel: "noopener noreferrer", "aria-label": `Open link in ${file.name}`, title: url }, icon("link"));
+    row.querySelector(".row-actions").prepend(open);
+  }
+}
+
+/** The first http(s) address in ``text`` (never javascript:, file: or the like). */
+function webLink(text) {
+  for (const word of text.split(/\s+/)) {
+    try {
+      const url = new URL(word);
+      if (url.protocol === "http:" || url.protocol === "https:") return url.href;
+    } catch {
+      /* not an address */
+    }
+  }
+  return null;
 }
 
 function showPreview(file, trigger) {
@@ -336,6 +513,7 @@ function showPreview(file, trigger) {
 }
 
 const COPYABLE_TEXT_BYTES = 200000;
+const TEXT_PEEK_BYTES = 4096; // received texts this short show their first line in the list
 
 async function copyFileText(file) {
   try {
@@ -351,7 +529,7 @@ async function copyFileText(file) {
 function linkFor(file) {
   // Owners share their LAN address so the link works on other devices.
   const base = state.info.owner && state.info.share_url ? state.info.share_url : location.origin;
-  return new URL(fileUrl(file.name), base).href;
+  return new URL(urlFor(file), base).href;
 }
 
 async function localAction(file, action) {
@@ -369,9 +547,10 @@ function fileActions(file, row) {
   const native = nativeApp()?.openFile && owner;
   const items = [];
   if (kind) items.push({ label: "Preview", icon: "eye", run: () => showPreview(file, row.querySelector(".row-more")) });
-  if (native) items.push({ label: "Open", icon: "download", run: () => nativeApp().openFile(file.name) });
+  if (native) items.push({ label: "Open", icon: "file", run: () => nativeApp().openFile(file.name) });
   else if (owner && state.info.local_open && file.kind !== "app") items.push({ label: "Open", icon: "file", run: () => localAction(file, "open") });
   if (owner && state.info.local_open) items.push({ label: "Show in folder", icon: "folder", run: () => localAction(file, "reveal") });
+  if (owner && isVideo(file)) items.push({ label: watchOf(file) ? "Stop sharing to watch" : "Share to watch", icon: "eye", run: () => toggleWatch(file) });
   if (kind === "text" && file.size <= COPYABLE_TEXT_BYTES) items.push({ label: "Copy text", icon: "copy", run: () => copyFileText(file) });
   if (isImage(file) && navigator.clipboard?.write) {
     items.push({
@@ -397,14 +576,16 @@ function fileActions(file, row) {
       }
     },
   });
-  if (canShareFiles()) items.push({ label: "Share…", icon: "share", run: () => shareFile(urlFor(file), file) });
-  if (can("delete") || inInbox()) items.push({ label: "Delete", icon: "trash", danger: true, run: () => deleteFile(file, row) });
+  // Android's WebView has no navigator.share: the app opens the system Sharesheet.
+  if (native && nativeApp().shareFile) items.push({ label: "Share…", icon: "share", run: () => nativeApp().shareFile(file.name) });
+  else if (canShareFiles()) items.push({ label: "Share…", icon: "share", run: () => shareFile(urlFor(file), file) });
+  if (can("delete") || (inInbox() && !file.watch)) items.push({ label: "Delete", icon: "trash", danger: true, run: () => deleteFile(file, row) });
   return items;
 }
 
 function updateRowTime(row) {
   const f = row._file;
-  const where = f.direct ? (f.saved ? " · saved" : " · in this browser — save it") : "";
+  const where = f.direct ? (f.saved ? " · saved" : " · in this browser — save it") : f.watch || (libraryMode() === "owner" && watchOf(f)) ? " · shared to watch" : "";
   row.querySelector(".row-sub").textContent = `${formatBytes(f.size)} · ${relativeTime(f.modified)}${where}`;
 }
 
@@ -429,7 +610,7 @@ function renderFiles() {
 
   let cursor = list.firstElementChild;
   for (const file of visible) {
-    const sig = `${file.size}:${file.modified}`;
+    const sig = `${file.size}:${file.modified}:${Boolean(file.watch || watchOf(file))}`;
     let entry = rows.get(file.name);
     if (!entry || entry.sig !== sig) {
       const el = buildFileRow(file);
@@ -472,7 +653,8 @@ function renderFiles() {
   $("#library-sort").value = sort;
   $("#search-wrap").hidden = all.length < 6 && !term;
   const download = $("#download-all");
-  download.hidden = all.length < 2 || (term && visible.length === 0);
+  // A visitor's zip holds what was sent to them, not videos shared to watch.
+  download.hidden = (inInbox() ? all.filter((f) => !f.watch) : all).length < 2 || (term && visible.length === 0);
   const query = term ? visible.map((f) => `name=${encodeURIComponent(f.name)}`).join("&") : "";
   download.href = inInbox() ? "/api/inbox/archive" : `/api/archive${query ? `?${query}` : ""}`;
   download.querySelector("span").textContent = term ? `Download ${visible.length}` : "Download all";
@@ -652,7 +834,7 @@ async function startChunkedUpload(t) {
   // Big files go up in parallel chunks (3 in flight): a Wi-Fi hiccup loses
   // the in-flight pieces, not the whole file. Pausing aborts the workers but
   // keeps the upload id, so resuming continues where it stopped.
-  t.uploadId = t.uploadId || newUploadId();
+  t.uploadId = t.uploadId || resumableId(t.file);
   t.abort = new AbortController();
   t.samples = t.samples || [];
   const total = t.size;
@@ -685,6 +867,7 @@ async function startChunkedUpload(t) {
       },
     );
     const saved = data?.files?.[0] || null;
+    forgetUpload(t.file);
     t.state = "done";
     t.loaded = total;
     t.chunkNote = "";
@@ -759,6 +942,7 @@ function settle() {
 }
 
 function cancelOrDismiss(t) {
+  forgetUpload(t.file); // giving up: choosing the file again starts over
   if (t.state === "uploading" || t.state === "paused" || t.state === "pausing") {
     t.wantCancel = true;
     if (t.xhr) t.xhr.abort();
@@ -1004,6 +1188,17 @@ function setupDropAndPaste() {
 
   document.addEventListener("paste", (event) => {
     if (event.target.closest?.("input, textarea, [contenteditable]") || !canDrop()) return;
+    if (document.querySelector("dialog[open]")) {
+      // Never queue a send behind a sheet. On "Enter a code", the paste is the code.
+      const code = $("#pair-input");
+      if (code?.offsetParent) {
+        event.preventDefault();
+        code.value = event.clipboardData?.getData("text/plain") || "";
+        code.dispatchEvent(new Event("input"));
+        code.focus();
+      }
+      return;
+    }
     const files = [...(event.clipboardData?.files || [])];
     if (files.length) {
       event.preventDefault();
@@ -1034,30 +1229,61 @@ async function takeShared() {
     return;
   }
   const items = Array.isArray(shared?.files) ? shared.files : [];
-  if (!items.length) return;
-  const total = items.reduce((n, item) => n + Math.max(0, Number(item.size) || 0), 0);
-  if (total > 20_000_000) toast(`Getting ${plural(items.length, "shared file")} ready…`, { icon: "clock" });
+  // Text, links and captions (EXTRA_TEXT, EXTRA_SUBJECT, ClipData text): a .txt file.
+  const text = typeof shared?.text === "string" ? shared.text : "";
+  if (!items.length && !text) return;
+  // Big files are read as they're sent (byte ranges), not copied in first: 3.1 GB of
+  // videos took minutes to show up. Small ones, and an app without ranges, are copied.
+  const big = (item) => shouldChunk(Number(item.size) || 0);
+  const copied = items.filter((item) => !big(item)).reduce((n, item) => n + Math.max(0, Number(item.size) || 0), 0);
+  if (copied > 20_000_000) toast(`Getting ${plural(items.length, "shared file")} ready…`, { icon: "clock" });
   const files = [];
   let failed = 0;
   for (const item of items) {
     try {
       if (!SHARED_URL.test(String(item.url))) throw new Error("not a shared file");
-      const res = await fetch(item.url, { cache: "no-store" });
+      const res = await fetch(item.url, { cache: "no-store", headers: big(item) ? { Range: "bytes=0-0" } : {} });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      if (res.status === 206) {
+        files.push(sharedFile(item));
+        continue;
+      }
       const blob = await res.blob();
       files.push(new File([blob], String(item.name || "Shared file"), { type: item.mime || blob.type }));
     } catch {
       failed += 1;
     }
   }
+  if (text && (await confirmSensitive(text))) files.push(textFile(text, /https?:\/\/\S/.test(text) ? "Link" : "Shared text"));
   if (failed) toast(`Couldn’t read ${plural(failed, "shared file")}`, { tone: "error", icon: "alert" });
-  enqueueFiles(files, { source: "share" });
+  if (files.length) enqueueFiles(files, { source: "share" });
 }
+
+/**
+ * A big shared file the app keeps serving: like a File, but ``slice`` reads that range
+ * from the app when it's sent (and is async: callers ``await`` it).
+ */
+const sharedFile = ({ url, name, mime, size }) => ({
+  url,
+  name: String(name || "Shared file"),
+  size: Number(size),
+  type: mime || "application/octet-stream",
+  lastModified: Date.now(),
+  async slice(start, end) {
+    const last = Math.min(end, this.size) - 1;
+    const res = await fetch(url, { cache: "no-store", headers: { Range: `bytes=${start}-${last}` } });
+    const blob = res.status === 206 ? await res.blob() : null;
+    if (blob?.size !== last - start + 1) throw new Error(`Couldn’t read ${this.name} any more. Share it again.`);
+    return blob;
+  },
+});
+
+const textFile = (text, label) => new File([text.replace(/\r\n/g, "\n")], `${label} ${stamp()}.txt`, { type: "text/plain" });
 
 /** Text to send, as a .txt file; private-looking text asks first. */
 async function sendText(text, label) {
   if (!(await confirmSensitive(text))) return;
-  enqueueFiles([new File([text.replace(/\r\n/g, "\n")], `${label} ${stamp()}.txt`, { type: "text/plain" })]);
+  enqueueFiles([textFile(text, label)]);
 }
 
 /** Send what's on the clipboard: an image as is, text as a .txt file. */
@@ -1209,12 +1435,8 @@ function boot() {
     droppedFiles,
     libraryChanged: (inbox) => {
       if (inbox && inInbox()) {
-        const sig = JSON.stringify(inbox.map((f) => [f.name, f.size, f.modified]));
-        if (sig !== state.inboxSig) {
-          state.inboxSig = sig;
-          state.files = inbox;
-          renderFiles();
-        }
+        state.inbox = inbox;
+        showInbox();
       } else if (!inbox) {
         state.etag = null;
       }

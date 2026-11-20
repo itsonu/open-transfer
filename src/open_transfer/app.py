@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import hashlib
+import hmac
 import io
 import ipaddress
 import logging
-import os
+import mimetypes
 import secrets
 import time
 from collections import OrderedDict
@@ -32,7 +33,7 @@ from flask import (
 from werkzeug.exceptions import ClientDisconnected, HTTPException
 from werkzeug.middleware.proxy_fix import ProxyFix
 
-from open_transfer import __version__, network, opener
+from open_transfer import __version__, keystore, network, opener, picker
 from open_transfer.archive import zip_stream
 from open_transfer.config import Config
 from open_transfer.mesh import Mesh, Viewer, visitor_identity
@@ -48,7 +49,7 @@ from open_transfer.security import (
     same_origin,
 )
 from open_transfer.serve import FILE_CSP, serve_file
-from open_transfer.storage import IncompleteUpload, InvalidName, Storage, StorageError
+from open_transfer.storage import FileInfo, IncompleteUpload, InvalidName, Storage, StorageError
 
 log = logging.getLogger("open_transfer")
 
@@ -65,23 +66,8 @@ PUBLIC_ENDPOINTS = {
 }
 
 
-def _load_secret(state_dir: Path) -> bytes:
-    """Keep the session key across restarts so PIN logins survive them."""
-    path = state_dir / "secret"
-    try:
-        data = path.read_bytes()
-        if len(data) >= 32:
-            return data
-    except OSError:
-        log.debug("no stored session secret yet; creating one")
-    data = secrets.token_bytes(32)
-    try:
-        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-        with os.fdopen(fd, "wb") as fh:
-            fh.write(data)
-    except OSError:  # read-only volume: fall back to a per-process key
-        log.debug("could not persist session secret", exc_info=True)
-    return data
+JOIN_TTL = 600  # seconds a QR code lets browsers in without the PIN
+DRAIN_MAX = 1 << 20  # unread request bytes read before answering (see finish)
 
 
 def create_app(config: Config | None = None) -> Flask:
@@ -94,7 +80,7 @@ def create_app(config: Config | None = None) -> Flask:
     mesh = Mesh(config, storage)
     app = Flask(__name__, static_folder="static", template_folder="templates")
     app.config.update(
-        SECRET_KEY=_load_secret(config.state_path),
+        SECRET_KEY=keystore.session_secret(config.state_path),
         SESSION_COOKIE_NAME="open_transfer",
         SESSION_COOKIE_SAMESITE="Lax",
         SESSION_COOKIE_HTTPONLY=True,
@@ -167,7 +153,13 @@ def create_app(config: Config | None = None) -> Flask:
             session["wid"] = vid
         trusted = session.get("wtrust") == mesh.id
         mesh.touch_visitor(
-            vid, name=name, form=form, platform=plat, address=client_id(), trusted=trusted
+            vid,
+            name=name,
+            form=form,
+            platform=plat,
+            address=client_id(),
+            trusted=trusted,
+            secure=request.scheme == "https",
         )
         return Viewer("visitor", vid, name, form, plat, trusted)
 
@@ -199,7 +191,9 @@ def create_app(config: Config | None = None) -> Flask:
             return config.public_url
         host, port = request_host_port()
         if host in {"localhost", "127.0.0.1", "::1", "0.0.0.0"}:
-            host = network.primary_ip() or host
+            host = next(iter(network.lan_ips()), None) or host  # a hotspot's own, too
+        if https_port := app.config.get("OT_HTTPS_PORT"):  # --https: browsers come in over TLS
+            return f"https://{f'[{host}]' if ':' in host else host}:{https_port}"
         return origin_for(host, port)
 
     def all_urls() -> list[str]:
@@ -207,11 +201,34 @@ def create_app(config: Config | None = None) -> Flask:
         if not config.public_url:
             # LAN addresses reach the server directly, so use the listen port.
             port = int(app.config.get("OT_PORT") or request_host_port()[1])
-            urls += [f"http://{ip}:{port}" for ip in network.lan_ips()]
+            if https_port := app.config.get("OT_HTTPS_PORT"):
+                urls += [f"https://{ip}:{https_port}" for ip in network.lan_ips()]
+            else:
+                urls += [f"http://{ip}:{port}" for ip in network.lan_ips()]
         return list(dict.fromkeys(urls))
 
     def client_id() -> str:
         return log_safe(request.remote_addr or "unknown")
+
+    def join_token() -> str:
+        """For QR codes: lets a browser in instead of the PIN, for JOIN_TTL only.
+
+        ``<expiry>.<mac>``: the MAC covers the expiry and the current PIN, so a
+        photographed QR code stops working after 10 minutes (or when the PIN
+        changes), and can't be extended or forged. The PIN itself is never in it.
+        """
+        expires = int(time.time() + JOIN_TTL)
+        return f"{expires}.{join_mac(expires)}"
+
+    def join_mac(expires: int) -> str:
+        message = f"open-transfer-join|{expires}|{pin_digest}".encode()
+        return hmac.new(app.secret_key, message, hashlib.sha256).hexdigest()[:32]  # type: ignore[arg-type]
+
+    def join_token_valid(token: str) -> bool:
+        expires, _, mac = token.partition(".")
+        if not expires.isdigit() or int(expires) < time.time():
+            return False
+        return hmac.compare_digest(join_mac(int(expires)), mac)
 
     def check_pin(supplied: str) -> float | bool:
         """``True`` if right, ``False`` if wrong, or seconds to wait if rate-limited."""
@@ -238,6 +255,7 @@ def create_app(config: Config | None = None) -> Flask:
             "owner": owner,
             # Only the device's own window can open files on it.
             "local_open": owner and opener.available(),
+            "local_pick": owner and picker.available(),
             "auth": {
                 "required": bool(config.pin),
                 "authenticated": authed,
@@ -271,7 +289,7 @@ def create_app(config: Config | None = None) -> Flask:
     # ------------------------------------------------------------- middleware
 
     @app.before_request
-    def guard() -> Response | None:
+    def guard() -> Any:
         g.started = time.perf_counter()
         if not host_allowed(request.host, config.allowed_hosts, machine_names):
             return error(
@@ -279,6 +297,29 @@ def create_app(config: Config | None = None) -> Flask:
                 "host_not_allowed",
                 f"Requests for '{request.host}' are not accepted. "
                 "Start Open Transfer with --allow-host to permit this name.",
+            )
+        https_port = app.config.get("OT_HTTPS_PORT")
+        if (
+            https_port
+            and request.scheme == "http"
+            and request.method == "GET"
+            and not request.path.startswith("/api/")  # apps, and pages already loaded
+            and not is_owner()  # this device's own window never crosses the network
+        ):  # --https: a browser following an old http:// link goes over TLS
+            host = request_host_port()[0]
+            host = f"[{host}]" if ":" in host else host
+            return redirect(f"https://{host}:{https_port}{request.full_path.rstrip('?')}")
+        if (
+            https_port
+            and request.scheme == "http"
+            and request.path.startswith("/api/")
+            and not request.path.startswith(("/api/p2p/", "/api/sync/client/", "/api/health"))
+            and not is_owner()
+        ):  # --https: no browser data over plain HTTP, not even from a page already open
+            host = request_host_port()[0]
+            host = f"[{host}]" if ":" in host else host
+            return error(
+                403, "https_required", f"Open https://{host}:{https_port} to use this device."
             )
         if request.method not in SAFE_METHODS and not same_origin(request):
             return error(403, "cross_origin", "Cross-site requests are not allowed.")
@@ -289,6 +330,11 @@ def create_app(config: Config | None = None) -> Flask:
     @app.after_request
     def finish(response: Response) -> Response:
         apply_security_headers(response)
+        # Answered before reading the body (a 401/403)? Read it now: closing with it
+        # unread makes the OS reset the connection, and the client can lose the answer.
+        # ponytail: bigger uploads refused early still reset; reading them invites abuse.
+        if 0 < (request.content_length or 0) <= DRAIN_MAX:
+            request.stream.read()
         if request.path.startswith("/api/"):
             response.headers.setdefault("Cache-Control", "no-store")
         elif request.path.endswith((".js", ".css")):
@@ -328,12 +374,16 @@ def create_app(config: Config | None = None) -> Flask:
         supplied = request.args.get("pin")
         pair = request.args.get("pair")
         invite = request.args.get("invite")
-        if supplied is not None or pair is not None or invite is not None:
-            # QR codes embed the PIN (and the owner's pairing code) so scanning
-            # is enough to get in. Strip them from the URL straight away so
-            # they don't linger in history. Both are rate-limited.
+        join = request.args.get("join")
+        if supplied is not None or pair is not None or invite is not None or join is not None:
+            # QR codes carry a short-lived join token (and the owner's pairing
+            # code), never the PIN; a hand-typed ?pin= link still works. Strip
+            # them from the URL straight away so they don't linger in history.
             if supplied is not None and config.pin and not is_authenticated():
                 check_pin(supplied)
+            if join and config.pin and not is_authenticated() and join_token_valid(join):
+                session.permanent = True
+                session["pin"] = pin_digest
             if (
                 pair
                 and not is_owner()
@@ -610,7 +660,7 @@ def create_app(config: Config | None = None) -> Flask:
     def qr_code() -> Response:
         url = share_url()
         if config.pin:
-            url += f"/?pin={quote(config.pin)}"
+            url += f"/?join={join_token()}"  # 10 minutes, never the PIN itself
         buffer = io.BytesIO()
         segno.make(url, error="m").save(
             buffer, kind="svg", scale=8, border=0, dark="#000", light=None
@@ -629,6 +679,92 @@ def create_app(config: Config | None = None) -> Flask:
         if request.method == "GET" and not request.range and attachment:
             log.info("Sent %s to %s", log_safe(path.name), client_id())
         return response
+
+    # ------------------------------------------------------- watch in the browser
+
+    # Videos the owner shares to watch (token → where it is, and whether visitors may
+    # see it yet): visitors stream them with Range requests, without the folder being
+    # shared or the file sent. A video chosen from anywhere on this computer waits
+    # unshared while its owner previews it.
+    # ponytail: in memory, so sharing ends when the app quits; persist if people ask.
+    watching: dict[str, dict[str, Any]] = {}
+
+    def watch_entry(token: str, path: Path) -> dict[str, Any]:
+        return {**FileInfo.from_path(path).to_dict(), "id": token, "url": f"/api/watch/{token}"}
+
+    def watch_list(*, everything: bool = False) -> list[dict[str, Any]]:
+        listed: dict[str, dict[str, Any]] = {}  # one per name: the list is keyed by it
+        for token, share in list(watching.items()):
+            if (share["public"] or everything) and share["path"].is_file():
+                listed.setdefault(share["path"].name, watch_entry(token, share["path"]))
+        return list(listed.values())
+
+    def watch_owner_only() -> Any:
+        if not is_owner():
+            return error(403, "owner_only", "Only the person using this device can do that.")
+        return None
+
+    def is_video_name(name: str) -> bool:
+        return (mimetypes.guess_type(name)[0] or "").startswith("video/")
+
+    @app.get("/api/watch")
+    def watch_index() -> Response:
+        return jsonify(
+            {"files": watch_list(everything=is_owner() and request.args.get("all") == "1")}
+        )
+
+    @app.post("/api/watch")
+    def watch_share() -> Any:
+        if denied := watch_owner_only():
+            return denied
+        path = storage.resolve(str((request.get_json(silent=True) or {}).get("name", "")))
+        if not is_video_name(path.name):
+            return error(400, "not_a_video", "Only videos can be shared to watch.")
+        token = next((t for t, s in list(watching.items()) if s["path"] == path), None)
+        token = token or secrets.token_urlsafe(12)
+        watching[token] = {"path": path, "public": True}
+        log.info("Sharing %s to watch", log_safe(path.name))
+        return jsonify({"id": token}), 201
+
+    @app.post("/api/watch/pick")
+    def watch_pick() -> Any:
+        """Choose a video anywhere on this computer. Not shared until ``share`` is called."""
+        if denied := watch_owner_only():
+            return denied
+        if not picker.available():
+            return error(501, "no_picker", "This computer can’t show a file dialog.")
+        path = picker.pick_video()
+        if path is None:
+            return jsonify({"canceled": True})
+        if not path.is_file() or not is_video_name(path.name):
+            return error(400, "not_a_video", "Only videos can be shared to watch.")
+        token = secrets.token_urlsafe(12)
+        watching[token] = {"path": path.resolve(), "public": False}
+        return jsonify(watch_entry(token, path)), 201
+
+    @app.post("/api/watch/<token>/share")
+    def watch_publish(token: str) -> Any:
+        if denied := watch_owner_only():
+            return denied
+        if token not in watching:
+            abort(404, "This video isn’t there any more.")
+        watching[token]["public"] = True
+        log.info("Sharing %s to watch", log_safe(watching[token]["path"].name))
+        return jsonify({"ok": True})
+
+    @app.delete("/api/watch/<token>")
+    def watch_stop(token: str) -> Any:
+        if denied := watch_owner_only():
+            return denied
+        watching.pop(token, None)
+        return jsonify({"ok": True})
+
+    @app.get("/api/watch/<token>")
+    def watch_stream(token: str) -> Response:
+        share = watching.get(token)
+        if not share or not (share["public"] or is_owner()) or not share["path"].is_file():
+            abort(404, "This video isn’t shared any more.")
+        return serve_file(share["path"], inline=True)
 
     @app.post("/api/files/<path:name>/<any(open, reveal):action>")
     def open_locally(name: str, action: str) -> Response:
@@ -656,5 +792,6 @@ def create_app(config: Config | None = None) -> Flask:
         client=client_id,
         file_csp=FILE_CSP,
         share_url=share_url,
+        join_token=join_token,
     )
     return app
